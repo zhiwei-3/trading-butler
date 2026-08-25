@@ -1,4 +1,5 @@
 def find_swing_points(df, left=2, right=2):
+    """Identifies fractal swing highs/lows."""
     highs, lows = df['high'].values, df['low'].values
     n = len(df)
     swing_highs, swing_lows = [], []
@@ -10,6 +11,7 @@ def find_swing_points(df, left=2, right=2):
     return swing_highs, swing_lows
 
 def detect_market_structure(df, lookback=60, left=2, right=2):
+    """Detects SMC Break of Structure (BOS)."""
     recent_df = df.iloc[-lookback:].reset_index(drop=True)
     swing_highs, swing_lows = find_swing_points(recent_df, left, right)
     if not swing_highs or not swing_lows:
@@ -22,6 +24,7 @@ def detect_market_structure(df, lookback=60, left=2, right=2):
     return None
 
 def detect_liquidity_sweeps(df, swing_highs, swing_lows):
+    """Detects wick sweeps past recent swing extremes."""
     if len(df) < 2 or not swing_highs or not swing_lows:
         return {"bullish_sweep": False, "bearish_sweep": False}
     latest = df.iloc[-1]
@@ -33,6 +36,7 @@ def detect_liquidity_sweeps(df, swing_highs, swing_lows):
     return {"bullish_sweep": bullish_sweep, "bearish_sweep": bearish_sweep}
 
 def detect_fvg(df):
+    """Detects 3-candle Fair Value Gaps."""
     if len(df) < 3:
         return {"bullish_fvg": False, "bearish_fvg": False, "gap_size": 0.0}
     c1, c3 = df.iloc[-3], df.iloc[-1]

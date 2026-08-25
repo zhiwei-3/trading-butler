@@ -42,6 +42,7 @@ ALERT_STATE = {
     "rsi_buy_threshold": 40.0,
     "rsi_sell_threshold": 60.0,
 
+    # --- Dynamic ATR Risk Multipliers ---
     "sl_atr_mult": 1.5,
     "tp1_atr_mult": 2.0,
     "tp2_atr_mult": 3.5,
@@ -65,6 +66,7 @@ ALERT_STATE = {
     "consecutive_mt5_failures": 0,
 }
 
+# Total score sum: 100 points
 CONFLUENCE_WEIGHTS = {
     "rsi_zone": 15,
     "ema_trend": 10,

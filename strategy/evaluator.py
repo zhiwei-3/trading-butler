@@ -9,12 +9,9 @@ from strategy.indicators import (
 )
 
 def score_label(score):
-    if score >= 80:
-        return "🔥 Very Strong"
-    if score >= 65:
-        return "✅ Strong"
-    if score >= 50:
-        return "⚠️ Moderate"
+    if score >= 80: return "🔥 Very Strong"
+    if score >= 65: return "✅ Strong"
+    if score >= 50: return "⚠️ Moderate"
     return "❌ Weak"
 
 def compute_confluence_score(direction, rsi_val, structure, sweeps, fvg, vol_filter_ok, macd_bias,
@@ -107,6 +104,7 @@ def evaluate_signals(a):
 
     signals_found, watch_found = [], []
 
+    # Dynamic ATR Distance Calculations
     sl_dist = round(atr_val * ALERT_STATE["sl_atr_mult"], 2)
     tp1_dist = round(atr_val * ALERT_STATE["tp1_atr_mult"], 2)
     tp2_dist = round(atr_val * ALERT_STATE["tp2_atr_mult"], 2)

@@ -19,6 +19,7 @@ def format_uptime(delta: timedelta) -> str:
     return " ".join(parts)
 
 def build_status_snapshot() -> str:
+    """Builds a diagnostic summary string for heartbeat pings and /status checks."""
     uptime = format_uptime(datetime.now(timezone.utc) - BOT_START_TIME)
     mt5_ok = check_mt5_alive()
     ALERT_STATE["mt5_connected"] = mt5_ok
@@ -57,6 +58,7 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
 async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
+    """Monitors active pending signals against live price ticks to log win/loss outcomes."""
     symbol = get_gold_symbol()
     if not symbol: return
     tick = mt5.symbol_info_tick(symbol)
@@ -93,16 +95,9 @@ async def mt5_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
     if not chat_id: return
     mt5_ok = check_mt5_alive()
-    was_ok = ALERT_STATE["mt5_connected"]
-
-    if mt5_ok:
-        ALERT_STATE["consecutive_mt5_failures"] = 0
-        if not was_ok:
-            ALERT_STATE["mt5_connected"] = True
-            await context.bot.send_message(chat_id=chat_id, text="✅ **MT5 CONNECTION RESTORED**", parse_mode="Markdown")
-        return
-
-    ALERT_STATE["consecutive_mt5_failures"] += 1
-    if was_ok and ALERT_STATE["consecutive_mt5_failures"] >= 2:
+    if not mt5_ok and ALERT_STATE["mt5_connected"]:
         ALERT_STATE["mt5_connected"] = False
-        await context.bot.send_message(chat_id=chat_id, text="🚨 **MT5 CONNECTION LOST!**", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=chat_id, text="🚨 **MT5 DISCONNECTED!**", parse_mode="Markdown")
+    elif mt5_ok and not ALERT_STATE["mt5_connected"]:
+        ALERT_STATE["mt5_connected"] = True
+        await context.bot.send_message(chat_id=chat_id, text="✅ **MT5 RECONNECTED!**", parse_mode="Markdown")
