@@ -151,7 +151,7 @@ def evaluate_signals(a):
             )
             signals_found.append(msg)
 
-    # Reset lockout when RSI returns to neutral (between buy_th and sell_th)
+    # Reset debounces when RSI returns to the neutral zone between buy and sell thresholds
     elif buy_th < rsi_val < sell_th:
         ALERT_STATE["last_rsi_signal"] = None
         ALERT_STATE["last_watch_signal"] = None

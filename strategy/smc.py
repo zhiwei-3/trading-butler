@@ -11,16 +11,28 @@ def find_swing_points(df, left=2, right=2):
     return swing_highs, swing_lows
 
 def detect_market_structure(df, lookback=60, left=2, right=2):
-    """Detects SMC Break of Structure (BOS)."""
+    """Detects fresh SMC Break-of-Structure (BOS)."""
+    if len(df) < lookback:
+        lookback = len(df)
     recent_df = df.iloc[-lookback:].reset_index(drop=True)
+
     swing_highs, swing_lows = find_swing_points(recent_df, left, right)
     if not swing_highs or not swing_lows:
         return None
-    last_close = recent_df['close'].iloc[-1]
-    if last_close > swing_highs[-1][1]:
+
+    last_swing_high = swing_highs[-1][1]
+    last_swing_low = swing_lows[-1][1]
+    
+    # Verify the break occurred on the current or previous candle while earlier candles stayed inside range
+    c_curr = recent_df['close'].iloc[-1]
+    c_prev = recent_df['close'].iloc[-2]
+    c_prior = recent_df['close'].iloc[-3]
+
+    if c_curr > last_swing_high and c_prior <= last_swing_high:
         return "BULLISH_BOS"
-    if last_close < swing_lows[-1][1]:
+    if c_curr < last_swing_low and c_prior >= last_swing_low:
         return "BEARISH_BOS"
+        
     return None
 
 def detect_liquidity_sweeps(df, swing_highs, swing_lows):

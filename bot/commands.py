@@ -127,15 +127,19 @@ async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(args) < 3:
             await update.message.reply_text("⚠️ **Usage:** `/calc <balance> <risk_pct> <sl_pips>`", parse_mode="Markdown")
             return
+
         balance, risk_pct, sl_pips = float(args[0]), float(args[1]), float(args[2])
-        risk_amount = balance * (risk_pct / 100)
-        pip_value_per_lot = 10.0  # $10 per pip per 1.0 lot on XAUUSD
+        risk_amount = balance * (risk_pct / 100.0)
+        
+        # XAUUSD Standard Lot = 100 oz -> 1 pip ($0.10) = $10 per 1.0 lot
+        pip_value_per_lot = 10.0
         lot_size = round(risk_amount / (sl_pips * pip_value_per_lot), 2)
+
         reply = (
-            f"🧮 **POSITION RISK CALCULATOR**\n\n"
+            f"🧮 **POSITION RISK CALCULATOR (XAUUSD)**\n\n"
             f"• **Balance:** `${balance:,.2f}`\n"
             f"• **Risk Target ({risk_pct}%):** `${risk_amount:,.2f}`\n"
-            f"• **Stop Loss:** `{sl_pips} pips`\n\n"
+            f"• **Stop Loss:** `{sl_pips} pips` (${sl_pips/10:.2f} move)\n\n"
             f"🎯 **Recommended Lot Size:** `{max(lot_size, 0.01)}` Lots"
         )
         await update.message.reply_text(reply, parse_mode="Markdown")
