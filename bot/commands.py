@@ -129,7 +129,8 @@ async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         balance, risk_pct, sl_pips = float(args[0]), float(args[1]), float(args[2])
         risk_amount = balance * (risk_pct / 100)
-        lot_size = round(risk_amount / (sl_pips * 1.0), 2)
+        pip_value_per_lot = 10.0  # $10 per pip per 1.0 lot on XAUUSD
+        lot_size = round(risk_amount / (sl_pips * pip_value_per_lot), 2)
         reply = (
             f"🧮 **POSITION RISK CALCULATOR**\n\n"
             f"• **Balance:** `${balance:,.2f}`\n"

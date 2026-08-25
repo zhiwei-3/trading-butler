@@ -151,7 +151,9 @@ def evaluate_signals(a):
             )
             signals_found.append(msg)
 
-    elif (buy_th + ALERT_STATE["watch_rsi_margin"]) < rsi_val < (sell_th - ALERT_STATE["watch_rsi_margin"]):
+    # Reset lockout when RSI returns to neutral (between buy_th and sell_th)
+    elif buy_th < rsi_val < sell_th:
         ALERT_STATE["last_rsi_signal"] = None
+        ALERT_STATE["last_watch_signal"] = None
 
     return signals_found, watch_found
