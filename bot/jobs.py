@@ -19,7 +19,6 @@ def format_uptime(delta: timedelta) -> str:
     return " ".join(parts)
 
 def build_status_snapshot() -> str:
-    """Builds a diagnostic summary string for heartbeat pings and /status checks."""
     uptime = format_uptime(datetime.now(timezone.utc) - BOT_START_TIME)
     mt5_ok = check_mt5_alive()
     ALERT_STATE["mt5_connected"] = mt5_ok
@@ -58,7 +57,6 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
 async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
-    """Monitors active pending signals against live price ticks to log win/loss outcomes."""
     symbol = get_gold_symbol()
     if not symbol: return
     tick = mt5.symbol_info_tick(symbol)
@@ -95,9 +93,28 @@ async def mt5_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
     if not chat_id: return
     mt5_ok = check_mt5_alive()
-    if not mt5_ok and ALERT_STATE["mt5_connected"]:
+    was_ok = ALERT_STATE["mt5_connected"]
+
+    if mt5_ok:
+        ALERT_STATE["consecutive_mt5_failures"] = 0
+        if not was_ok:
+            ALERT_STATE["mt5_connected"] = True
+            await context.bot.send_message(chat_id=chat_id, text="✅ **MT5 CONNECTION RESTORED**\n\nThe bot has reconnected to MT5. Scanning and signals have resumed.", parse_mode="Markdown")
+        return
+
+    ALERT_STATE["consecutive_mt5_failures"] += 1
+    if was_ok and ALERT_STATE["consecutive_mt5_failures"] >= 2:
         ALERT_STATE["mt5_connected"] = False
-        await context.bot.send_message(chat_id=chat_id, text="🚨 **MT5 DISCONNECTED!**", parse_mode="Markdown")
-    elif mt5_ok and not ALERT_STATE["mt5_connected"]:
-        ALERT_STATE["mt5_connected"] = True
-        await context.bot.send_message(chat_id=chat_id, text="✅ **MT5 RECONNECTED!**", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=chat_id, text="🚨 **MT5 CONNECTION LOST!**\n\nThe bot can't reach the MT5 terminal. Signal generation is effectively paused.", parse_mode="Markdown")
+
+def ensure_watchdog_running(job_queue, chat_id):
+    if not job_queue.get_jobs_by_name("mt5_watchdog"):
+        job_queue.run_repeating(mt5_watchdog_job, interval=90, first=15, chat_id=chat_id, name="mt5_watchdog")
+
+def restart_heartbeat_job(job_queue, chat_id):
+    for job in job_queue.get_jobs_by_name("heartbeat_ping"):
+        job.schedule_removal()
+    ALERT_STATE["heartbeat_chat_id"] = chat_id
+    if ALERT_STATE["heartbeat_enabled"]:
+        interval_seconds = ALERT_STATE["heartbeat_interval_hours"] * 3600
+        job_queue.run_repeating(heartbeat_job, interval=interval_seconds, first=10, chat_id=chat_id, name="heartbeat_ping")
