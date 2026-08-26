@@ -1,4 +1,5 @@
-from telegram.ext import Application, CommandHandler
+import logging
+from telegram.ext import Application, CommandHandler, ContextTypes
 from config import TELEGRAM_TOKEN, YOUR_CHAT_ID
 from database import init_db
 from mt5_engine import init_mt5
@@ -9,6 +10,10 @@ from bot.commands import (
     heartbeat_cmd, status_cmd, diagnose_cmd, stats_cmd
 )
 from bot.jobs import market_scanner_job, signal_outcome_tracker_job
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Logs uncaught exceptions raised by command handlers."""
+    logging.error("Exception occurred while handling an update:", exc_info=context.error)
 
 def main():
     if not TELEGRAM_TOKEN:
@@ -23,7 +28,10 @@ def main():
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Register All 16 Command Handlers
+    # Register Global Error Handler
+    app.add_error_handler(error_handler)
+
+    # Register All Command Handlers
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("scanner_on", enable_scanner))
     app.add_handler(CommandHandler("scanner_off", disable_scanner))
@@ -44,11 +52,23 @@ def main():
     # Auto-start Background Jobs
     if YOUR_CHAT_ID:
         boot_id = int(YOUR_CHAT_ID)
-        app.job_queue.run_repeating(market_scanner_job, interval=60, first=5, chat_id=boot_id)
-        app.job_queue.run_repeating(signal_outcome_tracker_job, interval=30, first=10, chat_id=boot_id)
+        app.job_queue.run_repeating(
+            market_scanner_job, 
+            interval=60, 
+            first=5, 
+            chat_id=boot_id, 
+            job_kwargs={"misfire_grace_time": 30}
+        )
+        app.job_queue.run_repeating(
+            signal_outcome_tracker_job, 
+            interval=30, 
+            first=10, 
+            chat_id=boot_id, 
+            job_kwargs={"misfire_grace_time": 30}
+        )
         print(f"✅ Background jobs running for Chat ID: {boot_id}")
 
-    print("🚀 Trading Butler running polling loop with all commands restored!")
+    print("🚀 Trading Butler running polling loop with error handling active!")
     app.run_polling()
 
 if __name__ == '__main__':

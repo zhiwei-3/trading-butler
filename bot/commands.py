@@ -76,8 +76,18 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    events = fetch_economic_events(impact_level=impact, currency="USD")
-    if not events:
+    events = await fetch_economic_events(impact_level=impact, currency="USD")
+    
+    # Handle API Network Drop
+    if events is None:
+        await update.message.reply_text(
+            "📡 **Network Error:** Unable to reach economic calendar server. Please try again in a few moments.", 
+            parse_mode="Markdown"
+        )
+        return
+
+    # Handle Actual 0 Events Case
+    if len(events) == 0:
         await update.message.reply_text(
             f"🟢 **No `{impact.upper()}` impact USD events found for this week.**", 
             parse_mode="Markdown"

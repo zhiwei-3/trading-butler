@@ -1,21 +1,77 @@
 import logging
+import asyncio
+import json
+import subprocess
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from telegram.ext import ContextTypes
 from config import ALERT_STATE
 
-def fetch_economic_events(impact_level="high", currency="USD"):
-    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-    try:
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            return []
-        calendar = resp.json()
-    except Exception as e:
-        logging.error(f"News Fetch Error: {e}")
-        return []
+# In-Memory Cache Variables
+_NEWS_CACHE = None
+_LAST_FETCH_TIME = None
+_CACHE_DURATION = timedelta(minutes=15)
 
-    # Clean and normalize search filters
+def _fetch_via_curl(url):
+    """Fallback fetcher using native system curl to bypass Python OpenSSL TLS blocks."""
+    try:
+        cmd = [
+            "curl", "-s", "-L",
+            "--max-time", "8",
+            "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "-H", "Accept: application/json",
+            url
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        if result.stdout:
+            return json.loads(result.stdout)
+    except Exception as e:
+        logging.error(f"curl Fallback Error: {e}")
+    return None
+
+def _fetch_calendar_sync():
+    """Synchronous HTTP fetcher with curl fallback and 15-minute caching."""
+    global _NEWS_CACHE, _LAST_FETCH_TIME
+    now = datetime.now(timezone.utc)
+
+    # Return cached data if still valid
+    if _NEWS_CACHE is not None and _LAST_FETCH_TIME and (now - _LAST_FETCH_TIME) < _CACHE_DURATION:
+        return _NEWS_CACHE
+
+    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+    }
+
+    data = None
+    # Primary Attempt: Python requests
+    try:
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+    except Exception as e:
+        logging.warning(f"Primary requests fetch failed ({e}). Attempting curl fallback...")
+
+    # Secondary Attempt: System curl fallback (bypasses SSL EOF issues)
+    if not data:
+        data = _fetch_via_curl(url)
+
+    # Update cache if successful
+    if data:
+        _NEWS_CACHE = data
+        _LAST_FETCH_TIME = now
+        return _NEWS_CACHE
+
+    # Return stale cache during total outages if available
+    return _NEWS_CACHE if _NEWS_CACHE is not None else None
+
+async def fetch_economic_events(impact_level="high", currency="USD"):
+    """Asynchronous fetcher returning filtered economic events or None on failure."""
+    calendar = await asyncio.to_thread(_fetch_calendar_sync)
+    if calendar is None:
+        return None
+
     target_impact = str(impact_level).strip().lower()
     target_currency = str(currency).strip().upper()
 
@@ -24,10 +80,7 @@ def fetch_economic_events(impact_level="high", currency="USD"):
         ev_country = str(ev.get("country", "")).strip().upper()
         ev_impact = str(ev.get("impact", "")).strip().lower()
 
-        # Check currency match
         currency_match = (target_currency == "ALL" or ev_country == target_currency)
-        
-        # Check impact match
         impact_match = (target_impact == "all" or ev_impact == target_impact)
 
         if currency_match and impact_match:
@@ -36,7 +89,7 @@ def fetch_economic_events(impact_level="high", currency="USD"):
     return filtered_events
 
 async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
-    events = fetch_economic_events(impact_level="high", currency="USD")
+    events = await fetch_economic_events(impact_level="high", currency="USD")
     if not events:
         return False
 
