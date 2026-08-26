@@ -1,0 +1,21 @@
+{
+    "scanner_enabled": true,
+    "max_allowed_spread_pips": 30.0,
+    "timeframe_mode": "scalp",
+    "require_structure_break": true,
+    "require_volume_atr_filter": true,
+    "atr_multiplier": 1.0,
+    "volume_multiplier": 1.2,
+    "rsi_buy_threshold": 40.0,
+    "rsi_sell_threshold": 60.0,
+    "sl_atr_mult": 1.5,
+    "tp1_atr_mult": 2.0,
+    "tp2_atr_mult": 3.5,
+    "min_confluence_score": 35,
+    "setup_forming_enabled": true,
+    "watch_rsi_margin": 10,
+    "watch_score_margin": 25,
+    "heartbeat_enabled": true,
+    "heartbeat_interval_hours": 1,
+    "heartbeat_chat_id": 6994380411
+}

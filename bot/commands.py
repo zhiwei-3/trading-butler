@@ -176,14 +176,25 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_utc = datetime.now(timezone.utc)
     ch = now_utc.hour
+
+    # Session UTC Hours (Approximate standard market hours)
+    sydney = (22 <= ch or ch < 7)
+    tokyo = (0 <= ch < 9)
     london = (8 <= ch < 17)
     ny = (13 <= ch < 22)
 
+    # Volatility / Overlap flags
+    london_ny_overlap = london and ny
+    asian_session = tokyo or sydney
+
     reply = (
-        f"🕒 **SESSIONS (UTC: {now_utc.strftime('%H:%M')})**\n\n"
+        f"🕒 **GLOBAL MARKET SESSIONS (UTC: {now_utc.strftime('%H:%M')})**\n\n"
+        f"🇦🇺 **Sydney:** {'OPEN 🟢' if sydney else 'CLOSED 🔴'}\n"
+        f"🇯🇵 **Tokyo (Asian):** {'OPEN 🟢' if tokyo else 'CLOSED 🔴'}\n"
         f"🇬🇧 **London:** {'OPEN 🟢' if london else 'CLOSED 🔴'}\n"
-        f"🇺🇸 **New York:** {'OPEN 🟢' if ny else 'CLOSED 🔴'}\n"
-        f"{'⚡ **HIGH VOLATILITY OVERLAP!**' if london and ny else ''}"
+        f"🇺🇸 **New York:** {'OPEN 🟢' if ny else 'CLOSED 🔴'}\n\n"
+        f"{'⚡ **HIGH VOLATILITY OVERLAP! (London + NY)**' if london_ny_overlap else ''}"
+        f"{'😴 **ASIAN CONSOLIDATION PHASE (Low Volatility for Gold)**' if asian_session and not (london or ny) else ''}"
     )
     await update.message.reply_text(reply, parse_mode="Markdown")
 
