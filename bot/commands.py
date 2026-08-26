@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
+from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS, save_settings
 from database import get_signal_stats
 from mt5_engine import get_gold_symbol, fetch_candles
 from news_engine import fetch_economic_events
@@ -21,6 +21,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_watchdog_running(context.job_queue, chat_id)
     if not ALERT_STATE["heartbeat_chat_id"]:
         restart_heartbeat_job(context.job_queue, chat_id)
+        save_settings()
     await update.message.reply_text(
         "🤵‍♂️ **Trading Butler Online (Full Stack Modular)**\n\n"
         "• `/scanner_on` / `/scanner_off` - Toggle Market Scanner\n"
@@ -44,6 +45,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def enable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ALERT_STATE["scanner_enabled"] = True
+    save_settings()
     current_jobs = context.job_queue.get_jobs_by_name("xauusd_scanner")
     for job in current_jobs:
         job.schedule_removal()
@@ -56,6 +58,7 @@ async def enable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def disable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ALERT_STATE["scanner_enabled"] = False
+    save_settings()
     current_jobs = context.job_queue.get_jobs_by_name("xauusd_scanner")
     for job in current_jobs:
         job.schedule_removal()
@@ -127,14 +130,11 @@ async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(args) < 3:
             await update.message.reply_text("⚠️ **Usage:** `/calc <balance> <risk_pct> <sl_pips>`", parse_mode="Markdown")
             return
-
         balance, risk_pct, sl_pips = float(args[0]), float(args[1]), float(args[2])
         risk_amount = balance * (risk_pct / 100.0)
-        
-        # XAUUSD Standard Lot = 100 oz -> 1 pip ($0.10) = $10 per 1.0 lot
+
         pip_value_per_lot = 10.0
         lot_size = round(risk_amount / (sl_pips * pip_value_per_lot), 2)
-
         reply = (
             f"🧮 **POSITION RISK CALCULATOR (XAUUSD)**\n\n"
             f"• **Balance:** `${balance:,.2f}`\n"
@@ -200,6 +200,7 @@ async def set_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ALERT_STATE["trend_tf"] = preset["trend"]
     ALERT_STATE["macro_tf"] = preset["macro"]
     ALERT_STATE["last_rsi_signal"] = None
+    save_settings()
     await update.message.reply_text(f"✅ Timeframe set to `{mode.upper()}` ({preset['label']})", parse_mode="Markdown")
 
 async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -218,10 +219,12 @@ async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         key, value = args[0].lower(), args[1].lower()
         if key == "structure" and value in ("on", "off"):
             ALERT_STATE["require_structure_break"] = (value == "on")
+            save_settings()
             await update.message.reply_text(f"✅ Structure filter **{value.upper()}**", parse_mode="Markdown")
             return
         elif key == "volume" and value in ("on", "off"):
             ALERT_STATE["require_volume_atr_filter"] = (value == "on")
+            save_settings()
             await update.message.reply_text(f"✅ Volume/ATR filter **{value.upper()}**", parse_mode="Markdown")
             return
     await update.message.reply_text("⚠️ Invalid format. Send `/filters` alone to see usage.", parse_mode="Markdown")
@@ -236,6 +239,7 @@ async def confluence_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = int(args[0])
         if 0 <= val <= 100:
             ALERT_STATE["min_confluence_score"] = val
+            save_settings()
             await update.message.reply_text(f"✅ Minimum confluence score set to `{val}/100`", parse_mode="Markdown")
         else: raise ValueError
     except ValueError:
@@ -257,6 +261,7 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if sub == "on": ALERT_STATE["setup_forming_enabled"] = True
     elif sub == "off": ALERT_STATE["setup_forming_enabled"] = False
     elif sub == "rsi_margin" and len(args) >= 2: ALERT_STATE["watch_rsi_margin"] = float(args[1])
+    save_settings()
     await update.message.reply_text(f"✅ Watchlist setting updated.", parse_mode="Markdown")
 
 async def heartbeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -274,9 +279,11 @@ async def heartbeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif sub == "on":
         ALERT_STATE["heartbeat_enabled"] = True
         restart_heartbeat_job(context.job_queue, chat_id)
+        save_settings()
         await update.message.reply_text("✅ Heartbeat **ON**", parse_mode="Markdown")
     elif sub == "off":
         ALERT_STATE["heartbeat_enabled"] = False
+        save_settings()
         await update.message.reply_text("🔴 Heartbeat **OFF**", parse_mode="Markdown")
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

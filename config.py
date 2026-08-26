@@ -1,4 +1,5 @@
 import os
+import json
 from datetime import datetime, timezone
 import MetaTrader5 as mt5
 from dotenv import load_dotenv
@@ -9,6 +10,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 YOUR_CHAT_ID = os.getenv("CHAT_ID", None)
 DB_FILE = "trading_butler.db"
+SETTINGS_FILE = "settings.json"
 
 BOT_START_TIME = datetime.now(timezone.utc)
 
@@ -42,7 +44,6 @@ ALERT_STATE = {
     "rsi_buy_threshold": 40.0,
     "rsi_sell_threshold": 60.0,
 
-    # --- Dynamic ATR Risk Multipliers ---
     "sl_atr_mult": 1.5,
     "tp1_atr_mult": 2.0,
     "tp2_atr_mult": 3.5,
@@ -66,7 +67,6 @@ ALERT_STATE = {
     "consecutive_mt5_failures": 0,
 }
 
-# Total score sum: 100 points
 CONFLUENCE_WEIGHTS = {
     "rsi_zone": 15,
     "ema_trend": 10,
@@ -80,3 +80,56 @@ CONFLUENCE_WEIGHTS = {
     "divergence": 5,
     "sr_zone": 5,
 }
+
+PERSISTENT_KEYS = [
+    "scanner_enabled",
+    "max_allowed_spread_pips",
+    "timeframe_mode",
+    "require_structure_break",
+    "require_volume_atr_filter",
+    "atr_multiplier",
+    "volume_multiplier",
+    "rsi_buy_threshold",
+    "rsi_sell_threshold",
+    "sl_atr_mult",
+    "tp1_atr_mult",
+    "tp2_atr_mult",
+    "min_confluence_score",
+    "setup_forming_enabled",
+    "watch_rsi_margin",
+    "watch_score_margin",
+    "heartbeat_enabled",
+    "heartbeat_interval_hours",
+    "heartbeat_chat_id",
+]
+
+def save_settings():
+    """Saves current configurable parameters to settings.json."""
+    data = {k: ALERT_STATE[k] for k in PERSISTENT_KEYS if k in ALERT_STATE}
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"⚠️ Failed to save settings: {e}")
+
+def load_settings():
+    """Loads saved settings from settings.json on startup."""
+    if not os.path.exists(SETTINGS_FILE):
+        return
+    try:
+        with open(SETTINGS_FILE, "r") as f:
+            data = json.load(f)
+        for k, v in data.items():
+            if k in ALERT_STATE:
+                ALERT_STATE[k] = v
+
+        mode = ALERT_STATE.get("timeframe_mode", "scalp")
+        if mode in TIMEFRAME_PRESETS:
+            ALERT_STATE["entry_tf"] = TIMEFRAME_PRESETS[mode]["entry"]
+            ALERT_STATE["trend_tf"] = TIMEFRAME_PRESETS[mode]["trend"]
+            ALERT_STATE["macro_tf"] = TIMEFRAME_PRESETS[mode]["macro"]
+        print("✅ Loaded persistent settings from settings.json")
+    except Exception as e:
+        print(f"⚠️ Failed to load settings: {e}")
+
+load_settings()
