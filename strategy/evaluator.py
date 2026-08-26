@@ -133,6 +133,7 @@ def analyze_market(symbol):
     sr_zones = find_sr_zones(df_macro)
 
     return {
+        "df_entry": df_entry,
         "tf_label": TIMEFRAME_PRESETS[ALERT_STATE["timeframe_mode"]]["label"],
         "close_price": close_price,
         "rsi_val": rsi_val,

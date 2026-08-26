@@ -6,6 +6,7 @@ from config import ALERT_STATE, YOUR_CHAT_ID, BOT_START_TIME, DB_FILE
 from mt5_engine import get_gold_symbol, check_mt5_alive
 from news_engine import news_guard_check
 from strategy.evaluator import analyze_market, evaluate_signals
+from strategy.chart import generate_chart_snapshot
 
 def format_uptime(delta: timedelta) -> str:
     total_seconds = int(delta.total_seconds())
@@ -53,8 +54,23 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
     analysis = analyze_market(symbol)
     if analysis:
         signals_found, watch_found = evaluate_signals(analysis)
-        for msg in signals_found + watch_found:
-            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+        
+        # Attach chart snapshot photo to executable signal alerts
+        for msg in signals_found:
+            chart_buffer = generate_chart_snapshot(
+                df=analysis["df_entry"], 
+                title=f"XAUUSD - {analysis['tf_label']}"
+            )
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=chart_buffer,
+                caption=msg,
+                parse_mode="Markdown"
+            )
+
+        # Dispatch early watch pings as text-only messages
+        for watch_msg in watch_found:
+            await context.bot.send_message(chat_id=chat_id, text=watch_msg, parse_mode="Markdown")
 
 async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     symbol = get_gold_symbol()
