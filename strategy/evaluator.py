@@ -51,6 +51,59 @@ def format_confluence_breakdown(score, breakdown):
         lines.append(f"  {check} {label}: `{earned}/{possible}`")
     return "\n".join(lines)
 
+def calculate_targets(direction, close_price, atr_val, order_block, near_zone):
+    """
+    Derives SL/TP from real market structure when available, falling back to
+    ATR multiples otherwise. This is what makes the RRR gate meaningful:
+    previously SL and TP1 were both fixed multiples of the SAME atr_val, so
+    their ratio (tp1_atr_mult / sl_atr_mult) was a constant regardless of the
+    market — the RRR "gate" could never actually reject anything. Anchoring
+    stops to order blocks and targets to real S/R zones means the distances
+    — and therefore the RRR — genuinely vary setup to setup.
+    """
+    sl_mult = ALERT_STATE["sl_atr_mult"]
+    tp1_mult = ALERT_STATE["tp1_atr_mult"]
+    tp2_mult = ALERT_STATE["tp2_atr_mult"]
+    min_dist = atr_val * 0.5  # floor so a structure level too close to price isn't used as-is
+    ob_buffer = atr_val * 0.25
+
+    if direction == "BUY":
+        sl_price, sl_source = close_price - atr_val * sl_mult, "ATR"
+        if order_block.get("bullish_ob") and order_block.get("ob_level") is not None:
+            ob_sl = order_block["ob_level"] - ob_buffer
+            if ob_sl < close_price and (close_price - ob_sl) >= min_dist:
+                sl_price, sl_source = ob_sl, "Order Block"
+
+        tp1_price, tp1_source = close_price + atr_val * tp1_mult, "ATR"
+        if near_zone and near_zone["type"] in ("resistance", "mixed") and near_zone["price"] > close_price and (near_zone["price"] - close_price) >= min_dist:
+            tp1_price, tp1_source = near_zone["price"], "S/R Zone"
+
+        tp2_price = max(close_price + atr_val * tp2_mult, tp1_price + atr_val * 0.5)
+
+    else:  # SELL
+        sl_price, sl_source = close_price + atr_val * sl_mult, "ATR"
+        if order_block.get("bearish_ob") and order_block.get("ob_level") is not None:
+            ob_sl = order_block["ob_level"] + ob_buffer
+            if ob_sl > close_price and (ob_sl - close_price) >= min_dist:
+                sl_price, sl_source = ob_sl, "Order Block"
+
+        tp1_price, tp1_source = close_price - atr_val * tp1_mult, "ATR"
+        if near_zone and near_zone["type"] in ("support", "mixed") and near_zone["price"] < close_price and (close_price - near_zone["price"]) >= min_dist:
+            tp1_price, tp1_source = near_zone["price"], "S/R Zone"
+
+        tp2_price = min(close_price - atr_val * tp2_mult, tp1_price - atr_val * 0.5)
+
+    sl_dist = abs(close_price - sl_price)
+    tp1_dist = abs(tp1_price - close_price)
+    tp2_dist = abs(tp2_price - close_price)
+    rrr = round(tp1_dist / sl_dist, 2) if sl_dist > 0 else 0
+
+    return {
+        "sl_price": round(sl_price, 2), "tp1_price": round(tp1_price, 2), "tp2_price": round(tp2_price, 2),
+        "sl_dist": round(sl_dist, 2), "tp1_dist": round(tp1_dist, 2), "tp2_dist": round(tp2_dist, 2),
+        "sl_source": sl_source, "tp1_source": tp1_source, "rrr": rrr,
+    }
+
 def analyze_market(symbol):
     entry_tf, trend_tf, macro_tf = ALERT_STATE["entry_tf"], ALERT_STATE["trend_tf"], ALERT_STATE["macro_tf"]
     df_entry = fetch_candles(symbol, entry_tf, 200)
@@ -75,6 +128,7 @@ def analyze_market(symbol):
     swing_highs, swing_lows = find_swing_points(df_entry, ALERT_STATE["fractal_window"], ALERT_STATE["fractal_window"])
     sweeps = detect_liquidity_sweeps(df_entry, swing_highs, swing_lows)
     fvg = detect_fvg(df_entry)
+    order_block = detect_order_block(df_entry)
     vol_filter_ok, _ = passes_volatility_filter(df_entry)
     sr_zones = find_sr_zones(df_macro)
 
@@ -89,6 +143,7 @@ def analyze_market(symbol):
         "structure": detect_market_structure(df_entry),
         "sweeps": sweeps,
         "fvg": fvg,
+        "order_block": order_block,
         "vol_filter_ok": vol_filter_ok,
         "macd_bias": get_macd_bias(df_entry),
         "candle_pattern": detect_candlestick_pattern(df_entry),
@@ -104,17 +159,6 @@ def evaluate_signals(a):
 
     signals_found, watch_found = [], []
 
-    # Dynamic ATR Distances
-    sl_dist = round(atr_val * ALERT_STATE["sl_atr_mult"], 2)
-    tp1_dist = round(atr_val * ALERT_STATE["tp1_atr_mult"], 2)
-    tp2_dist = round(atr_val * ALERT_STATE["tp2_atr_mult"], 2)
-
-    # RRR Validation Gatekeeper (Minimum 1 : 1.3 RRR)
-    rrr = round(tp1_dist / sl_dist, 2) if sl_dist > 0 else 0
-    if rrr < 1.3:
-        return signals_found, watch_found
-
-    # BUY Signal Pipeline
     buy_structure_ok = (not ALERT_STATE["require_structure_break"]) or (a["structure"] == "BULLISH_BOS")
     sell_structure_ok = (not ALERT_STATE["require_structure_break"]) or (a["structure"] == "BEARISH_BOS")
     vol_filter_hard_ok = a["vol_filter_ok"] if ALERT_STATE["require_volume_atr_filter"] else True
@@ -128,21 +172,25 @@ def evaluate_signals(a):
         score, breakdown = compute_confluence_score("BUY", rsi_val, a["structure"], a["sweeps"], a["fvg"], a["vol_filter_ok"], a["macd_bias"], a["candle_pattern"], a["divergence"], sr_confluence, macro_bullish)
 
         if score >= min_score and ALERT_STATE["last_rsi_signal"] != "BUY":
-            ALERT_STATE["last_rsi_signal"] = "BUY"
-            sl_price, tp1_price, tp2_price = round(close_price - sl_dist, 2), round(close_price + tp1_dist, 2), round(close_price + tp2_dist, 2)
-            log_signal_to_db("XAUUSD", "BUY", close_price, sl_price, tp1_price, tp2_price, score)
+            targets = calculate_targets("BUY", close_price, atr_val, a["order_block"], a["near_zone"])
 
-            msg = (
-                f"🏆 **TRADING BUTLER SIGNAL ALERT** 🏆\n\n"
-                f"• **Type:** `BUY 🟢` | **Timeframe:** {a['tf_label']}\n"
-                f"📍 **Entry:** `${close_price}` | 📊 **14-ATR:** `${atr_val}`\n"
-                f"🛡️ **Dynamic SL:** `${sl_price}` ({int(sl_dist*10)} pips)\n"
-                f"🎯 **TP1:** `${tp1_price}` | 🎯 **TP2:** `${tp2_price}` (RRR: `1:{rrr}`)\n\n"
-                f"{format_confluence_breakdown(score, breakdown)}\n\n"
-                f"💧 **Sweep:** {'Bullish Sweep ✅' if a['sweeps']['bullish_sweep'] else 'None'}\n"
-                f"⚡ **FVG:** {'Bullish FVG ✅' if a['fvg']['bullish_fvg'] else 'None'}"
-            )
-            signals_found.append(msg)
+            if targets["rrr"] >= ALERT_STATE["min_rrr"]:
+                ALERT_STATE["last_rsi_signal"] = "BUY"
+                sl_price, tp1_price, tp2_price, rrr = targets["sl_price"], targets["tp1_price"], targets["tp2_price"], targets["rrr"]
+                log_signal_to_db("XAUUSD", "BUY", close_price, sl_price, tp1_price, tp2_price, score)
+
+                msg = (
+                    f"🏆 **TRADING BUTLER SIGNAL ALERT** 🏆\n\n"
+                    f"• **Type:** `BUY 🟢` | **Timeframe:** {a['tf_label']}\n"
+                    f"📍 **Entry:** `${close_price}` | 📊 **14-ATR:** `${atr_val}`\n"
+                    f"🛡️ **SL:** `${sl_price}` ({targets['sl_source']}, {targets['sl_dist']} pts)\n"
+                    f"🎯 **TP1:** `${tp1_price}` ({targets['tp1_source']}) | 🎯 **TP2:** `${tp2_price}` (RRR: `1:{rrr}`)\n\n"
+                    f"{format_confluence_breakdown(score, breakdown)}\n\n"
+                    f"💧 **Sweep:** {'Bullish Sweep ✅' if a['sweeps']['bullish_sweep'] else 'None'}\n"
+                    f"⚡ **FVG:** {'Bullish FVG ✅' if a['fvg']['bullish_fvg'] else 'None'}\n"
+                    f"🧱 **Order Block:** {'Bullish OB ✅ @ $' + str(a['order_block']['ob_level']) if a['order_block']['bullish_ob'] else 'None'}"
+                )
+                signals_found.append(msg)
 
     # SELL Signal Pipeline
     elif rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok and vol_filter_hard_ok:
@@ -150,21 +198,25 @@ def evaluate_signals(a):
         score, breakdown = compute_confluence_score("SELL", rsi_val, a["structure"], a["sweeps"], a["fvg"], a["vol_filter_ok"], a["macd_bias"], a["candle_pattern"], a["divergence"], sr_confluence, not macro_bullish)
 
         if score >= min_score and ALERT_STATE["last_rsi_signal"] != "SELL":
-            ALERT_STATE["last_rsi_signal"] = "SELL"
-            sl_price, tp1_price, tp2_price = round(close_price + sl_dist, 2), round(close_price - tp1_dist, 2), round(close_price - tp2_dist, 2)
-            log_signal_to_db("XAUUSD", "SELL", close_price, sl_price, tp1_price, tp2_price, score)
+            targets = calculate_targets("SELL", close_price, atr_val, a["order_block"], a["near_zone"])
 
-            msg = (
-                f"🏆 **TRADING BUTLER SIGNAL ALERT** 🏆\n\n"
-                f"• **Type:** `SELL 🔴` | **Timeframe:** {a['tf_label']}\n"
-                f"📍 **Entry:** `${close_price}` | 📊 **14-ATR:** `${atr_val}`\n"
-                f"🛡️ **Dynamic SL:** `${sl_price}` ({int(sl_dist*10)} pips)\n"
-                f"🎯 **TP1:** `${tp1_price}` | 🎯 **TP2:** `${tp2_price}` (RRR: `1:{rrr}`)\n\n"
-                f"{format_confluence_breakdown(score, breakdown)}\n\n"
-                f"💧 **Sweep:** {'Bearish Sweep ✅' if a['sweeps']['bearish_sweep'] else 'None'}\n"
-                f"⚡ **FVG:** {'Bearish FVG ✅' if a['fvg']['bearish_fvg'] else 'None'}"
-            )
-            signals_found.append(msg)
+            if targets["rrr"] >= ALERT_STATE["min_rrr"]:
+                ALERT_STATE["last_rsi_signal"] = "SELL"
+                sl_price, tp1_price, tp2_price, rrr = targets["sl_price"], targets["tp1_price"], targets["tp2_price"], targets["rrr"]
+                log_signal_to_db("XAUUSD", "SELL", close_price, sl_price, tp1_price, tp2_price, score)
+
+                msg = (
+                    f"🏆 **TRADING BUTLER SIGNAL ALERT** 🏆\n\n"
+                    f"• **Type:** `SELL 🔴` | **Timeframe:** {a['tf_label']}\n"
+                    f"📍 **Entry:** `${close_price}` | 📊 **14-ATR:** `${atr_val}`\n"
+                    f"🛡️ **SL:** `${sl_price}` ({targets['sl_source']}, {targets['sl_dist']} pts)\n"
+                    f"🎯 **TP1:** `${tp1_price}` ({targets['tp1_source']}) | 🎯 **TP2:** `${tp2_price}` (RRR: `1:{rrr}`)\n\n"
+                    f"{format_confluence_breakdown(score, breakdown)}\n\n"
+                    f"💧 **Sweep:** {'Bearish Sweep ✅' if a['sweeps']['bearish_sweep'] else 'None'}\n"
+                    f"⚡ **FVG:** {'Bearish FVG ✅' if a['fvg']['bearish_fvg'] else 'None'}\n"
+                    f"🧱 **Order Block:** {'Bearish OB ✅ @ $' + str(a['order_block']['ob_level']) if a['order_block']['bearish_ob'] else 'None'}"
+                )
+                signals_found.append(msg)
 
     # "Setup Forming" Early Warning Pipeline — only the approach bands just
     # outside the trigger thresholds count as "forming".

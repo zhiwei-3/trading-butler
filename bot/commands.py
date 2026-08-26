@@ -330,6 +330,9 @@ async def diagnose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **1H EMA:** {'🟢 Bull' if analysis['trend_bullish'] else '🔴 Bear'}\n"
         f"• **4H EMA:** {'🟢 Bull' if analysis['macro_bullish'] else '🔴 Bear'}\n\n"
         f"💧 **Liquidity Sweep:** Bullish={analysis['sweeps']['bullish_sweep']}, Bearish={analysis['sweeps']['bearish_sweep']}\n"
-        f"⚡ **Fair Value Gap:** Bullish={analysis['fvg']['bullish_fvg']}, Bearish={analysis['fvg']['bearish_fvg']}"
+        f"⚡ **Fair Value Gap:** Bullish={analysis['fvg']['bullish_fvg']}, Bearish={analysis['fvg']['bearish_fvg']}\n"
+        f"🧱 **Order Block:** Bullish={analysis['order_block']['bullish_ob']}, Bearish={analysis['order_block']['bearish_ob']}"
+        + (f" @ `${analysis['order_block']['ob_level']}`" if analysis['order_block']['ob_level'] is not None else "") + "\n"
+        f"📐 **Min RRR Required:** `1:{ALERT_STATE['min_rrr']}`"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
