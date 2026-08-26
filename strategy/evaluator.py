@@ -2,7 +2,7 @@ import pandas_ta as ta
 from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
 from database import log_signal_to_db
 from mt5_engine import fetch_candles
-from strategy.smc import find_swing_points, detect_market_structure, detect_liquidity_sweeps, detect_fvg
+from strategy.smc import find_swing_points, detect_market_structure, detect_liquidity_sweeps, detect_fvg, detect_order_block
 from strategy.indicators import (
     passes_volatility_filter, get_macd_bias, detect_candlestick_pattern,
     detect_divergence, find_sr_zones, nearest_sr_zone
@@ -104,11 +104,17 @@ def evaluate_signals(a):
 
     signals_found, watch_found = [], []
 
-    # Dynamic ATR Distance Calculations
+    # Dynamic ATR Distances
     sl_dist = round(atr_val * ALERT_STATE["sl_atr_mult"], 2)
     tp1_dist = round(atr_val * ALERT_STATE["tp1_atr_mult"], 2)
     tp2_dist = round(atr_val * ALERT_STATE["tp2_atr_mult"], 2)
 
+    # RRR Validation Gatekeeper (Minimum 1 : 1.3 RRR)
+    rrr = round(tp1_dist / sl_dist, 2) if sl_dist > 0 else 0
+    if rrr < 1.3:
+        return signals_found, watch_found
+
+    # BUY Signal Pipeline
     if rsi_val <= buy_th and (trend_bullish or macro_bullish):
         sr_confluence = bool(a["near_zone"] and a["near_zone"]["type"] in ("support", "mixed") and close_price >= a["near_zone"]["price"])
         score, breakdown = compute_confluence_score("BUY", rsi_val, a["structure"], a["sweeps"], a["fvg"], a["vol_filter_ok"], a["macd_bias"], a["candle_pattern"], a["divergence"], sr_confluence, macro_bullish)
@@ -123,13 +129,14 @@ def evaluate_signals(a):
                 f"• **Type:** `BUY 🟢` | **Timeframe:** {a['tf_label']}\n"
                 f"📍 **Entry:** `${close_price}` | 📊 **14-ATR:** `${atr_val}`\n"
                 f"🛡️ **Dynamic SL:** `${sl_price}` ({int(sl_dist*10)} pips)\n"
-                f"🎯 **TP1:** `${tp1_price}` | 🎯 **TP2:** `${tp2_price}`\n\n"
+                f"🎯 **TP1:** `${tp1_price}` | 🎯 **TP2:** `${tp2_price}` (RRR: `1:{rrr}`)\n\n"
                 f"{format_confluence_breakdown(score, breakdown)}\n\n"
                 f"💧 **Sweep:** {'Bullish Sweep ✅' if a['sweeps']['bullish_sweep'] else 'None'}\n"
                 f"⚡ **FVG:** {'Bullish FVG ✅' if a['fvg']['bullish_fvg'] else 'None'}"
             )
             signals_found.append(msg)
 
+    # SELL Signal Pipeline
     elif rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)):
         sr_confluence = bool(a["near_zone"] and a["near_zone"]["type"] in ("resistance", "mixed") and close_price <= a["near_zone"]["price"])
         score, breakdown = compute_confluence_score("SELL", rsi_val, a["structure"], a["sweeps"], a["fvg"], a["vol_filter_ok"], a["macd_bias"], a["candle_pattern"], a["divergence"], sr_confluence, not macro_bullish)
@@ -144,14 +151,27 @@ def evaluate_signals(a):
                 f"• **Type:** `SELL 🔴` | **Timeframe:** {a['tf_label']}\n"
                 f"📍 **Entry:** `${close_price}` | 📊 **14-ATR:** `${atr_val}`\n"
                 f"🛡️ **Dynamic SL:** `${sl_price}` ({int(sl_dist*10)} pips)\n"
-                f"🎯 **TP1:** `${tp1_price}` | 🎯 **TP2:** `${tp2_price}`\n\n"
+                f"🎯 **TP1:** `${tp1_price}` | 🎯 **TP2:** `${tp2_price}` (RRR: `1:{rrr}`)\n\n"
                 f"{format_confluence_breakdown(score, breakdown)}\n\n"
                 f"💧 **Sweep:** {'Bearish Sweep ✅' if a['sweeps']['bearish_sweep'] else 'None'}\n"
                 f"⚡ **FVG:** {'Bearish FVG ✅' if a['fvg']['bearish_fvg'] else 'None'}"
             )
             signals_found.append(msg)
 
-    # Reset debounces when RSI returns to the neutral zone between buy and sell thresholds
+    # "Setup Forming" Early Warning Pipeline
+    elif ALERT_STATE["setup_forming_enabled"]:
+        margin = ALERT_STATE["watch_rsi_margin"]
+        if (buy_th < rsi_val <= buy_th + margin or sell_th - margin <= rsi_val < sell_th) and ALERT_STATE["last_watch_signal"] is None:
+            ALERT_STATE["last_watch_signal"] = "FORMING"
+            watch_msg = (
+                f"👀 **SETUP FORMING (EARLY HEADS-UP)** 👀\n\n"
+                f"• **Symbol:** `XAUUSD` | **Price:** `${close_price}`\n"
+                f"• **Current RSI:** `{rsi_val}` (Approaching Zone: `{buy_th}` / `{sell_th}`)\n"
+                f"💡 *Monitor charts for imminent breakout or rejection.*"
+            )
+            watch_found.append(watch_msg)
+
+    # Reset debounces when RSI returns to neutral zone
     elif buy_th < rsi_val < sell_th:
         ALERT_STATE["last_rsi_signal"] = None
         ALERT_STATE["last_watch_signal"] = None

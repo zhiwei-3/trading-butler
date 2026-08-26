@@ -56,3 +56,34 @@ def detect_fvg(df):
     bearish_fvg = bool(c3['high'] < c1['low'])
     gap_size = round(c3['low'] - c1['high'], 2) if bullish_fvg else (round(c1['low'] - c3['high'], 2) if bearish_fvg else 0.0)
     return {"bullish_fvg": bullish_fvg, "bearish_fvg": bearish_fvg, "gap_size": gap_size}
+
+def detect_order_block(df, lookback=20):
+    """Detects recent Bullish/Bearish Order Blocks (OB) and mitigation zones."""
+    if len(df) < lookback:
+        return {"bullish_ob": False, "bearish_ob": False, "ob_level": None}
+
+    recent = df.iloc[-lookback:].reset_index(drop=True)
+    c_curr = recent.iloc[-1]
+    bullish_ob, bearish_ob, ob_level = False, False, None
+
+    # Bullish OB: Last down-candle before strong bullish displacement
+    for i in range(len(recent) - 4, 1, -1):
+        c_ob = recent.iloc[i]
+        c_exp = recent.iloc[i + 1]
+        if c_ob['close'] < c_ob['open'] and (c_exp['close'] - c_exp['open']) > 1.5 * abs(c_ob['open'] - c_ob['close']):
+            if c_curr['low'] <= c_ob['high'] and c_curr['close'] >= c_ob['low']:
+                bullish_ob = True
+                ob_level = round(c_ob['low'], 2)
+                break
+
+    # Bearish OB: Last up-candle before strong bearish drop
+    for i in range(len(recent) - 4, 1, -1):
+        c_ob = recent.iloc[i]
+        c_exp = recent.iloc[i + 1]
+        if c_ob['close'] > c_ob['open'] and (c_exp['open'] - c_exp['close']) > 1.5 * abs(c_ob['open'] - c_ob['close']):
+            if c_curr['high'] >= c_ob['low'] and c_curr['close'] <= c_ob['high']:
+                bearish_ob = True
+                ob_level = round(c_ob['high'], 2)
+                break
+
+    return {"bullish_ob": bullish_ob, "bearish_ob": bearish_ob, "ob_level": ob_level}
