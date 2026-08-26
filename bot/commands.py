@@ -325,7 +325,7 @@ async def diagnose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "🔍 **LIVE TRIGGER DIAGNOSTIC**\n\n"
         f"📍 **Price:** `${analysis['close_price']}` | **14-ATR:** `${analysis['atr_val']}`\n"
-        rf"📈 **RSI:** `{analysis['rsi_val']}` (Buy $\le {ALERT_STATE['rsi_buy_threshold']}$, Sell $\ge {ALERT_STATE['rsi_sell_threshold']}$)\n\n"
+        f"📈 **RSI:** `{analysis['rsi_val']}` (Buy ≤ `{ALERT_STATE['rsi_buy_threshold']}`, Sell ≥ `{ALERT_STATE['rsi_sell_threshold']}`)\n\n"
         f"• **5M EMA:** {'🟢 Bull' if analysis['entry_bullish'] else '🔴 Bear'}\n"
         f"• **1H EMA:** {'🟢 Bull' if analysis['trend_bullish'] else '🔴 Bear'}\n"
         f"• **4H EMA:** {'🟢 Bull' if analysis['macro_bullish'] else '🔴 Bear'}\n\n"

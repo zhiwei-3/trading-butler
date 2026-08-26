@@ -115,7 +115,15 @@ def evaluate_signals(a):
         return signals_found, watch_found
 
     # BUY Signal Pipeline
-    if rsi_val <= buy_th and (trend_bullish or macro_bullish):
+    buy_structure_ok = (not ALERT_STATE["require_structure_break"]) or (a["structure"] == "BULLISH_BOS")
+    sell_structure_ok = (not ALERT_STATE["require_structure_break"]) or (a["structure"] == "BEARISH_BOS")
+    vol_filter_hard_ok = a["vol_filter_ok"] if ALERT_STATE["require_volume_atr_filter"] else True
+    in_approach_zone = (
+        (buy_th < rsi_val <= buy_th + ALERT_STATE["watch_rsi_margin"]) or
+        (sell_th - ALERT_STATE["watch_rsi_margin"] <= rsi_val < sell_th)
+    )
+
+    if rsi_val <= buy_th and (trend_bullish or macro_bullish) and buy_structure_ok and vol_filter_hard_ok:
         sr_confluence = bool(a["near_zone"] and a["near_zone"]["type"] in ("support", "mixed") and close_price >= a["near_zone"]["price"])
         score, breakdown = compute_confluence_score("BUY", rsi_val, a["structure"], a["sweeps"], a["fvg"], a["vol_filter_ok"], a["macd_bias"], a["candle_pattern"], a["divergence"], sr_confluence, macro_bullish)
 
@@ -137,7 +145,7 @@ def evaluate_signals(a):
             signals_found.append(msg)
 
     # SELL Signal Pipeline
-    elif rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)):
+    elif rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok and vol_filter_hard_ok:
         sr_confluence = bool(a["near_zone"] and a["near_zone"]["type"] in ("resistance", "mixed") and close_price <= a["near_zone"]["price"])
         score, breakdown = compute_confluence_score("SELL", rsi_val, a["structure"], a["sweeps"], a["fvg"], a["vol_filter_ok"], a["macd_bias"], a["candle_pattern"], a["divergence"], sr_confluence, not macro_bullish)
 
@@ -158,10 +166,10 @@ def evaluate_signals(a):
             )
             signals_found.append(msg)
 
-    # "Setup Forming" Early Warning Pipeline
-    elif ALERT_STATE["setup_forming_enabled"]:
-        margin = ALERT_STATE["watch_rsi_margin"]
-        if (buy_th < rsi_val <= buy_th + margin or sell_th - margin <= rsi_val < sell_th) and ALERT_STATE["last_watch_signal"] is None:
+    # "Setup Forming" Early Warning Pipeline — only the approach bands just
+    # outside the trigger thresholds count as "forming".
+    elif ALERT_STATE["setup_forming_enabled"] and in_approach_zone:
+        if ALERT_STATE["last_watch_signal"] is None:
             ALERT_STATE["last_watch_signal"] = "FORMING"
             watch_msg = (
                 f"👀 **SETUP FORMING (EARLY HEADS-UP)** 👀\n\n"
@@ -171,9 +179,20 @@ def evaluate_signals(a):
             )
             watch_found.append(watch_msg)
 
-    # Reset debounces when RSI returns to neutral zone
-    elif buy_th < rsi_val < sell_th:
+    # Reset the full-signal debounce once RSI is genuinely neutral (not in an
+    # approach band and not past a trigger threshold).
+    else:
         ALERT_STATE["last_rsi_signal"] = None
+
+    # The watch debounce is reset independently of the block above: as soon as
+    # RSI leaves the approach band — whether it reverses back toward neutral
+    # OR continues on into a full trigger — it's no longer "forming", so the
+    # next time RSI re-enters an approach band it should ping again. Tying
+    # this to the neutral-zone branch alone was the bug: with watch_rsi_margin
+    # this large relative to the buy/sell gap, the approach bands span the
+    # ENTIRE middle range, leaving no RSI value that counts as "neutral" —
+    # which meant the watch ping could only ever fire once, permanently.
+    if not in_approach_zone:
         ALERT_STATE["last_watch_signal"] = None
 
     return signals_found, watch_found
