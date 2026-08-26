@@ -66,17 +66,31 @@ async def disable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
-    impact = args[0].lower() if args else "high"
-    if impact not in ["high", "medium", "low", "holiday", "all"]:
-        await update.message.reply_text("⚠️ **Usage:** `/news <high|medium|low|holiday|all>`", parse_mode="Markdown")
+    impact = args[0].strip().lower() if args else "high"
+    
+    valid_impacts = ["high", "medium", "low", "holiday", "all"]
+    if impact not in valid_impacts:
+        await update.message.reply_text(
+            "⚠️ **Usage:** `/news <high|medium|low|holiday|all>`", 
+            parse_mode="Markdown"
+        )
         return
 
     events = fetch_economic_events(impact_level=impact, currency="USD")
     if not events:
-        await update.message.reply_text(f"🟢 **No `{impact.upper()}` impact USD events found for this week.**", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"🟢 **No `{impact.upper()}` impact USD events found for this week.**", 
+            parse_mode="Markdown"
+        )
         return
 
-    impact_emojis = {"high": "🔴", "medium": "🟠", "low": "🟡", "holiday": "⚪"}
+    impact_emojis = {
+        "high": "🔴",
+        "medium": "🟠",
+        "low": "🟡",
+        "holiday": "⚪"
+    }
+    
     events_by_date = {}
     for ev in events:
         raw_date = ev.get("date", "")
@@ -86,6 +100,7 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             time_str = dt_utc.strftime("%H:%M UTC")
         except (ValueError, TypeError):
             date_key, time_str = "Upcoming Events", "N/A"
+            
         ev["formatted_time"] = time_str
         events_by_date.setdefault(date_key, []).append(ev)
 
@@ -95,11 +110,13 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for ev in day_events:
             title = ev.get("title", "N/A")
             time_str = ev.get("formatted_time", "N/A")
-            badge = impact_emojis.get(str(ev.get("impact")).lower(), "⚪")
+            ev_imp = str(ev.get("impact", "")).strip().lower()
+            badge = impact_emojis.get(ev_imp, "⚪")
             forecast, prev = ev.get("forecast", ""), ev.get("previous", "")
             extra = f" (FC: {forecast} | Prev: {prev})" if forecast or prev else ""
             msg += f"  {badge} `{time_str}` — {title}{extra}\n"
         msg += "\n"
+
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def spread_check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

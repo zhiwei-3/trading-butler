@@ -15,13 +15,25 @@ def fetch_economic_events(impact_level="high", currency="USD"):
         logging.error(f"News Fetch Error: {e}")
         return []
 
-    impact_level = impact_level.lower()
-    currency = currency.upper()
-    return [
-        ev for ev in calendar
-        if (currency == "ALL" or str(ev.get("country")).upper() == currency) and
-           (impact_level == "all" or str(ev.get("impact")).lower() == impact_level)
-    ]
+    # Clean and normalize search filters
+    target_impact = str(impact_level).strip().lower()
+    target_currency = str(currency).strip().upper()
+
+    filtered_events = []
+    for ev in calendar:
+        ev_country = str(ev.get("country", "")).strip().upper()
+        ev_impact = str(ev.get("impact", "")).strip().lower()
+
+        # Check currency match
+        currency_match = (target_currency == "ALL" or ev_country == target_currency)
+        
+        # Check impact match
+        impact_match = (target_impact == "all" or ev_impact == target_impact)
+
+        if currency_match and impact_match:
+            filtered_events.append(ev)
+
+    return filtered_events
 
 async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
     events = fetch_economic_events(impact_level="high", currency="USD")
