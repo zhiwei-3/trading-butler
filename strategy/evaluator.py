@@ -8,7 +8,7 @@ from strategy.smc import (
 )
 from strategy.indicators import (
     passes_volatility_filter, get_macd_bias, detect_candlestick_pattern,
-    detect_divergence, find_sr_zones, nearest_sr_zone
+    detect_divergence, find_sr_zones, nearest_sr_zone, has_directional_displacement
 )
 
 def score_label(score):
@@ -157,12 +157,14 @@ def evaluate_signals(a):
     buy_structure_ok = (not ALERT_STATE["require_structure_break"]) or (a["structure"] == "BULLISH_BOS")
     sell_structure_ok = (not ALERT_STATE["require_structure_break"]) or (a["structure"] == "BEARISH_BOS")
     vol_filter_hard_ok = a["vol_filter_ok"] if ALERT_STATE["require_volume_atr_filter"] else True
+    buy_displacement_ok = has_directional_displacement(a["df_entry"], "BUY")
+    sell_displacement_ok = has_directional_displacement(a["df_entry"], "SELL")
     in_approach_zone = (
         (buy_th < rsi_val <= buy_th + ALERT_STATE["watch_rsi_margin"]) or
         (sell_th - ALERT_STATE["watch_rsi_margin"] <= rsi_val < sell_th)
     )
 
-    if rsi_val <= buy_th and (trend_bullish or macro_bullish) and buy_structure_ok and vol_filter_hard_ok:
+    if rsi_val <= buy_th and (trend_bullish or macro_bullish) and buy_structure_ok and vol_filter_hard_ok and buy_displacement_ok:
         sr_confluence = bool(a["near_zone"] and a["near_zone"]["type"] in ("support", "mixed") and close_price >= a["near_zone"]["price"])
         score, breakdown = compute_confluence_score("BUY", rsi_val, a["structure"], a["sweeps"], a["fvg"], a["vol_filter_ok"], a["macd_bias"], a["candle_pattern"], a["divergence"], sr_confluence, macro_bullish)
 
@@ -188,7 +190,7 @@ def evaluate_signals(a):
                 )
                 signals_found.append(msg)
 
-    elif rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok and vol_filter_hard_ok:
+    elif rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok and vol_filter_hard_ok and sell_displacement_ok:
         sr_confluence = bool(a["near_zone"] and a["near_zone"]["type"] in ("resistance", "mixed") and close_price <= a["near_zone"]["price"])
         score, breakdown = compute_confluence_score("SELL", rsi_val, a["structure"], a["sweeps"], a["fvg"], a["vol_filter_ok"], a["macd_bias"], a["candle_pattern"], a["divergence"], sr_confluence, not macro_bullish)
 

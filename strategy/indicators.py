@@ -95,3 +95,17 @@ def find_sr_zones(df, lookback=180, left=3, right=3, cluster_pct=0.0015, min_tou
 def nearest_sr_zone(zones, price, max_distance_pct=0.004):
     candidates = [z for z in zones if abs(z["price"] - price) / price <= max_distance_pct]
     return sorted(candidates, key=lambda z: abs(z["price"] - price))[0] if candidates else None
+
+def has_directional_displacement(df, direction, min_body_atr_ratio=0.35):
+    """Confirms the triggering candle has real body (not indecision) relative to ATR."""
+    if len(df) < 15 or 'ATR' not in df.columns:
+        return True  # fail-open if ATR not computed yet
+    latest = df.iloc[-1]
+    atr = df['ATR'].iloc[-1]
+    if pd.isna(atr) or atr <= 0:
+        return True
+    body = latest['close'] - latest['open']
+    body_ratio = abs(body) / atr
+    if body_ratio < min_body_atr_ratio:
+        return False
+    return (body > 0) if direction == "BUY" else (body < 0)
