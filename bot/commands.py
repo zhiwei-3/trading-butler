@@ -350,8 +350,29 @@ async def diagnose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = get_gold_symbol()
     analysis = analyze_market(symbol) if symbol else None
     if not analysis:
-        await update.message.reply_text("❌ Diagnostic failed.")
+        await update.message.reply_text("❌ Diagnostic failed: Unable to fetch MT5 market analysis.")
         return
+
+    ob = analysis.get("order_block", {})
+    ob_status = "None"
+    if ob.get("bullish_ob"):
+        ob_status = f"Bullish OB @ ${ob.get('ob_level')}"
+    elif ob.get("bearish_ob"):
+        ob_status = f"Bearish OB @ ${ob.get('ob_level')}"
+
+    msg = (
+        "🔍 **LIVE TRIGGER DIAGNOSTIC**\n\n"
+        f"📍 **Price:** `${analysis['close_price']}` | **14-ATR:** `${analysis['atr_val']}`\n"
+        f"📈 **RSI:** `{analysis['rsi_val']}` (Buy <= `{ALERT_STATE['rsi_buy_threshold']}`, Sell >= `{ALERT_STATE['rsi_sell_threshold']}`)\n\n"
+        f"• **5M EMA:** {'🟢 Bull' if analysis['entry_bullish'] else '🔴 Bear'}\n"
+        f"• **15M EMA:** {'🟢 Bull' if analysis['trend_bullish'] else '🔴 Bear'}\n"
+        f"• **1H EMA:** {'🟢 Bull' if analysis['macro_bullish'] else '🔴 Bear'}\n\n"
+        f"💧 **Liquidity Sweep:** Bullish={analysis['sweeps']['bullish_sweep']}, Bearish={analysis['sweeps']['bearish_sweep']}\n"
+        f"⚡ **Fair Value Gap:** Bullish={analysis['fvg']['bullish_fvg']}, Bearish={analysis['fvg']['bearish_fvg']}\n"
+        f"🧱 **Order Block:** {ob_status}\n"
+        f"🎯 **Nearest S/R:** {analysis['near_zone']['type'].title() if analysis['near_zone'] else 'None'} @ ${analysis['near_zone']['price'] if analysis['near_zone'] else 'N/A'}"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
