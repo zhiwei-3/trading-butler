@@ -2,7 +2,10 @@ import pandas_ta as ta
 from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
 from database import log_signal_to_db
 from mt5_engine import fetch_candles
-from strategy.smc import find_swing_points, detect_market_structure, detect_liquidity_sweeps, detect_fvg, detect_order_block
+from strategy.smc import (
+    find_swing_points, detect_market_structure, 
+    detect_liquidity_sweeps, detect_fvg, detect_order_block
+)
 from strategy.indicators import (
     passes_volatility_filter, get_macd_bias, detect_candlestick_pattern,
     detect_divergence, find_sr_zones, nearest_sr_zone
@@ -52,19 +55,10 @@ def format_confluence_breakdown(score, breakdown):
     return "\n".join(lines)
 
 def calculate_targets(direction, close_price, atr_val, order_block, near_zone):
-    """
-    Derives SL/TP from real market structure when available, falling back to
-    ATR multiples otherwise. This is what makes the RRR gate meaningful:
-    previously SL and TP1 were both fixed multiples of the SAME atr_val, so
-    their ratio (tp1_atr_mult / sl_atr_mult) was a constant regardless of the
-    market — the RRR "gate" could never actually reject anything. Anchoring
-    stops to order blocks and targets to real S/R zones means the distances
-    — and therefore the RRR — genuinely vary setup to setup.
-    """
     sl_mult = ALERT_STATE["sl_atr_mult"]
     tp1_mult = ALERT_STATE["tp1_atr_mult"]
     tp2_mult = ALERT_STATE["tp2_atr_mult"]
-    min_dist = atr_val * 0.5  # floor so a structure level too close to price isn't used as-is
+    min_dist = atr_val * 0.5
     ob_buffer = atr_val * 0.25
 
     if direction == "BUY":
@@ -174,8 +168,9 @@ def evaluate_signals(a):
 
         if score >= min_score and ALERT_STATE["last_rsi_signal"] != "BUY":
             targets = calculate_targets("BUY", close_price, atr_val, a["order_block"], a["near_zone"])
+            min_rrr_target = ALERT_STATE.get("min_rrr", 1.3)
 
-            if targets["rrr"] >= ALERT_STATE["min_rrr"]:
+            if targets["rrr"] >= min_rrr_target:
                 ALERT_STATE["last_rsi_signal"] = "BUY"
                 sl_price, tp1_price, tp2_price, rrr = targets["sl_price"], targets["tp1_price"], targets["tp2_price"], targets["rrr"]
                 log_signal_to_db("XAUUSD", "BUY", close_price, sl_price, tp1_price, tp2_price, score)
@@ -193,15 +188,15 @@ def evaluate_signals(a):
                 )
                 signals_found.append(msg)
 
-    # SELL Signal Pipeline
     elif rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok and vol_filter_hard_ok:
         sr_confluence = bool(a["near_zone"] and a["near_zone"]["type"] in ("resistance", "mixed") and close_price <= a["near_zone"]["price"])
         score, breakdown = compute_confluence_score("SELL", rsi_val, a["structure"], a["sweeps"], a["fvg"], a["vol_filter_ok"], a["macd_bias"], a["candle_pattern"], a["divergence"], sr_confluence, not macro_bullish)
 
         if score >= min_score and ALERT_STATE["last_rsi_signal"] != "SELL":
             targets = calculate_targets("SELL", close_price, atr_val, a["order_block"], a["near_zone"])
+            min_rrr_target = ALERT_STATE.get("min_rrr", 1.3)
 
-            if targets["rrr"] >= ALERT_STATE["min_rrr"]:
+            if targets["rrr"] >= min_rrr_target:
                 ALERT_STATE["last_rsi_signal"] = "SELL"
                 sl_price, tp1_price, tp2_price, rrr = targets["sl_price"], targets["tp1_price"], targets["tp2_price"], targets["rrr"]
                 log_signal_to_db("XAUUSD", "SELL", close_price, sl_price, tp1_price, tp2_price, score)
@@ -219,8 +214,6 @@ def evaluate_signals(a):
                 )
                 signals_found.append(msg)
 
-    # "Setup Forming" Early Warning Pipeline — only the approach bands just
-    # outside the trigger thresholds count as "forming".
     elif ALERT_STATE["setup_forming_enabled"] and in_approach_zone:
         if ALERT_STATE["last_watch_signal"] is None:
             ALERT_STATE["last_watch_signal"] = "FORMING"
@@ -232,19 +225,9 @@ def evaluate_signals(a):
             )
             watch_found.append(watch_msg)
 
-    # Reset the full-signal debounce once RSI is genuinely neutral (not in an
-    # approach band and not past a trigger threshold).
     else:
         ALERT_STATE["last_rsi_signal"] = None
 
-    # The watch debounce is reset independently of the block above: as soon as
-    # RSI leaves the approach band — whether it reverses back toward neutral
-    # OR continues on into a full trigger — it's no longer "forming", so the
-    # next time RSI re-enters an approach band it should ping again. Tying
-    # this to the neutral-zone branch alone was the bug: with watch_rsi_margin
-    # this large relative to the buy/sell gap, the approach bands span the
-    # ENTIRE middle range, leaving no RSI value that counts as "neutral" —
-    # which meant the watch ping could only ever fire once, permanently.
     if not in_approach_zone:
         ALERT_STATE["last_watch_signal"] = None
 
