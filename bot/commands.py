@@ -12,6 +12,7 @@ from mt5_engine import get_gold_symbol, fetch_candles
 from news_engine import fetch_economic_events
 from strategy.backtester import run_backtest, generate_equity_chart
 from strategy.evaluator import analyze_market
+from strategy.chart import generate_chart_snapshot
 from bot.jobs import (
     build_status_snapshot,
     market_scanner_job,
@@ -182,6 +183,7 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not symbol:
         await update.message.reply_text("❌ MT5 Gold symbol not found.")
         return
+
     m15_rates = fetch_candles(symbol, mt5.TIMEFRAME_M15, 100)
     d1_rates = fetch_candles(symbol, mt5.TIMEFRAME_D1, 2)
     if m15_rates is None or d1_rates is None:
@@ -195,14 +197,33 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m15_rates['ATR'] = ta.atr(m15_rates['high'], m15_rates['low'], m15_rates['close'], length=14)
     latest_atr = round(m15_rates['ATR'].iloc[-1], 2)
 
-    reply = (
+    # 1. Build Technical Summary Text
+    caption = (
         f"🪙 **XAUUSD LIVE SNAPSHOT**\n\n"
         f"• **Current Price:** `${current_price:,.2f}`\n"
         f"• **24h Change:** `{daily_change}%`\n"
-        f"• **Volatility (14-ATR):** `${latest_atr}` pips\n"
+        f"• **Volatility (14-ATR):** `${latest_atr}` pts\n"
         f"• **Scanner Status:** `{'ENABLED 🟢' if ALERT_STATE['scanner_enabled'] else 'DISABLED 🔴'}`"
     )
-    await update.message.reply_text(reply, parse_mode="Markdown")
+
+    # 2. Render In-Memory Chart Snapshot
+    m15_rates['EMA_20'] = ta.ema(m15_rates['close'], length=20)
+    m15_rates['EMA_50'] = ta.ema(m15_rates['close'], length=50)
+    
+    chart_buf = generate_chart_snapshot(
+        df=m15_rates,
+        title=f"XAUUSD - {ALERT_STATE['timeframe_mode'].upper()} (15M Chart)"
+    )
+
+    # 3. Dispatch Image with Caption (Falls back to text if chart fails)
+    if chart_buf:
+        await update.message.reply_photo(
+            photo=chart_buf,
+            caption=caption,
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(caption, parse_mode="Markdown")
 
 async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_utc = datetime.now(timezone.utc)
