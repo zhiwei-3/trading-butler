@@ -8,7 +8,7 @@ from strategy.smc import (
 )
 from strategy.indicators import (
     passes_volatility_filter, get_macd_bias, detect_candlestick_pattern,
-    detect_divergence, find_sr_zones, nearest_sr_zone, has_directional_displacement
+    detect_divergence, find_sr_zones, nearest_sr_zone
 )
 
 def score_label(score):
@@ -18,31 +18,48 @@ def score_label(score):
     return "❌ Weak"
 
 def compute_confluence_score(direction, rsi_val, structure, sweeps, fvg, vol_filter_ok, macd_bias,
-                              candle_pattern, divergence, sr_confluence, macro_aligned):
+                              candle_pattern, divergence, sr_confluence, entry_bullish, macro_aligned):
     breakdown = []
+    
+    # 1. RSI Zone
     rsi_pts = CONFLUENCE_WEIGHTS["rsi_zone"] if (rsi_val <= 20 if direction == "BUY" else rsi_val >= 80) else (10 if (rsi_val <= 25 if direction == "BUY" else rsi_val >= 75) else 6)
     breakdown.append(("RSI Zone", rsi_pts, CONFLUENCE_WEIGHTS["rsi_zone"]))
-    breakdown.append(("EMA Trend Align", CONFLUENCE_WEIGHTS["ema_trend"], CONFLUENCE_WEIGHTS["ema_trend"]))
+
+    # 2. EMA Trend Alignment (FIXED: Checks entry_bullish directionally)
+    ema_match = (direction == "BUY" and entry_bullish) or (direction == "SELL" and not entry_bullish)
+    breakdown.append(("EMA Trend Align", CONFLUENCE_WEIGHTS["ema_trend"] if ema_match else 0, CONFLUENCE_WEIGHTS["ema_trend"]))
+
+    # 3. Macro Trend Alignment
     breakdown.append(("Macro Trend Align", CONFLUENCE_WEIGHTS["macro_trend"] if macro_aligned else 0, CONFLUENCE_WEIGHTS["macro_trend"]))
 
+    # 4. Structure BOS
     bos_match = (direction == "BUY" and structure == "BULLISH_BOS") or (direction == "SELL" and structure == "BEARISH_BOS")
     breakdown.append(("Structure BOS", CONFLUENCE_WEIGHTS["structure_bos"] if bos_match else 0, CONFLUENCE_WEIGHTS["structure_bos"]))
 
+    # 5. Liquidity Sweep
     sweep_match = (direction == "BUY" and sweeps["bullish_sweep"]) or (direction == "SELL" and sweeps["bearish_sweep"])
     breakdown.append(("Liquidity Sweep", CONFLUENCE_WEIGHTS["liquidity_sweep"] if sweep_match else 0, CONFLUENCE_WEIGHTS["liquidity_sweep"]))
 
+    # 6. Fair Value Gap
     fvg_match = (direction == "BUY" and fvg["bullish_fvg"]) or (direction == "SELL" and fvg["bearish_fvg"])
     breakdown.append(("Fair Value Gap", CONFLUENCE_WEIGHTS["fvg"] if fvg_match else 0, CONFLUENCE_WEIGHTS["fvg"]))
 
+    # 7. Volume/ATR Filter
     breakdown.append(("Volume/ATR Activity", CONFLUENCE_WEIGHTS["volume_atr"] if vol_filter_ok else 0, CONFLUENCE_WEIGHTS["volume_atr"]))
+
+    # 8. MACD Bias
     macd_match = (direction == "BUY" and macd_bias == "BULLISH") or (direction == "SELL" and macd_bias == "BEARISH")
     breakdown.append(("MACD Confirmation", CONFLUENCE_WEIGHTS["macd"] if macd_match else 0, CONFLUENCE_WEIGHTS["macd"]))
 
+    # 9. Candlestick Pattern
     pattern_match = (direction == "BUY" and candle_pattern in ("BULLISH_ENGULFING", "HAMMER")) or (direction == "SELL" and candle_pattern in ("BEARISH_ENGULFING", "SHOOTING_STAR"))
     breakdown.append(("Candlestick Pattern", CONFLUENCE_WEIGHTS["candlestick"] if pattern_match else (3 if candle_pattern == "DOJI" else 0), CONFLUENCE_WEIGHTS["candlestick"]))
 
+    # 10. RSI Divergence
     div_match = (direction == "BUY" and divergence.get("bullish")) or (direction == "SELL" and divergence.get("bearish"))
     breakdown.append(("RSI Divergence", CONFLUENCE_WEIGHTS["divergence"] if div_match else 0, CONFLUENCE_WEIGHTS["divergence"]))
+
+    # 11. Support / Resistance Zone
     breakdown.append(("Support/Resistance", CONFLUENCE_WEIGHTS["sr_zone"] if sr_confluence else 0, CONFLUENCE_WEIGHTS["sr_zone"]))
 
     return sum(pts for _, pts, _ in breakdown), breakdown
@@ -148,7 +165,7 @@ def analyze_market(symbol):
 
 def evaluate_signals(a):
     close_price, rsi_val, atr_val = a["close_price"], a["rsi_val"], a["atr_val"]
-    trend_bullish, macro_bullish = a["trend_bullish"], a["macro_bullish"]
+    entry_bullish, trend_bullish, macro_bullish = a["entry_bullish"], a["trend_bullish"], a["macro_bullish"]
     buy_th, sell_th = ALERT_STATE["rsi_buy_threshold"], ALERT_STATE["rsi_sell_threshold"]
     min_score = ALERT_STATE["min_confluence_score"]
 
@@ -157,16 +174,18 @@ def evaluate_signals(a):
     buy_structure_ok = (not ALERT_STATE["require_structure_break"]) or (a["structure"] == "BULLISH_BOS")
     sell_structure_ok = (not ALERT_STATE["require_structure_break"]) or (a["structure"] == "BEARISH_BOS")
     vol_filter_hard_ok = a["vol_filter_ok"] if ALERT_STATE["require_volume_atr_filter"] else True
-    buy_displacement_ok = has_directional_displacement(a["df_entry"], "BUY")
-    sell_displacement_ok = has_directional_displacement(a["df_entry"], "SELL")
     in_approach_zone = (
         (buy_th < rsi_val <= buy_th + ALERT_STATE["watch_rsi_margin"]) or
         (sell_th - ALERT_STATE["watch_rsi_margin"] <= rsi_val < sell_th)
     )
 
-    if rsi_val <= buy_th and (trend_bullish or macro_bullish) and buy_structure_ok and vol_filter_hard_ok and buy_displacement_ok:
+    if rsi_val <= buy_th and (trend_bullish or macro_bullish) and buy_structure_ok and vol_filter_hard_ok:
         sr_confluence = bool(a["near_zone"] and a["near_zone"]["type"] in ("support", "mixed") and close_price >= a["near_zone"]["price"])
-        score, breakdown = compute_confluence_score("BUY", rsi_val, a["structure"], a["sweeps"], a["fvg"], a["vol_filter_ok"], a["macd_bias"], a["candle_pattern"], a["divergence"], sr_confluence, macro_bullish)
+        score, breakdown = compute_confluence_score(
+            "BUY", rsi_val, a["structure"], a["sweeps"], a["fvg"], 
+            a["vol_filter_ok"], a["macd_bias"], a["candle_pattern"], 
+            a["divergence"], sr_confluence, entry_bullish, macro_bullish
+        )
 
         if score >= min_score and ALERT_STATE["last_rsi_signal"] != "BUY":
             targets = calculate_targets("BUY", close_price, atr_val, a["order_block"], a["near_zone"])
@@ -190,9 +209,13 @@ def evaluate_signals(a):
                 )
                 signals_found.append(msg)
 
-    elif rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok and vol_filter_hard_ok and sell_displacement_ok:
+    elif rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok and vol_filter_hard_ok:
         sr_confluence = bool(a["near_zone"] and a["near_zone"]["type"] in ("resistance", "mixed") and close_price <= a["near_zone"]["price"])
-        score, breakdown = compute_confluence_score("SELL", rsi_val, a["structure"], a["sweeps"], a["fvg"], a["vol_filter_ok"], a["macd_bias"], a["candle_pattern"], a["divergence"], sr_confluence, not macro_bullish)
+        score, breakdown = compute_confluence_score(
+            "SELL", rsi_val, a["structure"], a["sweeps"], a["fvg"], 
+            a["vol_filter_ok"], a["macd_bias"], a["candle_pattern"], 
+            a["divergence"], sr_confluence, entry_bullish, not macro_bullish
+        )
 
         if score >= min_score and ALERT_STATE["last_rsi_signal"] != "SELL":
             targets = calculate_targets("SELL", close_price, atr_val, a["order_block"], a["near_zone"])

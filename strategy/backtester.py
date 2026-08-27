@@ -129,7 +129,7 @@ def _full_analysis(entry_slice, state):
     }
 
 
-def _decide_trade(close_price, rsi_val, atr_val, trend_bullish, macro_bullish,
+def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, macro_bullish,
                    full, state, min_confluence_score, min_rrr):
     """Mirrors strategy.evaluator.evaluate_signals' BUY/SELL branch, but writes debounce
     state locally instead of mutating the global ALERT_STATE, and returns a trade dict
@@ -145,7 +145,8 @@ def _decide_trade(close_price, rsi_val, atr_val, trend_bullish, macro_bullish,
         sr_confluence = bool(near_zone and near_zone["type"] in ("support", "mixed") and close_price >= near_zone["price"])
         score, breakdown = compute_confluence_score(
             "BUY", rsi_val, structure, full["sweeps"], full["fvg"], full["vol_filter_ok"],
-            full["macd_bias"], full["candle_pattern"], full["divergence"], sr_confluence, macro_bullish
+            full["macd_bias"], full["candle_pattern"], full["divergence"], sr_confluence,
+            entry_bullish, macro_bullish
         )
         if score >= min_confluence_score and state["last_signal"] != "BUY":
             targets = calculate_targets("BUY", close_price, atr_val, full["order_block"], near_zone)
@@ -158,7 +159,8 @@ def _decide_trade(close_price, rsi_val, atr_val, trend_bullish, macro_bullish,
         sr_confluence = bool(near_zone and near_zone["type"] in ("resistance", "mixed") and close_price <= near_zone["price"])
         score, breakdown = compute_confluence_score(
             "SELL", rsi_val, structure, full["sweeps"], full["fvg"], full["vol_filter_ok"],
-            full["macd_bias"], full["candle_pattern"], full["divergence"], sr_confluence, not macro_bullish
+            full["macd_bias"], full["candle_pattern"], full["divergence"], sr_confluence,
+            entry_bullish, not macro_bullish
         )
         if score >= min_confluence_score and state["last_signal"] != "SELL":
             targets = calculate_targets("SELL", close_price, atr_val, full["order_block"], near_zone)
@@ -372,7 +374,7 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
 
         trade = _decide_trade(
             round(float(close_price), 2), round(float(rsi_val), 2), round(float(atr_val), 2),
-            trend_bullish, macro_bullish, full, state, min_confluence_score, min_rrr
+            entry_bullish, trend_bullish, macro_bullish, full, state, min_confluence_score, min_rrr
         )
         if trade is None:
             continue
