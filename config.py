@@ -44,7 +44,7 @@ ALERT_STATE = {
     "rsi_buy_threshold": 40.0,
     "rsi_sell_threshold": 60.0,
 
-    "sl_atr_mult": 1.5,
+    "sl_atr_mult": 1.7,
     "tp1_atr_mult": 2.0,
     "tp2_atr_mult": 3.5,
     "min_rrr": 1.3,  # minimum TP1:SL reward-to-risk ratio required to fire a signal

@@ -1,3 +1,5 @@
+import logging
+import asyncio
 import MetaTrader5 as mt5
 import pandas_ta as ta
 from datetime import datetime, timezone
@@ -8,6 +10,7 @@ from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS, save_sett
 from database import get_signal_stats
 from mt5_engine import get_gold_symbol, fetch_candles
 from news_engine import fetch_economic_events
+from strategy.backtester import run_backtest, generate_equity_chart
 from strategy.evaluator import analyze_market
 from bot.jobs import (
     build_status_snapshot,
@@ -37,7 +40,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/status` - Full Health Check\n"
         "• `/stats` - Forward-Testing Performance & Win Rate\n"
         "• `/heartbeat` - View/Adjust Periodic Pings\n"
-        "• `/diagnose` - Live Signal Diagnostic Check\n\n"
+        "• `/diagnose` - Live Signal Diagnostic Check\n"
+        "• `/backtest <days> [mode]` - Replay Strategy Over Historical Data\n\n"
         "💓 24/7 monitoring is active in this chat.",
         parse_mode="Markdown"
     )
@@ -349,17 +353,81 @@ async def diagnose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Diagnostic failed.")
         return
 
+async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    days = 30
+    mode = None
+
+    if args:
+        try:
+            days = int(args[0])
+        except ValueError:
+            await update.message.reply_text("⚠️ **Usage:** `/backtest <days> [scalp|intraday|swing]`", parse_mode="Markdown")
+            return
+        if len(args) >= 2:
+            mode = args[1].lower()
+            if mode not in TIMEFRAME_PRESETS:
+                await update.message.reply_text("⚠️ Invalid mode. Use `scalp`, `intraday`, or `swing`.", parse_mode="Markdown")
+                return
+
+    days = max(1, min(days, 180))
+
+    symbol = get_gold_symbol()
+    if not symbol:
+        await update.message.reply_text("❌ MT5 Gold symbol not found.")
+        return
+
+    label = mode or ALERT_STATE['timeframe_mode']
+    progress_msg = await update.message.reply_text(f"⏳ Running backtest — `{days}d` on `{label}`... `0%`", parse_mode="Markdown")
+
+    loop = asyncio.get_running_loop()
+
+    def progress_callback(pct):
+        async def _edit():
+            try:
+                await progress_msg.edit_text(f"⏳ Running backtest — `{days}d` on `{label}`... `{pct}%`", parse_mode="Markdown")
+            except Exception:
+                pass  # ignore harmless "message not modified" / edit rate-limit errors
+        asyncio.run_coroutine_threadsafe(_edit(), loop)
+
+    try:
+        result = await asyncio.to_thread(run_backtest, symbol, days, mode, progress_callback=progress_callback)
+    except Exception as e:
+        logging.exception("Backtest crashed")
+        await update.message.reply_text(f"❌ **Backtest crashed:** `{e}`\n\nCheck the console log for the full traceback.", parse_mode="Markdown")
+        return
+
+    if "error" in result:
+        await update.message.reply_text(f"❌ **Backtest failed:** {result['error']}", parse_mode="Markdown")
+        return
+
+    if result["total_trades"] == 0:
+        await update.message.reply_text(
+            f"📭 **No signals fired** over the last `{result['days']}d` on `{result['mode']}` "
+            f"(min score `{result['min_confluence_score']}`, min RRR `1:{result['min_rrr']}`).",
+            parse_mode="Markdown"
+        )
+        return
+
+    factor_lines = "\n".join(
+        f"  • {label}: `{wr}%` win rate ({n} occurrences)"
+        for label, wr, n in result["factor_summary"][:6]
+    ) or "  • Not enough closed trades yet for a factor breakdown."
+
     msg = (
-        "🔍 **LIVE TRIGGER DIAGNOSTIC**\n\n"
-        f"📍 **Price:** `${analysis['close_price']}` | **14-ATR:** `${analysis['atr_val']}`\n"
-        f"📈 **RSI:** `{analysis['rsi_val']}` (Buy ≤ `{ALERT_STATE['rsi_buy_threshold']}`, Sell ≥ `{ALERT_STATE['rsi_sell_threshold']}`)\n\n"
-        f"• **5M EMA:** {'🟢 Bull' if analysis['entry_bullish'] else '🔴 Bear'}\n"
-        f"• **1H EMA:** {'🟢 Bull' if analysis['trend_bullish'] else '🔴 Bear'}\n"
-        f"• **4H EMA:** {'🟢 Bull' if analysis['macro_bullish'] else '🔴 Bear'}\n\n"
-        f"💧 **Liquidity Sweep:** Bullish={analysis['sweeps']['bullish_sweep']}, Bearish={analysis['sweeps']['bearish_sweep']}\n"
-        f"⚡ **Fair Value Gap:** Bullish={analysis['fvg']['bullish_fvg']}, Bearish={analysis['fvg']['bearish_fvg']}\n"
-        f"🧱 **Order Block:** Bullish={analysis['order_block']['bullish_ob']}, Bearish={analysis['order_block']['bearish_ob']}"
-        + (f" @ `${analysis['order_block']['ob_level']}`" if analysis['order_block']['ob_level'] is not None else "") + "\n"
-        f"📐 **Min RRR Required:** `1:{ALERT_STATE['min_rrr']}`"
+        f"🧪 **BACKTEST RESULTS — {result['mode'].upper()}** ({result['days']}d)\n\n"
+        f"• **Trades:** `{result['total_trades']}` | **Wins:** `{result['wins']}` | **Losses:** `{result['losses']}` | **Open:** `{result['open']}`\n"
+        f"• **Win Rate:** `{result['win_rate']}%`\n"
+        f"• **Avg R / Trade:** `{result['avg_r']}R` | **Net R:** `{result['net_r']}R`\n"
+        f"• **Max Drawdown:** `{result['max_drawdown_r']}R`\n"
+        f"• **Filters:** Min Score `{result['min_confluence_score']}/100`, Min RRR `1:{result['min_rrr']}`\n\n"
+        f"📊 **Top Confluence Factors (win rate when present):**\n{factor_lines}\n\n"
+        f"⚠️ *Simulated on historical bars with a synthetic spread — real fills, slippage, and news gaps will vary. "
+        f"Hypothetical/backtested results are not indicative of future performance.*"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+
+    chart_buf = generate_equity_chart(result["equity_curve"], title=f"XAUUSD Backtest Equity — {result['mode'].upper()} ({result['days']}d)")
+    if chart_buf:
+        await update.message.reply_photo(photo=chart_buf, caption=msg, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(msg, parse_mode="Markdown")
