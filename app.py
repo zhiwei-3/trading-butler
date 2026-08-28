@@ -6,7 +6,7 @@ from mt5_engine import init_mt5
 from bot.commands import (
     start_cmd, enable_scanner, disable_scanner, news_calendar_cmd,
     spread_check_cmd, calc_risk, gold_snapshot, market_session,
-    set_timeframe, filters_cmd, confluence_cmd, watchlist_cmd,
+    set_timeframe, set_strategy_cmd, filters_cmd, confluence_cmd, watchlist_cmd,
     heartbeat_cmd, status_cmd, diagnose_cmd, stats_cmd, backtest_cmd
 )
 from bot.jobs import market_scanner_job, signal_outcome_tracker_job
@@ -41,6 +41,7 @@ def main():
     app.add_handler(CommandHandler("gold", gold_snapshot))
     app.add_handler(CommandHandler("session", market_session))
     app.add_handler(CommandHandler("timeframe", set_timeframe))
+    app.add_handler(CommandHandler("strategy", set_strategy_cmd))
     app.add_handler(CommandHandler("filters", filters_cmd))
     app.add_handler(CommandHandler("confluence", confluence_cmd))
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))

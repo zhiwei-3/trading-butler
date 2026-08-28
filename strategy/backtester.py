@@ -130,10 +130,39 @@ def _full_analysis(entry_slice, state):
 
 
 def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, macro_bullish,
-                   full, state, min_confluence_score, min_rrr):
+                   full, state, min_confluence_score, min_rrr, strategy_name="smc_confluence"):
     """Mirrors strategy.evaluator.evaluate_signals' BUY/SELL branch, but writes debounce
     state locally instead of mutating the global ALERT_STATE, and returns a trade dict
     instead of dispatching a Telegram message."""
+
+    if strategy_name == "htf_fvg_sweep":
+        fvg, sweeps, ob = full["fvg"], full["sweeps"], full["order_block"]
+        macro_fvg = full.get("macro_fvg", {})
+
+        htf_bull_tap = macro_fvg.get("bullish_fvg", False)
+        htf_bear_tap = macro_fvg.get("bearish_fvg", False)
+
+        bullish_setup = (
+            htf_bull_tap and sweeps.get("bullish_sweep", False) and 
+            structure == "BULLISH_BOS" and fvg.get("bullish_fvg", False)
+        )
+        bearish_setup = (
+            htf_bear_tap and sweeps.get("bearish_sweep", False) and 
+            structure == "BEARISH_BOS" and fvg.get("bearish_fvg", False)
+        )
+
+        if bullish_setup:
+            targets = calculate_targets("BUY", close_price, atr_val, ob, near_zone)
+            if targets["rrr"] >= min_rrr:
+                return {"direction": "BUY", "entry": close_price, "score": 90, "breakdown": [], **targets}
+
+        elif bearish_setup:
+            targets = calculate_targets("SELL", close_price, atr_val, ob, near_zone)
+            if targets["rrr"] >= min_rrr:
+                return {"direction": "SELL", "entry": close_price, "score": 90, "breakdown": [], **targets}
+
+        return None
+
     buy_th, sell_th = state["rsi_buy_threshold"], state["rsi_sell_threshold"]
     structure = full["structure"]
     near_zone = nearest_sr_zone(full["sr_zones"], close_price)
@@ -226,8 +255,8 @@ def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forwa
     return ("HIT_TP1" if hit_tp1 else "OPEN"), times[end_idx]
 
 
-def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None, min_rrr=None,
-                  spread_pips=2.0, progress_callback=None):
+def run_backtest(symbol, days=30, timeframe_mode=None, strategy_name=None, 
+                 min_confluence_score=None, min_rrr=None, spread_pips=2.0, progress_callback=None):
     """
     Replays the live strategy bar-by-bar over historical MT5 data with isolated debounce
     state (never touches the live ALERT_STATE). Expensive SMC/pattern detection is only
@@ -238,6 +267,7 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
 
     progress_callback, if given, is called with an int 0-100 roughly every 10% of bars.
     """
+    active_strat = strategy_name or ALERT_STATE.get("active_strategy", "smc_confluence")
     mode = timeframe_mode or ALERT_STATE["timeframe_mode"]
     if mode not in TIMEFRAME_PRESETS:
         return {"error": f"Unknown timeframe mode '{mode}'"}
@@ -374,7 +404,8 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
 
         trade = _decide_trade(
             round(float(close_price), 2), round(float(rsi_val), 2), round(float(atr_val), 2),
-            entry_bullish, trend_bullish, macro_bullish, full, state, min_confluence_score, min_rrr
+            entry_bullish, trend_bullish, macro_bullish, full, state, min_confluence_score, min_rrr,
+            strategy_name=active_strat
         )
         if trade is None:
             continue

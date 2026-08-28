@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS, save_settings
+from config import ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, CONFLUENCE_WEIGHTS, save_settings
 from database import get_signal_stats
 from mt5_engine import get_gold_symbol, fetch_candles
 from news_engine import fetch_economic_events
@@ -265,6 +265,31 @@ async def set_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ALERT_STATE["last_rsi_signal"] = None
     save_settings()
     await update.message.reply_text(f"✅ Timeframe set to `{mode.upper()}` ({preset['label']})", parse_mode="Markdown")
+
+async def set_strategy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    current = ALERT_STATE.get("active_strategy", "smc_confluence")
+
+    if not args or args[0].lower() not in STRATEGY_PRESETS:
+        lines = "\n".join(f"• `{k}` — {v}" for k, v in STRATEGY_PRESETS.items())
+        await update.message.reply_text(
+            f"⚙️ **ACTIVE STRATEGY:** `{current.upper()}`\n\n"
+            f"**Available Presets:**\n{lines}\n\n"
+            f"**Usage:** `/strategy smc_confluence` or `/strategy ema_cross`",
+            parse_mode="Markdown"
+        )
+        return
+
+    mode = args[0].lower()
+    ALERT_STATE["active_strategy"] = mode
+    save_settings()
+
+    strategy_label = STRATEGY_PRESETS[mode]
+    await update.message.reply_text(
+        f"✅ Active strategy updated to `{mode.upper()}`\n"
+        f"📝 {strategy_label}",
+        parse_mode="Markdown"
+    )
 
 async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args

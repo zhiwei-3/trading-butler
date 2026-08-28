@@ -20,6 +20,14 @@ TIMEFRAME_PRESETS = {
     "swing":    {"entry": mt5.TIMEFRAME_H1,  "trend": mt5.TIMEFRAME_H4,  "macro": mt5.TIMEFRAME_D1, "label": "1H Entry / 4H Trend / Daily Macro (Swing)"},
 }
 
+STRATEGY_PRESETS = {
+    "smc_confluence": "Smart Money Concepts + Multi-TF Confluence (Default)",
+    "htf_fvg_sweep": "HTF (1H) FVG Tap + LTF (5M) Sweep & Shift Model",
+    "smc_displacement": "SMC Displacement & FVG Expansion Strategy",
+    "ema_cross": "Triple EMA Trend Crossover + Volatility Filter",
+    "rsi_reversion": "RSI Overbought/Oversold S/R Zone Reversion",
+}
+
 ALERT_STATE = {
     "last_rsi_signal": None,
     "scanner_enabled": True,
@@ -31,6 +39,7 @@ ALERT_STATE = {
     "entry_tf": TIMEFRAME_PRESETS["scalp"]["entry"],
     "trend_tf": TIMEFRAME_PRESETS["scalp"]["trend"],
     "macro_tf": TIMEFRAME_PRESETS["scalp"]["macro"],
+    "active_strategy": "smc_confluence",
 
     "require_structure_break": False,
     "swing_lookback": 60,
@@ -47,7 +56,7 @@ ALERT_STATE = {
     "sl_atr_mult": 1.7,
     "tp1_atr_mult": 2.0,
     "tp2_atr_mult": 3.5,
-    "min_rrr": 1.3,  # minimum TP1:SL reward-to-risk ratio required to fire a signal
+    "min_rrr": 2,  # minimum TP1:SL reward-to-risk ratio required to fire a signal
 
     "min_confluence_score": 35,
     "sr_lookback": 180,
@@ -57,8 +66,8 @@ ALERT_STATE = {
 
     "setup_forming_enabled": True,
     "last_watch_signal": None,
-    "watch_rsi_margin": 10,
-    "watch_score_margin": 25,
+    "watch_rsi_margin": 5,
+    "watch_score_margin": 10,
 
     "heartbeat_enabled": True,
     "heartbeat_interval_hours": 1,
@@ -86,6 +95,7 @@ PERSISTENT_KEYS = [
     "scanner_enabled",
     "max_allowed_spread_pips",
     "timeframe_mode",
+    "active_strategy",
     "require_structure_break",
     "require_volume_atr_filter",
     "atr_multiplier",
