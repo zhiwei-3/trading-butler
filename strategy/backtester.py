@@ -114,9 +114,6 @@ def _advance_cursor(times_arr, cursor, ts):
 
 
 def _full_analysis(entry_slice, state):
-    """The expensive, structurally-windowed SMC/pattern detectors. Only called for bars
-    that already passed the cheap RSI+trend+macro gate below, since those are the only
-    bars where the result could possibly change the outcome."""
     swing_highs, swing_lows = find_swing_points(entry_slice, state["fractal_window"], state["fractal_window"])
     return {
         "sweeps": detect_liquidity_sweeps(entry_slice, swing_highs, swing_lows),
@@ -126,59 +123,116 @@ def _full_analysis(entry_slice, state):
         "macd_bias": entry_slice['MACD_BIAS'].iloc[-1] if 'MACD_BIAS' in entry_slice.columns else None,
         "candle_pattern": detect_candlestick_pattern(entry_slice),
         "divergence": detect_divergence(entry_slice),
+        "open_price": entry_slice['open'].iloc[-1],  # Added open_price
     }
 
 
 def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, macro_bullish,
                    full, state, min_confluence_score, min_rrr, strategy_name="smc_confluence"):
-    """Mirrors strategy.evaluator.evaluate_signals' BUY/SELL branch, but writes debounce
-    state locally instead of mutating the global ALERT_STATE, and returns a trade dict
-    instead of dispatching a Telegram message."""
+    """Mirrors strategy.evaluator.evaluate_signals' BUY/SELL branches for all active strategy modes."""
+    buy_th, sell_th = state["rsi_buy_threshold"], state["rsi_sell_threshold"]
+    
+    # Extract structural variables at the very top to prevent UnboundLocalError
+    structure = full.get("structure", "NEUTRAL")
+    near_zone = nearest_sr_zone(full.get("sr_zones", []), close_price)
+    fvg = full.get("fvg", {})
+    sweeps = full.get("sweeps", {})
+    order_block = full.get("order_block", {})
+    macro_fvg = full.get("macro_fvg", {})
 
+    # ---------------------------------------------------------
+    # 1. HTF FVG TAP + LTF SWEEP & SHIFT STRATEGY
+    # ---------------------------------------------------------
     if strategy_name == "htf_fvg_sweep":
-        fvg, sweeps, ob = full["fvg"], full["sweeps"], full["order_block"]
-        macro_fvg = full.get("macro_fvg", {})
+        fvg_top = macro_fvg.get("fvg_top", 0)
+        fvg_bottom = macro_fvg.get("fvg_bottom", 0)
 
-        htf_bull_tap = macro_fvg.get("bullish_fvg", False)
-        htf_bear_tap = macro_fvg.get("bearish_fvg", False)
+        htf_bull_tap = macro_fvg.get("bullish_fvg", False) and (fvg_bottom <= close_price <= fvg_top)
+        htf_bear_tap = macro_fvg.get("bearish_fvg", False) and (fvg_bottom <= close_price <= fvg_top)
 
         bullish_setup = (
-            htf_bull_tap and sweeps.get("bullish_sweep", False) and 
+            htf_bull_tap and sweeps.get("bullish_sweep", False) and
             structure == "BULLISH_BOS" and fvg.get("bullish_fvg", False)
         )
         bearish_setup = (
-            htf_bear_tap and sweeps.get("bearish_sweep", False) and 
+            htf_bear_tap and sweeps.get("bearish_sweep", False) and
             structure == "BEARISH_BOS" and fvg.get("bearish_fvg", False)
         )
 
         if bullish_setup:
-            targets = calculate_targets("BUY", close_price, atr_val, ob, near_zone)
+            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
             if targets["rrr"] >= min_rrr:
                 return {"direction": "BUY", "entry": close_price, "score": 90, "breakdown": [], **targets}
 
         elif bearish_setup:
-            targets = calculate_targets("SELL", close_price, atr_val, ob, near_zone)
+            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
             if targets["rrr"] >= min_rrr:
                 return {"direction": "SELL", "entry": close_price, "score": 90, "breakdown": [], **targets}
 
         return None
 
-    buy_th, sell_th = state["rsi_buy_threshold"], state["rsi_sell_threshold"]
-    structure = full["structure"]
-    near_zone = nearest_sr_zone(full["sr_zones"], close_price)
+    # ---------------------------------------------------------
+    # 2. SMC DISPLACEMENT STRATEGY
+    # ---------------------------------------------------------
+    elif strategy_name == "smc_displacement":
+        open_price = float(full.get("open_price", close_price))
+        candle_body = abs(close_price - open_price)
+        has_displacement = candle_body >= (atr_val * 1.2)
 
+        bullish_disp = (
+            has_displacement and close_price > open_price and
+            (structure == "BULLISH_BOS" or fvg.get("bullish_fvg", False)) and
+            (trend_bullish or macro_bullish)
+        )
+        bearish_disp = (
+            has_displacement and close_price < open_price and
+            (structure == "BEARISH_BOS" or fvg.get("bearish_fvg", False)) and
+            ((not trend_bullish) or (not macro_bullish))
+        )
+
+        if bullish_disp:
+            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
+            if targets["rrr"] >= min_rrr:
+                return {"direction": "BUY", "entry": close_price, "score": 85, "breakdown": [], **targets}
+
+        elif bearish_disp:
+            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
+            if targets["rrr"] >= min_rrr:
+                return {"direction": "SELL", "entry": close_price, "score": 85, "breakdown": [], **targets}
+
+        return None
+
+    # ---------------------------------------------------------
+    # 3. TRIPLE EMA CROSSOVER STRATEGY
+    # ---------------------------------------------------------
+    elif strategy_name == "ema_cross":
+        if entry_bullish and state.get("prev_ema_bearish", False):
+            sl = round(close_price - (atr_val * 1.5), 2)
+            tp1 = round(close_price + (atr_val * 2.5), 2)
+            tp2 = round(close_price + (atr_val * 3.5), 2)
+            return {"direction": "BUY", "entry": close_price, "sl_price": sl, "tp1_price": tp1, "tp2_price": tp2, "tp1_dist": atr_val*2.5, "sl_dist": atr_val*1.5, "tp2_dist": atr_val*3.5, "score": 70, "breakdown": []}
+        elif (not entry_bullish) and state.get("prev_ema_bullish", False):
+            sl = round(close_price + (atr_val * 1.5), 2)
+            tp1 = round(close_price - (atr_val * 2.5), 2)
+            tp2 = round(close_price - (atr_val * 3.5), 2)
+            return {"direction": "SELL", "entry": close_price, "sl_price": sl, "tp1_price": tp1, "tp2_price": tp2, "tp1_dist": atr_val*2.5, "sl_dist": atr_val*1.5, "tp2_dist": atr_val*3.5, "score": 70, "breakdown": []}
+        return None
+
+    # ---------------------------------------------------------
+    # 4. DEFAULT: SMC MULTI-TF CONFLUENCE STRATEGY
+    # ---------------------------------------------------------
     buy_structure_ok = (not state["require_structure_break"]) or (structure == "BULLISH_BOS")
     sell_structure_ok = (not state["require_structure_break"]) or (structure == "BEARISH_BOS")
 
     if rsi_val <= buy_th and (trend_bullish or macro_bullish) and buy_structure_ok:
         sr_confluence = bool(near_zone and near_zone["type"] in ("support", "mixed") and close_price >= near_zone["price"])
         score, breakdown = compute_confluence_score(
-            "BUY", rsi_val, structure, full["sweeps"], full["fvg"], full["vol_filter_ok"],
+            "BUY", rsi_val, structure, sweeps, fvg, full["vol_filter_ok"],
             full["macd_bias"], full["candle_pattern"], full["divergence"], sr_confluence,
             entry_bullish, macro_bullish
         )
         if score >= min_confluence_score and state["last_signal"] != "BUY":
-            targets = calculate_targets("BUY", close_price, atr_val, full["order_block"], near_zone)
+            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "BUY"
                 return {"direction": "BUY", "entry": close_price, "score": score, "breakdown": breakdown, **targets}
@@ -187,12 +241,12 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
     if rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok:
         sr_confluence = bool(near_zone and near_zone["type"] in ("resistance", "mixed") and close_price <= near_zone["price"])
         score, breakdown = compute_confluence_score(
-            "SELL", rsi_val, structure, full["sweeps"], full["fvg"], full["vol_filter_ok"],
+            "SELL", rsi_val, structure, sweeps, fvg, full["vol_filter_ok"],
             full["macd_bias"], full["candle_pattern"], full["divergence"], sr_confluence,
             entry_bullish, not macro_bullish
         )
         if score >= min_confluence_score and state["last_signal"] != "SELL":
-            targets = calculate_targets("SELL", close_price, atr_val, full["order_block"], near_zone)
+            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "SELL"
                 return {"direction": "SELL", "entry": close_price, "score": score, "breakdown": breakdown, **targets}
@@ -396,10 +450,12 @@ def run_backtest(symbol, days=30, timeframe_mode=None, strategy_name=None,
         if macro_cursor != cached_sr_macro_cursor:
             macro_slice = df_macro.iloc[max(0, macro_cursor - (HTF_WINDOW - 1)):macro_cursor + 1].reset_index(drop=True)
             cached_sr_zones = find_sr_zones(macro_slice)
+            cached_macro_fvg = detect_fvg(macro_slice)  # Compute macro_fvg
             cached_sr_macro_cursor = macro_cursor
 
         full = _full_analysis(entry_slice, state)
         full["sr_zones"] = cached_sr_zones
+        full["macro_fvg"] = cached_macro_fvg  # Attached macro_fvg
         full["vol_filter_ok"] = vol_filter_ok
 
         trade = _decide_trade(

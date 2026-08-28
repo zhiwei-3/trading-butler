@@ -37,6 +37,9 @@ def _eval_ema_cross(a):
         msg = f"🏆 **EMA CROSS SELL ALERT** 🔴\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
         signals.append(msg)
 
+    if not (bullish_setup or bearish_setup):
+        ALERT_STATE["last_rsi_signal"] = None
+
     return signals, watches
 
 def _eval_smc_displacement(a):
@@ -116,6 +119,9 @@ def _eval_smc_displacement(a):
             )
             signals.append(msg)
 
+    if not (bullish_setup or bearish_setup):
+        ALERT_STATE["last_rsi_signal"] = None
+
     return signals, watches
 
 def _eval_htf_fvg_ltf_sweep(a):
@@ -131,11 +137,15 @@ def _eval_htf_fvg_ltf_sweep(a):
     fvg, sweeps, structure = a["fvg"], a["sweeps"], a["structure"]
     order_block, near_zone = a["order_block"], a["near_zone"]
 
+    fvg_top = macro_fvg.get("fvg_top", 0)
+    fvg_bottom = macro_fvg.get("fvg_bottom", 0)
+
     signals, watches = [], []
 
     # Step 1 & 2: Higher-Timeframe (1H) FVG Active/Tap
-    htf_bull_tap = macro_fvg.get("bullish_fvg", False)
-    htf_bear_tap = macro_fvg.get("bearish_fvg", False)
+    # Verify price is inside the 1H FVG boundary
+    htf_bull_tap = macro_fvg.get("bullish_fvg") and (fvg_bottom <= close_price <= fvg_top)
+    htf_bear_tap = macro_fvg.get("bearish_fvg") and (fvg_bottom <= close_price <= fvg_top)
 
     # Step 3 & 4: Lower-Timeframe (5M) Liquidity Sweep + BOS + LTF FVG Creation
     bullish_setup = (
@@ -195,6 +205,9 @@ def _eval_htf_fvg_ltf_sweep(a):
                 f"⚡ **5M FVG Entry:** `Bearish FVG Formed ✅`"
             )
             signals.append(msg)
+
+    if not (bullish_setup or bearish_setup):
+        ALERT_STATE["last_rsi_signal"] = None
 
     return signals, watches
 
