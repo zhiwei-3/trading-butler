@@ -125,29 +125,16 @@ def _eval_smc_displacement(a):
     return signals, watches
 
 def _eval_htf_fvg_ltf_sweep(a):
-    """
-    Multi-Timeframe HTF FVG + LTF Sweep & Shift Model:
-    1. HTF (1H) FVG Tap confirmed
-    2. LTF (5M) Liquidity Sweep confirmed
-    3. LTF (5M) Market Structure Shift (BOS) confirmed
-    4. LTF (5M) FVG Imbalance formed for entry
-    """
     close_price, atr_val = a["close_price"], a["atr_val"]
     macro_fvg = a.get("macro_fvg", {})
     fvg, sweeps, structure = a["fvg"], a["sweeps"], a["structure"]
     order_block, near_zone = a["order_block"], a["near_zone"]
 
-    fvg_top = macro_fvg.get("fvg_top", 0)
-    fvg_bottom = macro_fvg.get("fvg_bottom", 0)
-
     signals, watches = [], []
 
-    # Step 1 & 2: Higher-Timeframe (1H) FVG Active/Tap
-    # Verify price is inside the 1H FVG boundary
-    htf_bull_tap = macro_fvg.get("bullish_fvg") and (fvg_bottom <= close_price <= fvg_top)
-    htf_bear_tap = macro_fvg.get("bearish_fvg") and (fvg_bottom <= close_price <= fvg_top)
+    htf_bull_tap = macro_fvg.get("bullish_fvg", False)
+    htf_bear_tap = macro_fvg.get("bearish_fvg", False)
 
-    # Step 3 & 4: Lower-Timeframe (5M) Liquidity Sweep + BOS + LTF FVG Creation
     bullish_setup = (
         htf_bull_tap and
         sweeps.get("bullish_sweep", False) and
