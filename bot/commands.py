@@ -287,10 +287,10 @@ async def set_strategy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     strategy_label = STRATEGY_PRESETS[mode]
     await update.message.reply_text(
         f"✅ Active strategy updated to `{mode.upper()}`\n"
-        f"📝 {strategy_label}",
+        f"📝 `{strategy_label}`",
         parse_mode="Markdown"
     )
-
+    
 async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:

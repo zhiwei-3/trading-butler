@@ -86,17 +86,9 @@ def _advance_cursor(times_arr, cursor, ts):
     return cursor
 
 def _full_analysis_with_memory(entry_slice, state, lookback_bars=10):
-    """Scans across a lookback window of bars to detect recent SMC signals sequential steps."""
-    recent_slice = entry_slice.tail(lookback_bars)
-    
-    # Check if FVG exists anywhere in recent lookback
     fvg = detect_fvg(entry_slice)
-    
-    # Check if sweeps occurred recently
     swing_highs, swing_lows = find_swing_points(entry_slice, state["fractal_window"], state["fractal_window"])
     sweeps = detect_liquidity_sweeps(entry_slice, swing_highs, swing_lows)
-    
-    # Check market structure
     structure = detect_market_structure(entry_slice)
 
     return {
@@ -122,10 +114,12 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
 
     # 1. HTF FVG TAP + LTF SWEEP & SHIFT STRATEGY
     if strategy_name == "htf_fvg_sweep":
-        htf_bull_tap = macro_fvg.get("bullish_fvg", False)
-        htf_bear_tap = macro_fvg.get("bearish_fvg", False)
+        fvg_top = macro_fvg.get("fvg_top", 0)
+        fvg_bottom = macro_fvg.get("fvg_bottom", 0)
 
-        # Triggers if HTF FVG active + Recent Sweep + BOS/FVG on LTF
+        htf_bull_tap = macro_fvg.get("bullish_fvg", False) and (fvg_bottom <= close_price <= fvg_top if fvg_top > 0 else True)
+        htf_bear_tap = macro_fvg.get("bearish_fvg", False) and (fvg_bottom <= close_price <= fvg_top if fvg_top > 0 else True)
+
         bullish_setup = (
             htf_bull_tap and 
             (sweeps.get("bullish_sweep", False) or structure == "BULLISH_BOS") and 
@@ -157,15 +151,17 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
     elif strategy_name == "smc_displacement":
         open_price = float(full.get("open_price", close_price))
         candle_body = abs(close_price - open_price)
-        has_displacement = candle_body >= (atr_val * 0.8)  # Scaled expansion threshold
+        has_displacement = candle_body >= (atr_val * 1.0)
 
         bullish_disp = (
             has_displacement and close_price > open_price and
-            (structure == "BULLISH_BOS" or fvg.get("bullish_fvg", False) or sweeps.get("bullish_sweep", False))
+            (structure == "BULLISH_BOS" or fvg.get("bullish_fvg", False)) and
+            (trend_bullish or macro_bullish)
         )
         bearish_disp = (
             has_displacement and close_price < open_price and
-            (structure == "BEARISH_BOS" or fvg.get("bearish_fvg", False) or sweeps.get("bearish_sweep", False))
+            (structure == "BEARISH_BOS" or fvg.get("bearish_fvg", False)) and
+            ((not trend_bullish) or (not macro_bullish))
         )
 
         if bullish_disp and state.get("last_signal") != "BUY":
@@ -206,7 +202,28 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
         state["last_signal"] = None
         return None
 
-    # 4. DEFAULT: SMC MULTI-TF CONFLUENCE STRATEGY
+    # 4. RSI REVERSION STRATEGY
+    elif strategy_name == "rsi_reversion":
+        bullish_rev = (rsi_val <= buy_th and near_zone and near_zone["type"] in ("support", "mixed"))
+        bearish_rev = (rsi_val >= sell_th and near_zone and near_zone["type"] in ("resistance", "mixed"))
+
+        if bullish_rev and state.get("last_signal") != "BUY":
+            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
+            if targets["rrr"] >= min_rrr:
+                state["last_signal"] = "BUY"
+                return {"direction": "BUY", "entry": close_price, "score": 75, "breakdown": [], **targets}
+
+        elif bearish_rev and state.get("last_signal") != "SELL":
+            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
+            if targets["rrr"] >= min_rrr:
+                state["last_signal"] = "SELL"
+                return {"direction": "SELL", "entry": close_price, "score": 75, "breakdown": [], **targets}
+
+        if not (bullish_rev or bearish_rev):
+            state["last_signal"] = None
+        return None
+
+    # 5. DEFAULT: SMC MULTI-TF CONFLUENCE STRATEGY
     buy_structure_ok = (not state["require_structure_break"]) or (structure == "BULLISH_BOS")
     sell_structure_ok = (not state["require_structure_break"]) or (structure == "BEARISH_BOS")
 
@@ -217,26 +234,24 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
             full["macd_bias"], full["candle_pattern"], full["divergence"], sr_confluence,
             entry_bullish, macro_bullish
         )
-        if score >= min_confluence_score and state["last_signal"] != "BUY":
+        if score >= min_confluence_score and state.get("last_signal") != "BUY":
             targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "BUY"
                 return {"direction": "BUY", "entry": close_price, "score": score, "breakdown": breakdown, **targets}
-        return None
 
-    if rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok:
+    elif rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok:
         sr_confluence = bool(near_zone and near_zone["type"] in ("resistance", "mixed") and close_price <= near_zone["price"])
         score, breakdown = compute_confluence_score(
             "SELL", rsi_val, structure, sweeps, fvg, full["vol_filter_ok"],
             full["macd_bias"], full["candle_pattern"], full["divergence"], sr_confluence,
             entry_bullish, not macro_bullish
         )
-        if score >= min_confluence_score and state["last_signal"] != "SELL":
+        if score >= min_confluence_score and state.get("last_signal") != "SELL":
             targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "SELL"
                 return {"direction": "SELL", "entry": close_price, "score": score, "breakdown": breakdown, **targets}
-        return None
 
     state["last_signal"] = None
     return None
@@ -300,7 +315,7 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
     state = {
         "rsi_buy_threshold": ALERT_STATE["rsi_buy_threshold"],
         "rsi_sell_threshold": ALERT_STATE["rsi_sell_threshold"],
-        "require_structure_break": False,  # Relaxed for backtesting to avoid 0 trades
+        "require_structure_break": ALERT_STATE["require_structure_break"],
         "require_volume_atr_filter": ALERT_STATE["require_volume_atr_filter"],
         "fractal_window": ALERT_STATE["fractal_window"],
         "last_signal": None,
@@ -310,7 +325,7 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
     atr_multiplier = ALERT_STATE["atr_multiplier"]
     volume_multiplier = ALERT_STATE["volume_multiplier"]
     min_confluence_score = min_confluence_score if min_confluence_score is not None else 35
-    min_rrr = min_rrr if min_rrr is not None else 1.0  # Relaxed floor for testing
+    min_rrr = min_rrr if min_rrr is not None else 1.0
     spread_price = spread_pips / 10.0
 
     end = datetime.now(timezone.utc)
@@ -401,11 +416,10 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
             state["prev_ema_bearish"] = bool(ema20_arr[i-1] <= ema50_arr[i-1])
             state["prev_ema_bullish"] = bool(ema20_arr[i-1] >= ema50_arr[i-1])
 
-        # RSI gate only applies to smc_confluence
-        if active_strat == "smc_confluence":
+        if active_strat in ("smc_confluence", "rsi_reversion"):
             buy_th, sell_th = state["rsi_buy_threshold"], state["rsi_sell_threshold"]
-            buy_gate = rsi_val <= (buy_th + 10)  # Expanded window for backtester
-            sell_gate = rsi_val >= (sell_th - 10)
+            buy_gate = rsi_val <= (buy_th + 5)
+            sell_gate = rsi_val >= (sell_th - 5)
             if not (buy_gate or sell_gate):
                 state["last_signal"] = None
                 continue

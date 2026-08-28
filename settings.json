@@ -2,7 +2,7 @@
     "scanner_enabled": true,
     "max_allowed_spread_pips": 25.0,
     "timeframe_mode": "scalp",
-    "active_strategy": "htf_fvg_sweep",
+    "active_strategy": "smc_displacement",
     "require_structure_break": false,
     "require_volume_atr_filter": false,
     "atr_multiplier": 1.0,
