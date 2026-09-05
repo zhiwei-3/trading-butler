@@ -18,22 +18,23 @@ def _eval_ema_cross(a):
     prev_ema20, prev_ema50 = df['EMA_20'].iloc[-2], df['EMA_50'].iloc[-2]
 
     signals, watches = [], []
-    sl_dist, tp1_dist = round(atr_val * 1.5, 2), round(atr_val * 2.5, 2)
 
     bullish_cross = (prev_ema20 <= prev_ema50 and ema20 > ema50)
     bearish_cross = (prev_ema20 >= prev_ema50 and ema20 < ema50)
 
     if bullish_cross and ALERT_STATE["last_rsi_signal"] != "BUY":
-        ALERT_STATE["last_rsi_signal"] = "BUY"
-        sl_price, tp1_price = round(close_price - sl_dist, 2), round(close_price + tp1_dist, 2)
-        log_signal_to_db("XAUUSD", "BUY", close_price, sl_price, tp1_price, round(close_price + atr_val * 3.5, 2), 70)
-        signals.append(f"🏆 **EMA CROSS BUY ALERT** 🟢\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`")
+        targets = calculate_targets("BUY", close_price, atr_val, a["order_block"], a["near_zone"])
+        if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.0):
+            ALERT_STATE["last_rsi_signal"] = "BUY"
+            log_signal_to_db("XAUUSD", "BUY", close_price, targets["sl_price"], targets["tp1_price"], targets["tp2_price"], 70)
+            signals.append(f"🏆 **EMA CROSS BUY ALERT** 🟢\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${targets['sl_price']}` | 🎯 **TP1:** `${targets['tp1_price']}`")
 
     elif bearish_cross and ALERT_STATE["last_rsi_signal"] != "SELL":
-        ALERT_STATE["last_rsi_signal"] = "SELL"
-        sl_price, tp1_price = round(close_price + sl_dist, 2), round(close_price - tp1_dist, 2)
-        log_signal_to_db("XAUUSD", "SELL", close_price, sl_price, tp1_price, round(close_price - atr_val * 3.5, 2), 70)
-        signals.append(f"🏆 **EMA CROSS SELL ALERT** 🔴\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`")
+        targets = calculate_targets("SELL", close_price, atr_val, a["order_block"], a["near_zone"])
+        if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.0):
+            ALERT_STATE["last_rsi_signal"] = "SELL"
+            log_signal_to_db("XAUUSD", "SELL", close_price, targets["sl_price"], targets["tp1_price"], targets["tp2_price"], 70)
+            signals.append(f"🏆 **EMA CROSS SELL ALERT** 🔴\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${targets['sl_price']}` | 🎯 **TP1:** `${tp1_price}`")
 
     if not (bullish_cross or bearish_cross):
         ALERT_STATE["last_rsi_signal"] = None

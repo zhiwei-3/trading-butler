@@ -112,6 +112,15 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
     order_block = full.get("order_block", {})
     macro_fvg = full.get("macro_fvg", {})
 
+    # Helper to generate basic factor breakdown for statistics tracking
+    def make_breakdown(is_bullish):
+        return [
+            ("EMA Trend Align", 15 if (is_bullish == entry_bullish) else 0, 15),
+            ("Macro Trend Align", 15 if (is_bullish == macro_bullish) else 0, 15),
+            ("Structure BOS", 20 if (structure == ("BULLISH_BOS" if is_bullish else "BEARISH_BOS")) else 0, 20),
+            ("Support/Resistance", 15 if (near_zone and close_price >= near_zone["price"]) else 0, 15),
+        ]
+
     # 1. HTF FVG TAP + LTF SWEEP & SHIFT STRATEGY
     if strategy_name == "htf_fvg_sweep":
         fvg_top = macro_fvg.get("fvg_top", 0)
@@ -120,28 +129,20 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
         htf_bull_tap = macro_fvg.get("bullish_fvg", False) and (fvg_bottom <= close_price <= fvg_top if fvg_top > 0 else True)
         htf_bear_tap = macro_fvg.get("bearish_fvg", False) and (fvg_bottom <= close_price <= fvg_top if fvg_top > 0 else True)
 
-        bullish_setup = (
-            htf_bull_tap and 
-            (sweeps.get("bullish_sweep", False) or structure == "BULLISH_BOS") and 
-            fvg.get("bullish_fvg", False)
-        )
-        bearish_setup = (
-            htf_bear_tap and 
-            (sweeps.get("bearish_sweep", False) or structure == "BEARISH_BOS") and 
-            fvg.get("bearish_fvg", False)
-        )
+        bullish_setup = htf_bull_tap and (sweeps.get("bullish_sweep", False) or structure == "BULLISH_BOS") and fvg.get("bullish_fvg", False)
+        bearish_setup = htf_bear_tap and (sweeps.get("bearish_sweep", False) or structure == "BEARISH_BOS") and fvg.get("bearish_fvg", False)
 
         if bullish_setup and state.get("last_signal") != "BUY":
             targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "BUY"
-                return {"direction": "BUY", "entry": close_price, "score": 90, "breakdown": [], **targets}
+                return {"direction": "BUY", "entry": close_price, "score": 90, "breakdown": make_breakdown(True), **targets}
 
         elif bearish_setup and state.get("last_signal") != "SELL":
             targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "SELL"
-                return {"direction": "SELL", "entry": close_price, "score": 90, "breakdown": [], **targets}
+                return {"direction": "SELL", "entry": close_price, "score": 90, "breakdown": make_breakdown(False), **targets}
 
         if not (bullish_setup or bearish_setup):
             state["last_signal"] = None
@@ -153,28 +154,20 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
         candle_body = abs(close_price - open_price)
         has_displacement = candle_body >= (atr_val * 1.0)
 
-        bullish_disp = (
-            has_displacement and close_price > open_price and
-            (structure == "BULLISH_BOS" or fvg.get("bullish_fvg", False)) and
-            (trend_bullish or macro_bullish)
-        )
-        bearish_disp = (
-            has_displacement and close_price < open_price and
-            (structure == "BEARISH_BOS" or fvg.get("bearish_fvg", False)) and
-            ((not trend_bullish) or (not macro_bullish))
-        )
+        bullish_disp = has_displacement and close_price > open_price and (structure == "BULLISH_BOS" or fvg.get("bullish_fvg", False)) and (trend_bullish or macro_bullish)
+        bearish_disp = has_displacement and close_price < open_price and (structure == "BEARISH_BOS" or fvg.get("bearish_fvg", False)) and ((not trend_bullish) or (not macro_bullish))
 
         if bullish_disp and state.get("last_signal") != "BUY":
             targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "BUY"
-                return {"direction": "BUY", "entry": close_price, "score": 85, "breakdown": [], **targets}
+                return {"direction": "BUY", "entry": close_price, "score": 85, "breakdown": make_breakdown(True), **targets}
 
         elif bearish_disp and state.get("last_signal") != "SELL":
             targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "SELL"
-                return {"direction": "SELL", "entry": close_price, "score": 85, "breakdown": [], **targets}
+                return {"direction": "SELL", "entry": close_price, "score": 85, "breakdown": make_breakdown(False), **targets}
 
         if not (bullish_disp or bearish_disp):
             state["last_signal"] = None
@@ -186,38 +179,36 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
         prev_bullish = state.get("prev_ema_bullish", False)
 
         if entry_bullish and prev_bearish and state.get("last_signal") != "BUY":
-            sl = round(close_price - (atr_val * 1.5), 2)
-            tp1 = round(close_price + (atr_val * 2.5), 2)
-            tp2 = round(close_price + (atr_val * 3.5), 2)
-            state["last_signal"] = "BUY"
-            return {"direction": "BUY", "entry": close_price, "sl_price": sl, "tp1_price": tp1, "tp2_price": tp2, "tp1_dist": atr_val*2.5, "sl_dist": atr_val*1.5, "tp2_dist": atr_val*3.5, "score": 70, "breakdown": []}
+            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
+            if targets["rrr"] >= min_rrr:
+                state["last_signal"] = "BUY"
+                return {"direction": "BUY", "entry": close_price, "score": 70, "breakdown": make_breakdown(True), **targets}
 
         elif (not entry_bullish) and prev_bullish and state.get("last_signal") != "SELL":
-            sl = round(close_price + (atr_val * 1.5), 2)
-            tp1 = round(close_price - (atr_val * 2.5), 2)
-            tp2 = round(close_price - (atr_val * 3.5), 2)
-            state["last_signal"] = "SELL"
-            return {"direction": "SELL", "entry": close_price, "sl_price": sl, "tp1_price": tp1, "tp2_price": tp2, "tp1_dist": atr_val*2.5, "sl_dist": atr_val*1.5, "tp2_dist": atr_val*3.5, "score": 70, "breakdown": []}
+            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
+            if targets["rrr"] >= min_rrr:
+                state["last_signal"] = "SELL"
+                return {"direction": "SELL", "entry": close_price, "score": 70, "breakdown": make_breakdown(False), **targets}
 
         state["last_signal"] = None
         return None
 
-    # 4. RSI REVERSION STRATEGY
+    # 4. RSI REVERSION STRATEGY (Fixed S/R Zone Distance Alignment)
     elif strategy_name == "rsi_reversion":
-        bullish_rev = (rsi_val <= buy_th and near_zone and near_zone["type"] in ("support", "mixed"))
-        bearish_rev = (rsi_val >= sell_th and near_zone and near_zone["type"] in ("resistance", "mixed"))
+        bullish_rev = (rsi_val <= buy_th and near_zone and near_zone["type"] in ("support", "mixed") and close_price >= near_zone["price"])
+        bearish_rev = (rsi_val >= sell_th and near_zone and near_zone["type"] in ("resistance", "mixed") and close_price <= near_zone["price"])
 
         if bullish_rev and state.get("last_signal") != "BUY":
             targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "BUY"
-                return {"direction": "BUY", "entry": close_price, "score": 75, "breakdown": [], **targets}
+                return {"direction": "BUY", "entry": close_price, "score": 75, "breakdown": make_breakdown(True), **targets}
 
         elif bearish_rev and state.get("last_signal") != "SELL":
             targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "SELL"
-                return {"direction": "SELL", "entry": close_price, "score": 75, "breakdown": [], **targets}
+                return {"direction": "SELL", "entry": close_price, "score": 75, "breakdown": make_breakdown(False), **targets}
 
         if not (bullish_rev or bearish_rev):
             state["last_signal"] = None
@@ -324,8 +315,8 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
     }
     atr_multiplier = ALERT_STATE["atr_multiplier"]
     volume_multiplier = ALERT_STATE["volume_multiplier"]
-    min_confluence_score = min_confluence_score if min_confluence_score is not None else 35
-    min_rrr = min_rrr if min_rrr is not None else 1.0
+    min_confluence_score = min_confluence_score if min_confluence_score is not None else ALERT_STATE["min_confluence_score"]
+    min_rrr = min_rrr if min_rrr is not None else ALERT_STATE["min_rrr"]
     spread_price = spread_pips / 10.0
 
     end = datetime.now(timezone.utc)
