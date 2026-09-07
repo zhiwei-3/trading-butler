@@ -1,29 +1,61 @@
 import io
 import pandas as pd
 import numpy as np
-import mplfinance as mpf
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 
-def generate_chart_snapshot(df: pd.DataFrame, title: str = "XAUUSD Technical Snapshot") -> io.BytesIO:
-    """Renders a candlestick chart with EMA overlays into an in-memory BytesIO buffer."""
-    chart_df = df.tail(60).copy()
-    if 'time' in chart_df.columns:
-        chart_df.set_index(pd.DatetimeIndex(chart_df['time']), inplace=True)
+def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=60, near_zone=None, macro_fvg=None):
+    """Generates a real-time candlestick chart buffer for market snapshots."""
+    if df is None or len(df) < bars:
+        return None
 
-    # Dark / Institutional color palette
-    mc = mpf.make_marketcolors(
-        up='#00c853', down='#ff1744',
-        edge='inherit', wick='inherit', volume='in'
-    )
-    style = mpf.make_mpf_style(
-        base_mpf_style='nightclouds',
-        marketcolors=mc,
-        gridstyle='--',
-        y_on_right=True
-    )
+    df_plot = df.tail(bars).copy()
+    fig, ax = plt.subplots(figsize=(10, 5.5), facecolor="#121212")
+    ax.set_facecolor("#121212")
+
+    times = range(len(df_plot))
+    opens = df_plot['open'].values
+    highs = df_plot['high'].values
+    lows = df_plot['low'].values
+    closes = df_plot['close'].values
+
+    # Render Candlesticks
+    up = closes >= opens
+    down = closes < opens
+    col_up, col_dn = '#00c853', '#ff3d00'
+
+    ax.vlines(times, lows, highs, color=np.where(up, col_up, col_dn), linewidth=1, alpha=0.8)
+    ax.vlines(times, opens, closes, color=np.where(up, col_up, col_dn), linewidth=3.5, alpha=0.9)
+
+    # Overlay EMAs if present
+    if 'EMA_20' in df_plot.columns and df_plot['EMA_20'].notna().any():
+        ax.plot(times, df_plot['EMA_20'].values, color="#00b0ff", linewidth=1.2, label="EMA 20")
+    if 'EMA_50' in df_plot.columns and df_plot['EMA_50'].notna().any():
+        ax.plot(times, df_plot['EMA_50'].values, color="#ff9100", linewidth=1.2, label="EMA 50")
+
+    # Current Market Price line
+    current_close = closes[-1]
+    ax.axhline(current_close, color="#ffffff", linestyle="--", linewidth=1.2, label=f"Price: ${current_close:.2f}")
+
+    # Highlight nearest S/R Zone
+    if near_zone and near_zone.get("price"):
+        ax.axhline(near_zone["price"], color="#aa00ff", linestyle="-.", alpha=0.7, label=f"S/R Zone (${near_zone['price']:.2f})")
+
+    ax.set_title(title, color="white", fontsize=12, fontweight="bold")
+    ax.legend(facecolor="#1e1e1e", edgecolor="#333333", labelcolor="white", loc="upper left", fontsize=9)
+    ax.tick_params(colors="white")
+    ax.set_xticks([])  # Hide bar indices for clean view
+
+    for spine in ax.spines.values():
+        spine.set_color("#333333")
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
 def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2, fvg=None, near_zone=None, bars=50):
     """Generates an annotated dark-mode candlestick chart buffer for live Telegram alerts."""
@@ -34,7 +66,7 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2, fvg=None
     fig, ax = plt.subplots(figsize=(10, 5.5), facecolor="#121212")
     ax.set_facecolor("#121212")
 
-    times = df_plot['time'].values
+    times = range(len(df_plot))
     opens = df_plot['open'].values
     highs = df_plot['high'].values
     lows = df_plot['low'].values
@@ -62,9 +94,10 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2, fvg=None
     if near_zone and near_zone.get("price"):
         ax.axhline(near_zone["price"], color="#aa00ff", linestyle="-.", alpha=0.7, label=f"S/R Zone (${near_zone['price']:.2f})")
 
-    ax.set_title(f"🤵‍♂️ Trading Butler Alert — {symbol} ({signal_type})", color="white", fontsize=12, fontweight="bold")
+    ax.set_title(f"Trading Butler Alert — {symbol} ({signal_type})", color="white", fontsize=12, fontweight="bold")
     ax.legend(facecolor="#1e1e1e", edgecolor="#333333", labelcolor="white", loc="upper left", fontsize=9)
     ax.tick_params(colors="white")
+    ax.set_xticks([])
 
     for spine in ax.spines.values():
         spine.set_color("#333333")
@@ -73,26 +106,5 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2, fvg=None
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
     plt.close(fig)
-    buf.seek(0)
-    return buf
-
-    # Overlay indicator plots (20 EMA & 50 EMA)
-    addplots = []
-    if 'EMA_20' in chart_df.columns:
-        addplots.append(mpf.make_addplot(chart_df['EMA_20'], color='#2962ff', width=1.5))
-    if 'EMA_50' in chart_df.columns:
-        addplots.append(mpf.make_addplot(chart_df['EMA_50'], color='#ff6d00', width=1.5))
-
-    buf = io.BytesIO()
-    mpf.plot(
-        chart_df,
-        type='candle',
-        style=style,
-        addplot=addplots,
-        title=f"\n{title}",
-        ylabel='Price ($)',
-        savefig=dict(fname=buf, dpi=180, bbox_inches='tight'),
-        volume=False
-    )
     buf.seek(0)
     return buf

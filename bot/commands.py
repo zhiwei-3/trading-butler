@@ -179,43 +179,40 @@ async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid numerical values.")
 
 async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    symbol = get_gold_symbol()
-    if not symbol:
-        await update.message.reply_text("❌ MT5 Gold symbol not found.")
-        return
-
-    m15_rates = fetch_candles(symbol, mt5.TIMEFRAME_M15, 100)
-    d1_rates = fetch_candles(symbol, mt5.TIMEFRAME_D1, 2)
-    if m15_rates is None or d1_rates is None:
-        await update.message.reply_text("❌ Failed to read MT5 chart data.")
-        return
-
-    today_open = d1_rates['open'].iloc[-1]
-    tick = mt5.symbol_info_tick(symbol)
-    current_price = tick.ask if tick else m15_rates['close'].iloc[-1]
-    daily_change = round(((current_price - today_open) / today_open) * 100, 2)
-    m15_rates['ATR'] = ta.atr(m15_rates['high'], m15_rates['low'], m15_rates['close'], length=14)
-    latest_atr = round(m15_rates['ATR'].iloc[-1], 2)
-
-    # 1. Build Technical Summary Text
-    caption = (
-        f"🪙 **XAUUSD LIVE SNAPSHOT**\n\n"
-        f"• **Current Price:** `${current_price:,.2f}`\n"
-        f"• **24h Change:** `{daily_change}%`\n"
-        f"• **Volatility (14-ATR):** `${latest_atr}` pts\n"
-        f"• **Scanner Status:** `{'ENABLED 🟢' if ALERT_STATE['scanner_enabled'] else 'DISABLED 🔴'}`"
-    )
-
-    # 2. Render In-Memory Chart Snapshot
-    m15_rates['EMA_20'] = ta.ema(m15_rates['close'], length=20)
-    m15_rates['EMA_50'] = ta.ema(m15_rates['close'], length=50)
+    """Handles /gold and /snapshot commands by returning live metrics with an annotated chart photo."""
+    symbol = get_gold_symbol() or "XAUUSD"
     
-    chart_buf = generate_chart_snapshot(
-        df=m15_rates,
-        title=f"XAUUSD - {ALERT_STATE['timeframe_mode'].upper()} (15M Chart)"
+    await update.message.reply_chat_action("upload_photo")
+    analysis = analyze_market(symbol)
+
+    if not analysis:
+        await update.message.reply_text("❌ Failed to fetch MT5 market data for Gold.")
+        return
+
+    close_p = analysis["close_price"]
+    rsi_p = analysis["rsi_val"]
+    atr_p = analysis["atr_val"]
+    tf_lbl = analysis["tf_label"]
+    struct = analysis["structure"]
+
+    # Caption text summary
+    caption = (
+        f"📊 **XAUUSD REAL-TIME MARKET SNAPSHOT**\n\n"
+        f"• **Timeframe:** `{tf_lbl}` | **Price:** `${close_p:.2f}`\n"
+        f"• **RSI (14):** `{rsi_p:.1f}` | **ATR (14):** `${atr_p:.2f}`\n"
+        f"• **Structure:** `{struct}`\n"
+        f"• **Trend:** EMA20 {'above' if analysis['entry_bullish'] else 'below'} EMA50\n"
+        f"• **Macro Bias:** {'🟢 Bullish' if analysis['macro_bullish'] else '🔴 Bearish'}"
     )
 
-    # 3. Dispatch Image with Caption (Falls back to text if chart fails)
+    # Generate real-time candlestick chart image
+    chart_buf = generate_chart_snapshot(
+        df=analysis["df_entry"],
+        title=f"XAUUSD Real-Time Chart ({tf_lbl})",
+        near_zone=analysis.get("near_zone"),
+        macro_fvg=analysis.get("macro_fvg")
+    )
+
     if chart_buf:
         await update.message.reply_photo(
             photo=chart_buf,
