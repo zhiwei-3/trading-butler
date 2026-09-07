@@ -12,7 +12,7 @@
     "sl_atr_mult": 1.7,
     "tp1_atr_mult": 2.0,
     "tp2_atr_mult": 3.5,
-    "min_rrr": 1.5,
+    "min_rrr": 3.0,
     "risk_percent": 1.0,
     "min_confluence_score": 30,
     "setup_forming_enabled": true,

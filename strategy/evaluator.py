@@ -36,8 +36,9 @@ def _eval_ema_cross(a):
         targets = calculate_targets("SELL", close_price, atr_val, a["order_block"], a["near_zone"])
         if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.0):
             ALERT_STATE["last_rsi_signal"] = "SELL"
-            log_signal_to_db("XAUUSD", "SELL", close_price, targets["sl_price"], targets["tp1_price"], targets["tp2_price"], 70)
-            signals.append(f"🏆 **EMA CROSS SELL ALERT** 🔴\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${targets['sl_price']}` | 🎯 **TP1:** `${tp1_price}`")
+            sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
+            log_signal_to_db("XAUUSD", "SELL", close_price, sl_price, tp1_price, tp2_price, 70)
+            signals.append(f"🏆 **EMA CROSS SELL ALERT** 🔴\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`")
 
     if not (bullish_cross or bearish_cross):
         ALERT_STATE["last_rsi_signal"] = None
@@ -457,7 +458,7 @@ def evaluate_smc_confluence(a):
                     f"⚡ **FVG:** {'Bearish FVG ✅' if a['fvg']['bearish_fvg'] else 'None'}\n"
                     f"🧱 **Order Block:** {'Bearish OB ✅ @ $' + str(a['order_block']['ob_level']) if a['order_block']['bearish_ob'] else 'None'}"
                 )
-                signals_found.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, msg))
+                signals_found.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, msg))
 
     elif ALERT_STATE["setup_forming_enabled"] and in_approach_zone:
         if ALERT_STATE["last_watch_signal"] is None:
