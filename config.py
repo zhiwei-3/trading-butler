@@ -57,6 +57,7 @@ ALERT_STATE = {
     "tp1_atr_mult": 2.0,
     "tp2_atr_mult": 3.5,
     "min_rrr": 2,  # minimum TP1:SL reward-to-risk ratio required to fire a signal
+    "risk_percent": 1.0,  # Default 1% risk per trade
 
     "min_confluence_score": 35,
     "sr_lookback": 180,
@@ -106,6 +107,7 @@ PERSISTENT_KEYS = [
     "tp1_atr_mult",
     "tp2_atr_mult",
     "min_rrr",
+    "risk_percent",
     "min_confluence_score",
     "setup_forming_enabled",
     "watch_rsi_margin",

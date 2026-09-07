@@ -1,7 +1,10 @@
 import pandas_ta as ta
 from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
 from database import log_signal_to_db
-from mt5_engine import fetch_candles
+from mt5_engine import (
+    fetch_candles, calculate_position_size
+)
+from strategy.chart import generate_signal_chart
 from strategy.smc import (
     find_swing_points, detect_market_structure, 
     detect_liquidity_sweeps, detect_fvg, detect_order_block
@@ -193,6 +196,25 @@ def _eval_htf_fvg_ltf_sweep(a):
         ALERT_STATE["last_rsi_signal"] = None
 
     return signals, watches
+
+def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, base_msg):
+    sl_dist = abs(close_price - sl_price)
+    risk_pct = ALERT_STATE.get("risk_percent", 1.0)
+    pos = calculate_position_size("XAUUSD", sl_dist, risk_pct)
+
+    pos_info = (
+        f"💼 **Position Sizing ({risk_pct}% Risk):**\n"
+        f"• **Recommended Lots:** `{pos['lots']}` lots\n"
+        f"• **Risk Amount:** `${pos['risk_usd']}` | **Account Equity:** `${pos['balance']}`\n\n"
+    )
+
+    full_msg = base_msg + "\n" + pos_info
+    chart_buf = generate_signal_chart(
+        a["df_entry"], "XAUUSD", direction, close_price, sl_price, tp1_price, tp2_price,
+        fvg=a.get("fvg"), near_zone=a.get("near_zone")
+    )
+
+    return (full_msg, chart_buf)
 
 def score_label(score):
     if score >= 80: return "🔥 Very Strong"

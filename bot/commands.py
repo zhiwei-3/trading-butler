@@ -250,6 +250,53 @@ async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(reply, parse_mode="Markdown")
 
+async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Dynamically updates bot settings in ALERT_STATE."""
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "⚠️ **Usage:** `/set <key> <value>`\n\n"
+            "**Supported Settings:**\n"
+            "• `/set buy_rsi 80` — Buy RSI threshold (30 standard, 80 for testing)\n"
+            "• `/set sell_rsi 20` — Sell RSI threshold (70 standard, 20 for testing)\n"
+            "• `/set score 50` — Minimum confluence score\n"
+            "• `/set rrr 1.5` — Minimum Risk-to-Reward Ratio\n"
+            "• `/set risk 1.0` — Risk percentage per trade",
+            parse_mode="Markdown"
+        )
+        return
+
+    key = context.args[0].lower()
+    val_str = context.args[1]
+
+    try:
+        val = float(val_str)
+        if key in ("buy_rsi", "rsi_buy", "rsi_buy_threshold"):
+            ALERT_STATE["rsi_buy_threshold"] = val
+            setting_name = "rsi_buy_threshold"
+        elif key in ("sell_rsi", "rsi_sell", "rsi_sell_threshold"):
+            ALERT_STATE["rsi_sell_threshold"] = val
+            setting_name = "rsi_sell_threshold"
+        elif key in ("score", "min_score", "min_confluence_score"):
+            ALERT_STATE["min_confluence_score"] = val
+            setting_name = "min_confluence_score"
+        elif key in ("rrr", "min_rrr"):
+            ALERT_STATE["min_rrr"] = val
+            setting_name = "min_rrr"
+        elif key in ("risk", "risk_percent", "risk_pct"):
+            ALERT_STATE["risk_percent"] = val
+            setting_name = "risk_percent"
+        else:
+            await update.message.reply_text(f"❌ Unknown setting key `{key}`.", parse_mode="Markdown")
+            return
+
+        save_settings()
+        await update.message.reply_text(
+            f"✅ **Setting Updated**\n\n`{setting_name}` set to `{ALERT_STATE[setting_name]}`.",
+            parse_mode="Markdown"
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Please provide a valid numeric value.", parse_mode="Markdown")
+
 async def set_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args or args[0].lower() not in TIMEFRAME_PRESETS:

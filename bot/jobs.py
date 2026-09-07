@@ -3,7 +3,7 @@ import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
 from telegram.ext import ContextTypes
 from config import ALERT_STATE, YOUR_CHAT_ID, BOT_START_TIME, DB_FILE
-from mt5_engine import get_gold_symbol, check_mt5_alive
+from mt5_engine import MT5_LOCK, get_gold_symbol, check_mt5_alive
 from news_engine import news_guard_check
 from strategy.evaluator import analyze_market, evaluate_signals
 from strategy.chart import generate_chart_snapshot
@@ -30,6 +30,8 @@ def build_status_snapshot() -> str:
         f"• **Uptime:** `{uptime}`\n"
         f"• **MT5 Connection:** {'🟢 Connected' if mt5_ok else '🔴 Disconnected'}\n"
         f"• **Scanner:** {'🟢 Running' if ALERT_STATE['scanner_enabled'] else '🔴 Stopped'}\n"
+        f"• **Active Strategy:** `{ALERT_STATE.get('active_strategy', 'smc_confluence').upper()}`\n"
+        f"• **Risk Sizing:** `{ALERT_STATE.get('risk_percent', 1.0)}%` per trade\n"
         f"• **Timeframe Mode:** `{ALERT_STATE['timeframe_mode']}`\n"
         f"• **Structure Filter:** {'ON' if ALERT_STATE['require_structure_break'] else 'OFF'}\n"
         f"• **Volume/ATR Filter:** {'ON' if ALERT_STATE['require_volume_atr_filter'] else 'OFF'}\n"
@@ -55,27 +57,44 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
     if analysis:
         signals_found, watch_found = evaluate_signals(analysis)
         
-        # Attach chart snapshot photo to executable signal alerts
-        for msg in signals_found:
-            chart_buffer = generate_chart_snapshot(
-                df=analysis["df_entry"], 
-                title=f"XAUUSD - {analysis['tf_label']}"
-            )
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=chart_buffer,
-                caption=msg,
-                parse_mode="Markdown"
-            )
+        # Dispatch executable signal alerts with position sizing & annotated charts
+        for item in signals_found:
+            if isinstance(item, tuple):
+                msg_text, chart_buffer = item
+                if chart_buffer:
+                    await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=chart_buffer,
+                        caption=msg_text,
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=chat_id, 
+                        text=msg_text, 
+                        parse_mode="Markdown"
+                    )
+            else:
+                await context.bot.send_message(
+                    chat_id=chat_id, 
+                    text=item, 
+                    parse_mode="Markdown"
+                )
 
         # Dispatch early watch pings as text-only messages
         for watch_msg in watch_found:
-            await context.bot.send_message(chat_id=chat_id, text=watch_msg, parse_mode="Markdown")
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text=watch_msg, 
+                parse_mode="Markdown"
+            )
 
 async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     symbol = get_gold_symbol()
     if not symbol: return
-    tick = mt5.symbol_info_tick(symbol)
+    
+    with MT5_LOCK:
+        tick = mt5.symbol_info_tick(symbol)
     if not tick: return
 
     bid, ask = tick.bid, tick.ask
