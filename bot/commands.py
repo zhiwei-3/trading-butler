@@ -395,9 +395,17 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sub = args[0].lower()
     if sub == "on": ALERT_STATE["setup_forming_enabled"] = True
     elif sub == "off": ALERT_STATE["setup_forming_enabled"] = False
-    elif sub == "rsi_margin" and len(args) >= 2: ALERT_STATE["watch_rsi_margin"] = float(args[1])
+    elif sub == "rsi_margin" and len(args) >= 2:
+        try:
+            ALERT_STATE["watch_rsi_margin"] = float(args[1])
+        except ValueError:
+            await update.message.reply_text("❌ Provide a numeric RSI margin.", parse_mode="Markdown")
+            return
+    else:
+        await update.message.reply_text("⚠️ Unknown option. Use `on`, `off`, or `rsi_margin <val>`.", parse_mode="Markdown")
+        return
     save_settings()
-    await update.message.reply_text(f"✅ Watchlist setting updated.", parse_mode="Markdown")
+    await update.message.reply_text("✅ Watchlist setting updated.", parse_mode="Markdown")
 
 async def heartbeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -420,6 +428,8 @@ async def heartbeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ALERT_STATE["heartbeat_enabled"] = False
         save_settings()
         await update.message.reply_text("🔴 Heartbeat **OFF**", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("⚠️ **Unknown option.** Usage: `/heartbeat on|off|test`", parse_mode="Markdown")
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     snapshot = build_status_snapshot()

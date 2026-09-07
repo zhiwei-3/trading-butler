@@ -29,8 +29,10 @@ def _eval_ema_cross(a):
         targets = calculate_targets("BUY", close_price, atr_val, a["order_block"], a["near_zone"])
         if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.0):
             ALERT_STATE["last_rsi_signal"] = "BUY"
-            log_signal_to_db("XAUUSD", "BUY", close_price, targets["sl_price"], targets["tp1_price"], targets["tp2_price"], 70)
-            signals.append(f"🏆 **EMA CROSS BUY ALERT** 🟢\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${targets['sl_price']}` | 🎯 **TP1:** `${targets['tp1_price']}`")
+            sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
+            log_signal_to_db("XAUUSD", "BUY", close_price, sl_price, tp1_price, tp2_price, 70)
+            base_msg = f"🏆 **EMA CROSS BUY ALERT** 🟢\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
+            signals.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, base_msg))
 
     elif bearish_cross and ALERT_STATE["last_rsi_signal"] != "SELL":
         targets = calculate_targets("SELL", close_price, atr_val, a["order_block"], a["near_zone"])
@@ -38,7 +40,8 @@ def _eval_ema_cross(a):
             ALERT_STATE["last_rsi_signal"] = "SELL"
             sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
             log_signal_to_db("XAUUSD", "SELL", close_price, sl_price, tp1_price, tp2_price, 70)
-            signals.append(f"🏆 **EMA CROSS SELL ALERT** 🔴\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`")
+            base_msg = f"🏆 **EMA CROSS SELL ALERT** 🔴\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
+            signals.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, base_msg))
 
     if not (bullish_cross or bearish_cross):
         ALERT_STATE["last_rsi_signal"] = None
@@ -75,7 +78,8 @@ def _eval_rsi_reversion(a):
             ALERT_STATE["last_rsi_signal"] = "BUY"
             sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
             log_signal_to_db("XAUUSD", "BUY", close_price, sl_price, tp1_price, tp2_price, 75)
-            signals.append(f"🔄 **RSI REVERSION BUY ALERT** 🟢\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`")
+            base_msg = f"🔄 **RSI REVERSION BUY ALERT** 🟢\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
+            signals.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, base_msg))
 
     elif bearish_rev and ALERT_STATE["last_rsi_signal"] != "SELL":
         targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
@@ -83,7 +87,8 @@ def _eval_rsi_reversion(a):
             ALERT_STATE["last_rsi_signal"] = "SELL"
             sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
             log_signal_to_db("XAUUSD", "SELL", close_price, sl_price, tp1_price, tp2_price, 75)
-            signals.append(f"🔄 **RSI REVERSION SELL ALERT** 🔴\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`")
+            base_msg = f"🔄 **RSI REVERSION SELL ALERT** 🔴\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
+            signals.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, base_msg))
 
     if not (bullish_rev or bearish_rev):
         ALERT_STATE["last_rsi_signal"] = None
@@ -100,7 +105,6 @@ def _eval_smc_displacement(a):
 
     last_candle = df.iloc[-1]
     candle_body = abs(last_candle['close'] - last_candle['open'])
-    # Standardized ATR body multiplier to 1.0x
     has_displacement = candle_body >= (atr_val * 1.0)
 
     bullish_disp = (
@@ -123,10 +127,11 @@ def _eval_smc_displacement(a):
             ALERT_STATE["last_rsi_signal"] = "BUY"
             sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
             log_signal_to_db("XAUUSD", "BUY", close_price, sl_price, tp1_price, tp2_price, 85)
-            signals.append(
+            base_msg = (
                 f"⚡ **SMC DISPLACEMENT BUY ALERT** 🟢\n\n"
                 f"📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
             )
+            signals.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, base_msg))
 
     elif bearish_disp and ALERT_STATE["last_rsi_signal"] != "SELL":
         targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
@@ -134,10 +139,11 @@ def _eval_smc_displacement(a):
             ALERT_STATE["last_rsi_signal"] = "SELL"
             sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
             log_signal_to_db("XAUUSD", "SELL", close_price, sl_price, tp1_price, tp2_price, 85)
-            signals.append(
+            base_msg = (
                 f"⚡ **SMC DISPLACEMENT SELL ALERT** 🔴\n\n"
                 f"📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
             )
+            signals.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, base_msg))
 
     if not (bullish_disp or bearish_disp):
         ALERT_STATE["last_rsi_signal"] = None
@@ -153,7 +159,6 @@ def _eval_htf_fvg_ltf_sweep(a):
     fvg_top = macro_fvg.get("fvg_top", 0)
     fvg_bottom = macro_fvg.get("fvg_bottom", 0)
 
-    # Added explicit price boundary retest validation
     htf_bull_tap = macro_fvg.get("bullish_fvg", False) and (fvg_bottom <= close_price <= fvg_top if fvg_top > 0 else True)
     htf_bear_tap = macro_fvg.get("bearish_fvg", False) and (fvg_bottom <= close_price <= fvg_top if fvg_top > 0 else True)
 
@@ -177,10 +182,11 @@ def _eval_htf_fvg_ltf_sweep(a):
             ALERT_STATE["last_rsi_signal"] = "BUY"
             sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
             log_signal_to_db("XAUUSD", "BUY", close_price, sl_price, tp1_price, tp2_price, 90)
-            signals.append(
+            base_msg = (
                 f"🎯 **MTF FVG SWEEP BUY ALERT** 🟢\n\n"
                 f"📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
             )
+            signals.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, base_msg))
 
     elif bearish_setup and ALERT_STATE["last_rsi_signal"] != "SELL":
         targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
@@ -188,10 +194,11 @@ def _eval_htf_fvg_ltf_sweep(a):
             ALERT_STATE["last_rsi_signal"] = "SELL"
             sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
             log_signal_to_db("XAUUSD", "SELL", close_price, sl_price, tp1_price, tp2_price, 90)
-            signals.append(
+            base_msg = (
                 f"🎯 **MTF FVG SWEEP SELL ALERT** 🔴\n\n"
                 f"📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
             )
+            signals.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, base_msg))
 
     if not (bullish_setup or bearish_setup):
         ALERT_STATE["last_rsi_signal"] = None
@@ -345,13 +352,18 @@ def analyze_market(symbol):
     swing_highs, swing_lows = find_swing_points(df_entry, ALERT_STATE["fractal_window"], ALERT_STATE["fractal_window"])
     sweeps = detect_liquidity_sweeps(df_entry, swing_highs, swing_lows)
     fvg = detect_fvg(df_entry)
-    order_block = detect_order_block(df_entry)
-    vol_filter_ok, _ = passes_volatility_filter(df_entry)
-    sr_zones = find_sr_zones(df_macro)
     macro_fvg = detect_fvg(df_macro)
+    order_block = detect_order_block(df_entry)
+    sr_zones = find_sr_zones(df_macro, lookback=ALERT_STATE["sr_lookback"],
+                          cluster_pct=ALERT_STATE["sr_cluster_pct"],
+                          min_touches=ALERT_STATE["sr_min_touches"])
+    near_zone = nearest_sr_zone(sr_zones, close_price, max_distance_pct=ALERT_STATE["sr_max_distance_pct"])
+    vol_filter_ok, _ = passes_volatility_filter(df_entry,
+                            atr_multiplier=ALERT_STATE["atr_multiplier"],
+                            volume_multiplier=ALERT_STATE["volume_multiplier"])
 
     return {
-        "df_entry": df_entry,
+        "df_entry": df_entry,   
         "tf_label": TIMEFRAME_PRESETS[ALERT_STATE["timeframe_mode"]]["label"],
         "close_price": close_price,
         "rsi_val": rsi_val,
@@ -368,10 +380,15 @@ def analyze_market(symbol):
         "macd_bias": get_macd_bias(df_entry),
         "candle_pattern": detect_candlestick_pattern(df_entry),
         "divergence": detect_divergence(df_entry),
-        "near_zone": nearest_sr_zone(sr_zones, close_price),
+        "near_zone": near_zone,
     }
 
 def evaluate_signals(a):
+    """Dispatches market evaluation to the active strategy module."""
+    # Centralized Volume / ATR Filter Gate (aligns live execution with backtester logic)
+    if ALERT_STATE.get("require_volume_atr_filter", False) and not a.get("vol_filter_ok", True):
+        return [], []
+
     strat = ALERT_STATE.get("active_strategy", "smc_confluence")
     if strat == "htf_fvg_sweep":
         return _eval_htf_fvg_ltf_sweep(a)

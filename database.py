@@ -4,7 +4,8 @@ from config import DB_FILE
 
 def get_db_connection():
     """Returns a SQLite connection configured with a 10-second busy timeout."""
-    return sqlite3.connect(DB_FILE, timeout=10.0)
+    conn = sqlite3.connect(DB_FILE, timeout=10.0)
+    return conn
 
 def init_db():
     """Creates the SQLite table for signal performance tracking."""
@@ -30,13 +31,17 @@ def init_db():
 def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score):
     """Logs generated signal details to SQLite."""
     timestamp = datetime.now(timezone.utc).isoformat()
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO signals (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
-        ''', (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score))
-        conn.commit()
+    conn = get_db_connection()
+    try:
+        with conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO signals (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
+            ''', (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score))
+            conn.commit()
+    finally:
+        conn.close()
 
 def get_signal_stats():
     """Retrieves current signal outcome statistics."""

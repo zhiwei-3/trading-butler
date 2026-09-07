@@ -1,15 +1,15 @@
 import logging
 from telegram.ext import Application, CommandHandler, ContextTypes
-from config import TELEGRAM_TOKEN, YOUR_CHAT_ID
+from config import ALERT_STATE, TELEGRAM_TOKEN, YOUR_CHAT_ID
 from database import init_db
 from mt5_engine import init_mt5
-from bot.commands import (
-    start_cmd, enable_scanner, disable_scanner, news_calendar_cmd,
-    spread_check_cmd, calc_risk, gold_snapshot, market_session, set_cmd,
-    set_timeframe, set_strategy_cmd, filters_cmd, confluence_cmd, watchlist_cmd,
-    heartbeat_cmd, status_cmd, diagnose_cmd, stats_cmd, backtest_cmd
+from bot.commands import *
+from bot.jobs import (
+    market_scanner_job, 
+    signal_outcome_tracker_job, 
+    restart_heartbeat_job, 
+    ensure_watchdog_running
 )
-from bot.jobs import market_scanner_job, signal_outcome_tracker_job
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Logs uncaught exceptions raised by command handlers."""
@@ -21,12 +21,18 @@ def main():
         return
 
     init_db()
+
+    # Build app instance BEFORE calling app.job_queue
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+
     if init_mt5():
         print("✅ MT5 Engine Online!")
+        if ALERT_STATE.get("heartbeat_enabled") and ALERT_STATE.get("heartbeat_chat_id"):
+            restart_heartbeat_job(app.job_queue, int(ALERT_STATE["heartbeat_chat_id"]))
+        if YOUR_CHAT_ID:
+            ensure_watchdog_running(app.job_queue, int(YOUR_CHAT_ID))
     else:
         print("⚠️ Warning: MT5 connection failed.")
-
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     # Register Global Error Handler
     app.add_error_handler(error_handler)

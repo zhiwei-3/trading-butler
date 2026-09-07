@@ -106,8 +106,9 @@ async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
 
         time_diff = (event_dt - now_utc).total_seconds() / 60.0
 
-        if 25 <= time_diff <= 35 and event_title not in ALERT_STATE["news_warned_events"]:
-            ALERT_STATE["news_warned_events"].add(event_title)
+        warn_key = f"{event_title}|{raw_date}"
+        if 25 <= time_diff <= 35 and warn_key not in ALERT_STATE["news_warned_events"]:
+            ALERT_STATE["news_warned_events"].add(warn_key)
             time_str = event_dt.strftime("%Y-%m-%d %H:%M UTC")
             msg = (
                 f"⚠️ **HIGH IMPACT NEWS WARNING** ⚠️\n\n"
