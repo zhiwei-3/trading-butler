@@ -14,7 +14,7 @@
     "tp2_atr_mult": 3.5,
     "min_rrr": 1.5,
     "risk_percent": 1.0,
-    "min_confluence_score": 0,
+    "min_confluence_score": 30,
     "setup_forming_enabled": true,
     "watch_rsi_margin": 5,
     "watch_score_margin": 10,

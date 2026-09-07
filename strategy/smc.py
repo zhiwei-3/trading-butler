@@ -12,6 +12,9 @@ def find_swing_points(df, left=2, right=2):
 
 def detect_market_structure(df, lookback=60, left=2, right=2):
     """Detects fresh SMC Break-of-Structure (BOS)."""
+    if df is None or len(df) < 3:
+        return None
+    
     if len(df) < lookback:
         lookback = len(df)
     recent_df = df.iloc[-lookback:].reset_index(drop=True)

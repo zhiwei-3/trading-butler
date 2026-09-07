@@ -427,7 +427,7 @@ def evaluate_smc_confluence(a):
                     f"⚡ **FVG:** {'Bullish FVG ✅' if a['fvg']['bullish_fvg'] else 'None'}\n"
                     f"🧱 **Order Block:** {'Bullish OB ✅ @ $' + str(a['order_block']['ob_level']) if a['order_block']['bullish_ob'] else 'None'}"
                 )
-                signals_found.append(msg)
+                signals_found.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, msg))
 
     elif rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok and vol_filter_hard_ok:
         sr_confluence = bool(a["near_zone"] and a["near_zone"]["type"] in ("resistance", "mixed") and close_price <= a["near_zone"]["price"])
@@ -457,7 +457,7 @@ def evaluate_smc_confluence(a):
                     f"⚡ **FVG:** {'Bearish FVG ✅' if a['fvg']['bearish_fvg'] else 'None'}\n"
                     f"🧱 **Order Block:** {'Bearish OB ✅ @ $' + str(a['order_block']['ob_level']) if a['order_block']['bearish_ob'] else 'None'}"
                 )
-                signals_found.append(msg)
+                signals_found.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, msg))
 
     elif ALERT_STATE["setup_forming_enabled"] and in_approach_zone:
         if ALERT_STATE["last_watch_signal"] is None:

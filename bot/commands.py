@@ -163,6 +163,9 @@ async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ **Usage:** `/calc <balance> <risk_pct> <sl_pips>`", parse_mode="Markdown")
             return
         balance, risk_pct, sl_pips = float(args[0]), float(args[1]), float(args[2])
+        if sl_pips <= 0:
+            await update.message.reply_text("  Stop loss pips must be greater than 0.", parse_mode="Markdown")
+            return
         risk_amount = balance * (risk_pct / 100.0)
 
         pip_value_per_lot = 10.0
