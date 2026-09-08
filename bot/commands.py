@@ -8,7 +8,7 @@ from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, CONFLUENCE_WEIGHTS, save_settings
 from database import get_signal_stats
-from mt5_engine import get_gold_symbol, fetch_candles
+from mt5_engine import get_gold_symbol, fetch_candles, calculate_position_size
 from news_engine import fetch_economic_events
 from strategy.backtester import run_backtest, generate_equity_chart
 from strategy.evaluator import analyze_market
@@ -162,24 +162,33 @@ async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(args) < 3:
             await update.message.reply_text("⚠️ **Usage:** `/calc <balance> <risk_pct> <sl_pips>`", parse_mode="Markdown")
             return
+            
         balance, risk_pct, sl_pips = float(args[0]), float(args[1]), float(args[2])
         if sl_pips <= 0:
-            await update.message.reply_text("  Stop loss pips must be greater than 0.", parse_mode="Markdown")
+            await update.message.reply_text("❌ Stop loss pips must be greater than 0.", parse_mode="Markdown")
             return
-        risk_amount = balance * (risk_pct / 100.0)
 
-        pip_value_per_lot = 10.0
-        lot_size = round(risk_amount / (sl_pips * pip_value_per_lot), 2)
+        symbol = get_gold_symbol() or "XAUUSD"
+        
+        # Convert pips to absolute price distance (Assuming XAUUSD 1 pip = 0.1 price move)
+        # Adjust the multiplier if your broker formats gold points differently
+        sl_dist = sl_pips * 0.1 
+        
+        # Route through the exact same calculator used by live signals
+        pos = calculate_position_size(symbol, sl_dist, risk_pct)
+
         reply = (
-            f"🧮 **POSITION RISK CALCULATOR (XAUUSD)**\n\n"
-            f"• **Balance:** `${balance:,.2f}`\n"
-            f"• **Risk Target ({risk_pct}%):** `${risk_amount:,.2f}`\n"
-            f"• **Stop Loss:** `{sl_pips} pips` (${sl_pips/10:.2f} move)\n\n"
-            f"🎯 **Recommended Lot Size:** `{max(lot_size, 0.01)}` Lots"
+            f"🧮 **POSITION RISK CALCULATOR ({symbol})**\n\n"
+            f"• **Account Balance:** `${pos['balance']:,.2f}`\n"
+            f"• **Risk Target ({risk_pct}%):** `${pos['risk_usd']:,.2f}`\n"
+            f"• **Stop Loss Distance:** `{sl_pips} pips`\n\n"
+            f"🎯 **Recommended Lot Size:** `{pos['lots']}` Lots"
         )
         await update.message.reply_text(reply, parse_mode="Markdown")
     except ValueError:
         await update.message.reply_text("❌ Invalid numerical values.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Calculation error: {e}")
 
 async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /gold and /snapshot commands by returning live metrics with an annotated chart photo."""

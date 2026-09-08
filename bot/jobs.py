@@ -3,6 +3,7 @@ import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
 from telegram.ext import ContextTypes
 from config import ALERT_STATE, YOUR_CHAT_ID, BOT_START_TIME, DB_FILE
+from database import get_db_connection
 from mt5_engine import MT5_LOCK, get_gold_symbol, check_mt5_alive
 from news_engine import news_guard_check
 from strategy.evaluator import analyze_market, evaluate_signals
@@ -98,10 +99,10 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     if not tick: return
 
     bid, ask = tick.bid, tick.ask
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, direction, entry_price, sl_price, tp1_price, tp2_price FROM signals WHERE status = 'PENDING'")
-    pending = cursor.fetchall()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, direction, entry_price, sl_price, tp1_price, tp2_price FROM signals WHERE status = 'PENDING'")
+        pending = cursor.fetchall()
 
     for sig_id, direction, entry_p, sl_p, tp1_p, tp2_p in pending:
         now_str = datetime.now(timezone.utc).isoformat()

@@ -248,6 +248,17 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
     return None
 
 def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forward=MAX_BARS_FORWARD):
+    """
+    Simulates a trade sequentially through historical OHLC data.
+    
+    ⚠️ SINGLE-PATH LIMITATION:
+    Due to the lack of intra-bar tick data, this simulation checks SL and TP hits
+    on a bar-by-bar basis. If TP1 is hit, the Stop Loss is moved to Break-Even 
+    starting from the *following* bar. It cannot detect a TP1 hit and a Break-Even 
+    reversal occurring within the exact same candle, which may slightly overstate 
+    the survival rate of runners in high-volatility environments.
+    """
+    
     direction = trade["direction"]
     sl, tp1, tp2 = trade["sl_price"], trade["tp1_price"], trade["tp2_price"]
     end_idx = min(entry_idx + max_bars_forward, len(df_entry) - 1)
