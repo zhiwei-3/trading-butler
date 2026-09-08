@@ -258,7 +258,7 @@ def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forwa
     reversal occurring within the exact same candle, which may slightly overstate 
     the survival rate of runners in high-volatility environments.
     """
-    
+
     direction = trade["direction"]
     sl, tp1, tp2 = trade["sl_price"], trade["tp1_price"], trade["tp2_price"]
     end_idx = min(entry_idx + max_bars_forward, len(df_entry) - 1)
@@ -518,6 +518,51 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         "win_rate": win_rate, "avg_r": avg_r, "net_r": net_r, "max_drawdown_r": round(max_dd, 2),
         "equity_curve": equity, "trades": trades, "factor_summary": factor_summary,
     }
+
+def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, score_values=None,
+                        spread_pips=2.0, progress_callback=None):
+    """Runs run_backtest across a grid of min_rrr x min_confluence_score combinations."""
+    rrr_values = rrr_values or [1.3, 1.5, 2.0, 2.5, 3.0]
+    score_values = score_values or [20, 25, 30, 35, 40]
+
+    combos = [(r, s) for r in rrr_values for s in score_values]
+    results = []
+    total = len(combos)
+
+    for idx, (rrr, score) in enumerate(combos):
+        if progress_callback:
+            try:
+                progress_callback(int(idx / total * 100))
+            except Exception:
+                pass
+
+        res = run_backtest(symbol, days=days, timeframe_mode=timeframe_mode,
+                            min_confluence_score=score, min_rrr=rrr, spread_pips=spread_pips)
+
+        if "error" in res:
+            results.append({"min_rrr": rrr, "min_confluence_score": score, "error": res["error"]})
+            continue
+
+        results.append({
+            "min_rrr": rrr,
+            "min_confluence_score": score,
+            "total_trades": res["total_trades"],
+            "wins": res["wins"],
+            "losses": res["losses"],
+            "open": res["open"],
+            "win_rate": res["win_rate"],
+            "avg_r": res["avg_r"],
+            "net_r": res["net_r"],
+            "max_drawdown_r": res["max_drawdown_r"],
+        })
+
+    if progress_callback:
+        try:
+            progress_callback(100)
+        except Exception:
+            pass
+
+    return {"symbol": symbol, "mode": timeframe_mode, "days": days, "grid": results}
 
 def generate_equity_chart(equity_curve, title="Backtest Equity Curve"):
     if not equity_curve or len(equity_curve) < 2:

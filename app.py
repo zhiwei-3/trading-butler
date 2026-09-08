@@ -57,6 +57,7 @@ def main():
     app.add_handler(CommandHandler("heartbeat", heartbeat_cmd))
     app.add_handler(CommandHandler("diagnose", diagnose_cmd))
     app.add_handler(CommandHandler("backtest", backtest_cmd))
+    app.add_handler(CommandHandler("optimize", optimize_cmd))
 
     # Auto-start Background Jobs
     if YOUR_CHAT_ID:

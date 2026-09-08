@@ -10,7 +10,7 @@ from config import ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, CONFLUENCE_
 from database import get_signal_stats
 from mt5_engine import get_gold_symbol, fetch_candles, calculate_position_size
 from news_engine import fetch_economic_events
-from strategy.backtester import run_backtest, generate_equity_chart
+from strategy.backtester import run_backtest, generate_equity_chart, run_backtest_sweep
 from strategy.evaluator import analyze_market
 from strategy.chart import generate_chart_snapshot
 from bot.jobs import (
@@ -564,3 +564,92 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_photo(photo=chart_buf, caption=msg, parse_mode="Markdown")
     else:
         await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    days = 30
+    mode = None
+
+    if args:
+        try:
+            days = int(args[0])
+        except ValueError:
+            await update.message.reply_text("⚠️ **Usage:** `/optimize <days> [scalp|intraday|swing]`", parse_mode="Markdown")
+            return
+        if len(args) >= 2:
+            mode = args[1].lower()
+            if mode not in TIMEFRAME_PRESETS:
+                await update.message.reply_text("⚠️ Invalid mode. Use `scalp`, `intraday`, or `swing`.", parse_mode="Markdown")
+                return
+
+    days = max(1, min(days, 180))
+
+    symbol = get_gold_symbol()
+    if not symbol:
+        await update.message.reply_text("❌ MT5 Gold symbol not found.")
+        return
+
+    label = mode or ALERT_STATE['timeframe_mode']
+    progress_msg = await update.message.reply_text(
+        f"⏳ Running optimization sweep — `{days}d` on `{label}`... `0%`\n"
+        f"_(this fires ~25 backtests, may take a while)_",
+        parse_mode="Markdown"
+    )
+
+    loop = asyncio.get_running_loop()
+
+    def progress_callback(pct):
+        async def _edit():
+            try:
+                await progress_msg.edit_text(
+                    f"⏳ Running optimization sweep — `{days}d` on `{label}`... `{pct}%`",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+        asyncio.run_coroutine_threadsafe(_edit(), loop)
+
+    try:
+        result = await asyncio.to_thread(run_backtest_sweep, symbol, days, mode, progress_callback=progress_callback)
+    except Exception as e:
+        logging.exception("Optimization sweep crashed")
+        await update.message.reply_text(f"❌ **Sweep crashed:** `{e}`", parse_mode="Markdown")
+        return
+
+    grid = result["grid"]
+    valid = [g for g in grid if "error" not in g]
+    if not valid:
+        first_error = grid[0].get("error", "Unknown error") if grid else "No results returned."
+        await update.message.reply_text(f"❌ **Sweep failed:** {first_error}", parse_mode="Markdown")
+        return
+
+    valid_sorted = sorted(valid, key=lambda g: g["net_r"], reverse=True)
+
+    lines = [f"🧪 **OPTIMIZATION SWEEP — {label.upper()}** ({days}d)\n", "`RRR  Score  Trades  Win%   NetR    MaxDD`"]
+    for g in valid:
+        lines.append(
+            f"`1:{g['min_rrr']:<4}{g['min_confluence_score']:<7}{g['total_trades']:<8}"
+            f"{g['win_rate']:<7}{g['net_r']:<8}{g['max_drawdown_r']}`"
+        )
+
+    lines.append("\n🏆 **Top 3 by Net R:**")
+    for g in valid_sorted[:3]:
+        trades_per_day = round(g['total_trades'] / days, 2)
+        lines.append(
+            f"  • RRR `1:{g['min_rrr']}`, Score `{g['min_confluence_score']}` → "
+            f"`{g['total_trades']}` trades (`{trades_per_day}/day`), `{g['win_rate']}%` win, `{g['net_r']}R` net, "
+            f"`{g['max_drawdown_r']}R` max DD"
+        )
+
+    lines.append(
+        "\n⚠️ *Backtested on historical bars with a synthetic spread — real fills, slippage, "
+        "and news gaps will vary. More trades/day is not the goal by itself; weigh it against "
+        "win rate, net R, and max drawdown together. Hypothetical results are not indicative of "
+        "future performance.*"
+    )
+
+    msg = "\n".join(lines)
+    if len(msg) > 4000:
+        msg = msg[:3900] + "\n\n... (truncated — grid too large for one message)"
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
