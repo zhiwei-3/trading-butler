@@ -262,16 +262,21 @@ async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Dynamically updates bot settings in ALERT_STATE."""
     if not context.args or len(context.args) < 2:
-        await update.message.reply_text(
-            "⚠️ **Usage:** `/set <key> <value>`\n\n"
-            "**Supported Settings:**\n"
-            "• `/set buy_rsi 80` — Buy RSI threshold (30 standard, 80 for testing)\n"
-            "• `/set sell_rsi 20` — Sell RSI threshold (70 standard, 20 for testing)\n"
-            "• `/set score 50` — Minimum confluence score\n"
-            "• `/set rrr 1.5` — Minimum Risk-to-Reward Ratio\n"
-            "• `/set risk 1.0` — Risk percentage per trade",
-            parse_mode="Markdown"
+        # Show all current configurations if no arguments are provided
+        reply = (
+            "⚙️ **DYNAMIC SETTINGS MANAGER**\n\n"
+            f"• **Buy RSI (`buy_rsi`):** `{ALERT_STATE.get('rsi_buy_threshold', 30)}`\n"
+            f"• **Sell RSI (`sell_rsi`):** `{ALERT_STATE.get('rsi_sell_threshold', 70)}`\n"
+            f"• **Min Score (`score`):** `{ALERT_STATE.get('min_confluence_score', 50)}/100`\n"
+            f"• **Min RRR (`rrr`):** `1:{ALERT_STATE.get('min_rrr', 1.3)}`\n"
+            f"• **Risk % (`risk`):** `{ALERT_STATE.get('risk_percent', 1.0)}%`\n"
+            f"• **SL ATR Mult (`sl_mult`):** `{ALERT_STATE.get('sl_atr_mult', 1.5)}x`\n"
+            f"• **TP1 ATR Mult (`tp1_mult`):** `{ALERT_STATE.get('tp1_atr_mult', 1.0)}x`\n"
+            f"• **TP2 ATR Mult (`tp2_mult`):** `{ALERT_STATE.get('tp2_atr_mult', 2.0)}x`\n"
+            f"• **Max Spread (`spread`):** `{ALERT_STATE.get('max_allowed_spread_pips', 30)} pips`\n\n"
+            "**Usage:** `/set <key> <value>` (e.g., `/set tp1_mult 1.5`)"
         )
+        await update.message.reply_text(reply, parse_mode="Markdown")
         return
 
     key = context.args[0].lower()
@@ -279,28 +284,47 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         val = float(val_str)
+        setting_name = ""
+
+        # Map shorthand keys to actual dictionary keys
         if key in ("buy_rsi", "rsi_buy", "rsi_buy_threshold"):
-            ALERT_STATE["rsi_buy_threshold"] = val
             setting_name = "rsi_buy_threshold"
         elif key in ("sell_rsi", "rsi_sell", "rsi_sell_threshold"):
-            ALERT_STATE["rsi_sell_threshold"] = val
             setting_name = "rsi_sell_threshold"
         elif key in ("score", "min_score", "min_confluence_score"):
-            ALERT_STATE["min_confluence_score"] = val
             setting_name = "min_confluence_score"
+            val = int(val)  # Force integer for scores
         elif key in ("rrr", "min_rrr"):
-            ALERT_STATE["min_rrr"] = val
             setting_name = "min_rrr"
         elif key in ("risk", "risk_percent", "risk_pct"):
-            ALERT_STATE["risk_percent"] = val
             setting_name = "risk_percent"
+        elif key in ("sl_mult", "sl_atr"):
+            setting_name = "sl_atr_mult"
+        elif key in ("tp1_mult", "tp1_atr"):
+            setting_name = "tp1_atr_mult"
+        elif key in ("tp2_mult", "tp2_atr"):
+            setting_name = "tp2_atr_mult"
+        elif key in ("spread", "max_spread"):
+            setting_name = "max_allowed_spread_pips"
         else:
             await update.message.reply_text(f"❌ Unknown setting key `{key}`.", parse_mode="Markdown")
             return
 
+        # Grab old value for the confirmation message
+        old_val = ALERT_STATE.get(setting_name, "N/A")
+        
+        # Apply and save
+        ALERT_STATE[setting_name] = val
         save_settings()
+        
+        # Clean up the name (e.g., 'risk_percent' -> 'Risk Percent')
+        # This prevents Markdown errors caused by unescaped underscores
+        display_name = setting_name.replace("_", " ").title()
+        
         await update.message.reply_text(
-            f"✅ **Setting Updated**\n\n`{setting_name}` set to `{ALERT_STATE[setting_name]}`.",
+            f"✅ **Setting Updated**\n\n"
+            f"**{display_name}** modified:\n"
+            f"`{old_val}` ➡️ `{val}`",
             parse_mode="Markdown"
         )
     except ValueError:
@@ -447,14 +471,24 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     counts = get_signal_stats()
     pending = counts.get('PENDING', 0)
-    tp1, tp2, sl = counts.get('HIT_TP1', 0), counts.get('HIT_TP2', 0), counts.get('HIT_SL', 0)
-    total_closed = tp1 + tp2 + sl
-    win_rate = round(((tp1 + tp2) / total_closed * 100), 1) if total_closed > 0 else 0.0
+    tp1 = counts.get('HIT_TP1', 0)
+    tp2 = counts.get('HIT_TP2', 0)
+    be = counts.get('CLOSED_BE', 0)
+    sl = counts.get('HIT_SL', 0)
+
+    # Any trade reaching TP1, TP2, or closing at Break-Even is a win
+    wins = tp1 + tp2 + be
+    total_closed = wins + sl
+    win_rate = round((wins / total_closed * 100), 1) if total_closed > 0 else 0.0
+
     reply = (
         f"📊 **FORWARD-TESTING PERFORMANCE STATS**\n\n"
         f"• **Total Signals:** `{sum(counts.values())}` | **Pending:** `{pending}`\n"
-        f"• **TP1:** `{tp1}` 🎯 | **TP2:** `{tp2}` 🚀 | **SL:** `{sl}` 🛡️\n"
-        f"📈 **Win Rate:** `{win_rate}%`"
+        f"• **TP1 Active Runners:** `{tp1}` 🎯\n"
+        f"• **TP2 Hits:** `{tp2}` 🚀\n"
+        f"• **Break-Even Closes:** `{be}` 🔒\n"
+        f"• **Stop Loss Hits:** `{sl}` 🛡️\n\n"
+        f"📈 **Win Rate:** `{win_rate}%` (`{wins}/{total_closed}` closed trades)"
     )
     await update.message.reply_text(reply, parse_mode="Markdown")
 
@@ -547,16 +581,31 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for label, wr, n in result["factor_summary"][:6]
     ) or "  • Not enough closed trades yet for a factor breakdown."
 
+    # Fetch active configs for the readout
+    strat = ALERT_STATE.get("active_strategy", "smc_confluence").replace("_", " ").upper()
+    rsi_buy = ALERT_STATE.get("rsi_buy_threshold", 30)
+    rsi_sell = ALERT_STATE.get("rsi_sell_threshold", 70)
+    sl_mult = ALERT_STATE.get("sl_atr_mult", 1.5)
+    tp1_mult = ALERT_STATE.get("tp1_atr_mult", 1.0)
+    tp2_mult = ALERT_STATE.get("tp2_atr_mult", 2.0)
+    struct_gate = "ON ✅" if ALERT_STATE.get("require_structure_break") else "OFF ❌"
+    vol_gate = "ON ✅" if ALERT_STATE.get("require_volume_atr_filter") else "OFF ❌"
+
     msg = (
-        f"🧪 **BACKTEST RESULTS — {result['mode'].upper()}** ({result['days']}d)\n\n"
+        f"🧪 **BACKTEST RESULTS — {result['mode'].upper()}** ({result['days']}d)\n"
+        f"⚙️ **Strategy:** `{strat}`\n\n"
+        f"**--- Parameters Used ---**\n"
+        f"• **RSI Thresholds:** Buy `<= {rsi_buy}` | Sell `>= {rsi_sell}`\n"
+        f"• **ATR Multipliers:** SL `{sl_mult}x` | TP1 `{tp1_mult}x` | TP2 `{tp2_mult}x`\n"
+        f"• **Score & RRR:** Min Score `{result['min_confluence_score']}/100` | Min RRR `1:{result['min_rrr']}`\n"
+        f"• **Hard Gates:** Structure: {struct_gate} | Vol/ATR: {vol_gate}\n\n"
+        f"**--- Performance ---**\n"
         f"• **Trades:** `{result['total_trades']}` | **Wins:** `{result['wins']}` | **Losses:** `{result['losses']}` | **Open:** `{result['open']}`\n"
         f"• **Win Rate:** `{result['win_rate']}%`\n"
         f"• **Avg R / Trade:** `{result['avg_r']}R` | **Net R:** `{result['net_r']}R`\n"
-        f"• **Max Drawdown:** `{result['max_drawdown_r']}R`\n"
-        f"• **Filters:** Min Score `{result['min_confluence_score']}/100`, Min RRR `1:{result['min_rrr']}`\n\n"
-        f"📊 **Top Confluence Factors (win rate when present):**\n{factor_lines}\n\n"
-        f"⚠️ *Simulated on historical bars with a synthetic spread — real fills, slippage, and news gaps will vary. "
-        f"Hypothetical/backtested results are not indicative of future performance.*"
+        f"• **Max Drawdown:** `{result['max_drawdown_r']}R`\n\n"
+        f"📊 **Top Confluence Factors:**\n{factor_lines}\n\n"
+        f"⚠️ *Simulated on historical bars with a synthetic spread — real fills, slippage, and news gaps will vary.*"
     )
 
     chart_buf = generate_equity_chart(result["equity_curve"], title=f"XAUUSD Backtest Equity — {result['mode'].upper()} ({result['days']}d)")
@@ -565,42 +614,54 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(msg, parse_mode="Markdown")
 
+import time
+import asyncio
+import logging
+from telegram import Update
+from telegram.ext import ContextTypes
+
 async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     days = 30
     mode = None
     flags = set()
 
+    # 1. Flexible Argument Parser
     if args:
-        try:
-            days = int(args[0])
-        except ValueError:
+        remaining_args = list(args)
+        
+        # Check if first argument is a number (days)
+        if remaining_args[0].isdigit():
+            days = int(remaining_args.pop(0))
+        
+        # Extract flags and timeframe mode from remaining arguments
+        unprocessed = []
+        for arg in remaining_args:
+            arg_lower = arg.lower()
+            if arg_lower in ("strategies", "sl", "rsi"):
+                flags.add(arg_lower)
+            elif arg_lower in TIMEFRAME_PRESETS:
+                mode = arg_lower
+            else:
+                unprocessed.append(arg)
+
+        if unprocessed:
             await update.message.reply_text(
-                "⚠️ **Usage:** `/optimize <days> [scalp|intraday|swing] [strategies] [sl] [rsi]`\n\n"
-                "Each flag adds a swept dimension: `strategies` compares strategy presets, "
-                "`sl` sweeps the SL ATR multiplier, `rsi` sweeps RSI buy/sell threshold pairs. "
-                "Combine at most 2 flags at once to keep the grid manageable.",
+                f"⚠️ **Unknown argument(s):** `{', '.join(unprocessed)}`\n\n"
+                "**Usage:** `/optimize [days] [scalp|intraday|swing] [strategies] [sl] [rsi]`\n\n"
+                "**Examples:**\n"
+                "• `/optimize scalp`\n"
+                "• `/optimize 14 intraday strategies`\n"
+                "• `/optimize swing sl rsi`",
                 parse_mode="Markdown"
             )
             return
-
-        remaining = [a.lower() for a in args[1:]]
-        for flag in ("strategies", "sl", "rsi"):
-            if flag in remaining:
-                flags.add(flag)
-                remaining.remove(flag)
-        if remaining:
-            if remaining[0] not in TIMEFRAME_PRESETS:
-                await update.message.reply_text("⚠️ Invalid mode. Use `scalp`, `intraday`, or `swing`.", parse_mode="Markdown")
-                return
-            mode = remaining[0]
 
     days = max(1, min(days, 180))
 
     if len(flags) > 2:
         await update.message.reply_text(
-            "⚠️ Combine at most 2 of `strategies` / `sl` / `rsi` at once — more than that "
-            "produces a grid too large to trust (and too slow to run).",
+            "⚠️ Combine at most 2 of `strategies` / `sl` / `rsi` at once to keep the grid size manageable.",
             parse_mode="Markdown"
         )
         return
@@ -610,9 +671,9 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ MT5 Gold symbol not found.")
         return
 
-    label = mode or ALERT_STATE['timeframe_mode']
+    label = mode or ALERT_STATE.get('timeframe_mode', 'scalp')
 
-    # Base grid shrinks as more axes are added, to keep total combos sane.
+    # Base grid shrinks as more axes are added to prevent exponential grid explosion
     if not flags:
         rrr_values, score_values = [1.3, 1.5, 2.0, 2.5, 3.0], [20, 25, 30, 35, 40]
     else:
@@ -622,25 +683,35 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sl_values = [1.2, 1.5, 1.7, 2.0, 2.5] if "sl" in flags else None
     rsi_pairs = [(30, 60), (35, 60), (40, 60), (30, 65)] if "rsi" in flags else None
 
+    flag_str = f" [{', '.join(sorted(flags))}]" if flags else ""
     progress_msg = await update.message.reply_text(
-        f"⏳ Running optimization sweep — `{days}d` on `{label}`"
-        f"{' [' + ', '.join(sorted(flags)) + ']' if flags else ''}... `0%`",
+        f"⏳ Running optimization sweep — `{days}d` on `{label.upper()}`{flag_str}... `0%`",
         parse_mode="Markdown"
     )
 
     loop = asyncio.get_running_loop()
+    last_edit_time = [0.0]
+    last_pct = [-1]
 
+    # 2. Throttled Progress Callback (Prevents Telegram API Rate-Limit Errors)
     def progress_callback(pct):
-        async def _edit():
-            try:
-                await progress_msg.edit_text(
-                    f"⏳ Running optimization sweep — `{days}d` on `{label}`"
-                    f"{' [' + ', '.join(sorted(flags)) + ']' if flags else ''}... `{pct}%`",
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
-        asyncio.run_coroutine_threadsafe(_edit(), loop)
+        now = time.time()
+        # Only issue API edit if pct changed AND at least 1.5s passed (or completed at 100%)
+        if pct != last_pct[0] and (now - last_edit_time[0] >= 1.5 or pct == 100):
+            last_edit_time[0] = now
+            last_pct[0] = pct
+            
+            async def _edit():
+                try:
+                    await progress_msg.edit_text(
+                        f"⏳ Running optimization sweep — `{days}d` on `{label.upper()}`{flag_str}... `{pct}%`",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+            asyncio.run_coroutine_threadsafe(_edit(), loop)
+
+    start_time = time.perf_counter()
 
     try:
         result = await asyncio.to_thread(
@@ -654,60 +725,56 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ **Sweep crashed:** `{e}`", parse_mode="Markdown")
         return
 
+    elapsed = round(time.perf_counter() - start_time, 1)
+
     if "error" in result:
         await update.message.reply_text(f"❌ **Sweep rejected:** {result['error']}", parse_mode="Markdown")
         return
 
-    grid = result["grid"]
+    grid = result.get("grid", [])
     valid = [g for g in grid if "error" not in g]
     if not valid:
-        first_error = grid[0].get("error", "Unknown error") if grid else "No results returned."
+        first_error = grid[0].get("error", "No valid parameter combinations produced signals.") if grid else "No results returned."
         await update.message.reply_text(f"❌ **Sweep failed:** {first_error}", parse_mode="Markdown")
         return
 
     valid_sorted = sorted(valid, key=lambda g: g["net_r"], reverse=True)
-    lines = [f"🧪 **OPTIMIZATION SWEEP — {label.upper()}** ({days}d)\n"]
 
     def describe(g):
         parts = [f"RRR `1:{g['min_rrr']}`", f"Score `{g['min_confluence_score']}`"]
-        if result["swept_strategies"]:
-            parts.insert(0, f"`{g['strategy']}`")
-        if result["swept_sl"]:
+        if result.get("swept_strategies") and "strategy" in g:
+            strat_display = g['strategy'].replace('_', ' ').title()
+            parts.insert(0, f"`{strat_display}`")
+        if result.get("swept_sl") and "sl_atr_mult" in g:
             parts.append(f"SL `{g['sl_atr_mult']}x`")
-        if result["swept_rsi"]:
+        if result.get("swept_rsi") and "rsi_pair" in g:
             parts.append(f"RSI `{g['rsi_pair'][0]}/{g['rsi_pair'][1]}`")
         return " ".join(parts)
 
-    if flags:
-        lines.append("🏆 **Top 8 combos by Net R:**")
-        for g in valid_sorted[:8]:
-            trades_per_day = round(g['total_trades'] / days, 2)
-            lines.append(
-                f"  • {describe(g)} → `{g['total_trades']}` trades (`{trades_per_day}/day`), "
-                f"`{g['win_rate']}%` win, `{g['net_r']}R` net, `{g['max_drawdown_r']}R` max DD"
-            )
-    else:
-        lines.append("`RRR  Score  Trades  Win%   NetR    MaxDD`")
-        for g in valid:
-            lines.append(
-                f"`1:{g['min_rrr']:<4}{g['min_confluence_score']:<7}{g['total_trades']:<8}"
-                f"{g['win_rate']:<7}{g['net_r']:<8}{g['max_drawdown_r']}`"
-            )
-        lines.append("\n🏆 **Top 3 by Net R:**")
-        for g in valid_sorted[:3]:
-            trades_per_day = round(g['total_trades'] / days, 2)
-            lines.append(f"  • {describe(g)} → `{g['total_trades']}` trades (`{trades_per_day}/day`), "
-                         f"`{g['win_rate']}%` win, `{g['net_r']}R` net, `{g['max_drawdown_r']}R` max DD")
+    lines = [f"🧪 **OPTIMIZATION SWEEP — {label.upper()}** ({days}d | ⚡ `{elapsed}s`)\n"]
+
+    top_count = 8 if flags else 5
+    lines.append(f"🏆 **Top {top_count} combinations by Net R:**")
+
+    for g in valid_sorted[:top_count]:
+        trades_per_day = round(g['total_trades'] / days, 2)
+        lines.append(
+            f"  • {describe(g)} ➡️ `{g['total_trades']}` trades (`{trades_per_day}/d`), "
+            f"`{g['win_rate']}%` win, `{g['net_r']}R` net, `{g['max_drawdown_r']}R` max DD"
+        )
 
     lines.append(
-        "\n⚠️ *Backtested on historical bars with a synthetic spread — real fills, slippage, and "
-        "news gaps will vary. The more dimensions swept at once, the more likely the 'winner' is "
-        "overfit to this specific date range rather than a durable edge — validate on a separate "
-        "out-of-sample window before trusting it live.*"
+        "\n⚠️ *Backtested on historical bars with synthetic spread. Sweeping multiple dimensions increases overfit risk — validate on out-of-sample data before live deployment.*"
     )
 
-    msg = "\n".join(lines)
-    if len(msg) > 4000:
-        msg = msg[:3900] + "\n\n... (truncated)"
+    # 3. Line-by-Line Safe Character Truncation
+    final_lines = []
+    current_len = 0
+    for line in lines:
+        if current_len + len(line) + 1 > 3800:
+            final_lines.append("\n... *(results truncated for length)*")
+            break
+        final_lines.append(line)
+        current_len += len(line) + 1
 
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text("\n".join(final_lines), parse_mode="Markdown")

@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 from telegram.ext import ContextTypes
 from config import ALERT_STATE, YOUR_CHAT_ID, BOT_START_TIME, DB_FILE
 from database import get_db_connection
-from mt5_engine import MT5_LOCK, get_gold_symbol, check_mt5_alive
+from mt5_engine import MT5_LOCK, get_gold_symbol, check_mt5_alive, fetch_candles
 from news_engine import news_guard_check
 from strategy.evaluator import analyze_market, evaluate_signals
 from strategy.chart import generate_chart_snapshot
@@ -90,33 +90,68 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
-    symbol = get_gold_symbol()
-    if not symbol: return
-    
-    with MT5_LOCK:
-        tick = mt5.symbol_info_tick(symbol)
-    if not tick: return
+async def signal_outcome_tracker_job(context):
+    symbol = get_gold_symbol() or "XAUUSD"
+    df = fetch_candles(symbol, mt5.TIMEFRAME_M1, 5)
+    if df is None or df.empty:
+        return
 
-    bid, ask = tick.bid, tick.ask
+    current_price = round(df['close'].iloc[-1], 2)
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, direction, entry_price, sl_price, tp1_price, tp2_price FROM signals WHERE status = 'PENDING'")
-        pending = cursor.fetchall()
+        # Stage 1: Fetch both PENDING trades and TP1 runners
+        cursor.execute(
+            "SELECT id, status, direction, entry_price, sl_price, tp1_price, tp2_price "
+            "FROM signals WHERE status IN ('PENDING', 'HIT_TP1')"
+        )
+        active_signals = cursor.fetchall()
 
-    for sig_id, direction, entry_p, sl_p, tp1_p, tp2_p in pending:
-        now_str = datetime.now(timezone.utc).isoformat()
-        if direction == 'BUY':
-            if bid <= sl_p: cursor.execute("UPDATE signals SET status = 'HIT_SL', closed_at = ? WHERE id = ?", (now_str, sig_id))
-            elif ask >= tp2_p: cursor.execute("UPDATE signals SET status = 'HIT_TP2', closed_at = ? WHERE id = ?", (now_str, sig_id))
-            elif ask >= tp1_p: cursor.execute("UPDATE signals SET status = 'HIT_TP1', closed_at = ? WHERE id = ?", (now_str, sig_id))
-        elif direction == 'SELL':
-            if ask >= sl_p: cursor.execute("UPDATE signals SET status = 'HIT_SL', closed_at = ? WHERE id = ?", (now_str, sig_id))
-            elif bid <= tp2_p: cursor.execute("UPDATE signals SET status = 'HIT_TP2', closed_at = ? WHERE id = ?", (now_str, sig_id))
-            elif bid <= tp1_p: cursor.execute("UPDATE signals SET status = 'HIT_TP1', closed_at = ? WHERE id = ?", (now_str, sig_id))
+        for sig in active_signals:
+            sig_id, status, direction, entry, sl, tp1, tp2 = sig
+            new_status = None
+            msg = None
 
-    conn.commit()
-    conn.close()
+            if direction == "BUY":
+                if status == "PENDING":
+                    if current_price >= tp1:
+                        new_status = "HIT_TP1"
+                        msg = f"🎯 **XAUUSD BUY — TP1 HIT!** (${tp1})\n🛡️ *Stop Loss moved to Break-Even (${entry})*"
+                    elif current_price <= sl:
+                        new_status = "HIT_SL"
+                        msg = f"🛡️ **XAUUSD BUY — STOP LOSS HIT** (${sl})"
+
+                elif status == "HIT_TP1":
+                    if current_price >= tp2:
+                        new_status = "HIT_TP2"
+                        msg = f"🚀 **XAUUSD BUY — TP2 HIT!** (${tp2}) — Full Target Reached!"
+                    elif current_price <= entry:
+                        new_status = "CLOSED_BE"
+                        msg = f"🔒 **XAUUSD BUY — RUNNER CLOSED AT BREAK-EVEN** (${entry})"
+
+            elif direction == "SELL":
+                if status == "PENDING":
+                    if current_price <= tp1:
+                        new_status = "HIT_TP1"
+                        msg = f"🎯 **XAUUSD SELL — TP1 HIT!** (${tp1})\n🛡️ *Stop Loss moved to Break-Even (${entry})*"
+                    elif current_price >= sl:
+                        new_status = "HIT_SL"
+                        msg = f"🛡️ **XAUUSD SELL — STOP LOSS HIT** (${sl})"
+
+                elif status == "HIT_TP1":
+                    if current_price <= tp2:
+                        new_status = "HIT_TP2"
+                        msg = f"🚀 **XAUUSD SELL — TP2 HIT!** (${tp2}) — Full Target Reached!"
+                    elif current_price >= entry:
+                        new_status = "CLOSED_BE"
+                        msg = f"🔒 **XAUUSD SELL — RUNNER CLOSED AT BREAK-EVEN** (${entry})"
+
+            # Update DB and notify Telegram if state changed
+            if new_status:
+                cursor.execute("UPDATE signals SET status = ? WHERE id = ?", (new_status, sig_id))
+                conn.commit()
+                if msg and context.job.chat_id:
+                    await context.bot.send_message(chat_id=context.job.chat_id, text=msg, parse_mode="Markdown")
 
 async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id

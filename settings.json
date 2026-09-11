@@ -1,6 +1,6 @@
 {
     "scanner_enabled": true,
-    "max_allowed_spread_pips": 15.0,
+    "max_allowed_spread_pips": 10.0,
     "timeframe_mode": "scalp",
     "active_strategy": "smc_confluence",
     "require_structure_break": false,
