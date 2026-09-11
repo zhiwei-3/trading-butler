@@ -23,7 +23,15 @@ def main():
     init_db()
 
     # Build app instance BEFORE calling app.job_queue
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .connect_timeout(30.0)
+        .read_timeout(30.0)
+        .write_timeout(30.0)
+        .pool_timeout(30.0)
+        .build()
+    )
 
     if init_mt5():
         print("✅ MT5 Engine Online!")

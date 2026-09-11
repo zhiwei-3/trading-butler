@@ -103,7 +103,8 @@ def _full_analysis_with_memory(entry_slice, state, lookback_bars=10):
     }
 
 def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, macro_bullish,
-                   full, state, min_confluence_score, min_rrr, strategy_name="smc_confluence"):
+                   full, state, min_confluence_score, min_rrr, strategy_name="smc_confluence",
+                   sl_mult=None, tp1_mult=None, tp2_mult=None):
     buy_th, sell_th = state["rsi_buy_threshold"], state["rsi_sell_threshold"]
     structure = full.get("structure", "NEUTRAL")
     near_zone = nearest_sr_zone(full.get("sr_zones", []), close_price)
@@ -133,13 +134,15 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
         bearish_setup = htf_bear_tap and (sweeps.get("bearish_sweep", False) or structure == "BEARISH_BOS") and fvg.get("bearish_fvg", False)
 
         if bullish_setup and state.get("last_signal") != "BUY":
-            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
+            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone,
+                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "BUY"
                 return {"direction": "BUY", "entry": close_price, "score": 90, "breakdown": make_breakdown(True), **targets}
 
         elif bearish_setup and state.get("last_signal") != "SELL":
-            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
+            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone,
+                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "SELL"
                 return {"direction": "SELL", "entry": close_price, "score": 90, "breakdown": make_breakdown(False), **targets}
@@ -158,13 +161,15 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
         bearish_disp = has_displacement and close_price < open_price and (structure == "BEARISH_BOS" or fvg.get("bearish_fvg", False)) and ((not trend_bullish) or (not macro_bullish))
 
         if bullish_disp and state.get("last_signal") != "BUY":
-            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
+            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone,
+                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "BUY"
                 return {"direction": "BUY", "entry": close_price, "score": 85, "breakdown": make_breakdown(True), **targets}
 
         elif bearish_disp and state.get("last_signal") != "SELL":
-            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
+            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone,
+                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "SELL"
                 return {"direction": "SELL", "entry": close_price, "score": 85, "breakdown": make_breakdown(False), **targets}
@@ -179,13 +184,15 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
         prev_bullish = state.get("prev_ema_bullish", False)
 
         if entry_bullish and prev_bearish and state.get("last_signal") != "BUY":
-            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
+            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone,
+                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "BUY"
                 return {"direction": "BUY", "entry": close_price, "score": 70, "breakdown": make_breakdown(True), **targets}
 
         elif (not entry_bullish) and prev_bullish and state.get("last_signal") != "SELL":
-            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
+            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone,
+                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "SELL"
                 return {"direction": "SELL", "entry": close_price, "score": 70, "breakdown": make_breakdown(False), **targets}
@@ -199,13 +206,15 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
         bearish_rev = (rsi_val >= sell_th and near_zone and near_zone["type"] in ("resistance", "mixed") and close_price <= near_zone["price"])
 
         if bullish_rev and state.get("last_signal") != "BUY":
-            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
+            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone,
+                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "BUY"
                 return {"direction": "BUY", "entry": close_price, "score": 75, "breakdown": make_breakdown(True), **targets}
 
         elif bearish_rev and state.get("last_signal") != "SELL":
-            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
+            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone,
+                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "SELL"
                 return {"direction": "SELL", "entry": close_price, "score": 75, "breakdown": make_breakdown(False), **targets}
@@ -226,7 +235,8 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
             entry_bullish, macro_bullish
         )
         if score >= min_confluence_score and state.get("last_signal") != "BUY":
-            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
+            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone,
+                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "BUY"
                 return {"direction": "BUY", "entry": close_price, "score": score, "breakdown": breakdown, **targets}
@@ -239,7 +249,8 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
             entry_bullish, not macro_bullish
         )
         if score >= min_confluence_score and state.get("last_signal") != "SELL":
-            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
+            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone,
+                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
             if targets["rrr"] >= min_rrr:
                 state["last_signal"] = "SELL"
                 return {"direction": "SELL", "entry": close_price, "score": score, "breakdown": breakdown, **targets}
@@ -307,16 +318,22 @@ def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forwa
     return ("HIT_TP1" if hit_tp1 else "OPEN"), times[end_idx]
 
 def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None, min_rrr=None,
-                  spread_pips=2.0, progress_callback=None):
+                  spread_pips=2.0, progress_callback=None, strategy_name=None,
+                  sl_atr_mult=None, tp1_atr_mult=None, tp2_atr_mult=None,
+                  rsi_buy_threshold=None, rsi_sell_threshold=None):
     mode = timeframe_mode or ALERT_STATE["timeframe_mode"]
     if mode not in TIMEFRAME_PRESETS:
         return {"error": f"Unknown timeframe mode '{mode}'"}
     preset = TIMEFRAME_PRESETS[mode]
-    active_strat = ALERT_STATE.get("active_strategy", "smc_confluence")
+    active_strat = strategy_name or ALERT_STATE.get("active_strategy", "smc_confluence")
+
+    resolved_sl_mult = sl_atr_mult if sl_atr_mult is not None else ALERT_STATE["sl_atr_mult"]
+    resolved_tp1_mult = tp1_atr_mult if tp1_atr_mult is not None else ALERT_STATE["tp1_atr_mult"]
+    resolved_tp2_mult = tp2_atr_mult if tp2_atr_mult is not None else ALERT_STATE["tp2_atr_mult"]
 
     state = {
-        "rsi_buy_threshold": ALERT_STATE["rsi_buy_threshold"],
-        "rsi_sell_threshold": ALERT_STATE["rsi_sell_threshold"],
+        "rsi_buy_threshold": rsi_buy_threshold if rsi_buy_threshold is not None else ALERT_STATE["rsi_buy_threshold"],
+        "rsi_sell_threshold": rsi_sell_threshold if rsi_sell_threshold is not None else ALERT_STATE["rsi_sell_threshold"],
         "require_structure_break": ALERT_STATE["require_structure_break"],
         "require_volume_atr_filter": ALERT_STATE["require_volume_atr_filter"],
         "fractal_window": ALERT_STATE["fractal_window"],
@@ -449,7 +466,8 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         trade = _decide_trade(
             round(float(close_price), 2), round(float(rsi_val), 2), round(float(atr_val), 2),
             entry_bullish, trend_bullish, macro_bullish, full, state, min_confluence_score, min_rrr,
-            strategy_name=active_strat
+            strategy_name=active_strat,
+            sl_mult=resolved_sl_mult, tp1_mult=resolved_tp1_mult, tp2_mult=resolved_tp2_mult
         )
         if trade is None:
             continue
@@ -519,42 +537,63 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         "equity_curve": equity, "trades": trades, "factor_summary": factor_summary,
     }
 
+MAX_SWEEP_COMBOS = 150  # hard cap so a stacked sweep can't silently run for ages
+
 def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, score_values=None,
+                        strategy_values=None, sl_values=None, rsi_pairs=None,
                         spread_pips=2.0, progress_callback=None):
-    """Runs run_backtest across a grid of min_rrr x min_confluence_score combinations."""
+    """Sweeps strategy x min_rrr x min_confluence_score, optionally also x sl_atr_mult x
+    (rsi_buy, rsi_sell) pairs. Pass None for any axis to keep it fixed at the current
+    ALERT_STATE / run_backtest default instead of sweeping it."""
     rrr_values = rrr_values or [1.3, 1.5, 2.0, 2.5, 3.0]
     score_values = score_values or [20, 25, 30, 35, 40]
+    strategies = strategy_values or [None]
+    sl_mults = sl_values or [None]
+    rsi_combos = rsi_pairs or [(None, None)]
 
-    combos = [(r, s) for r in rrr_values for s in score_values]
+    total_combos = len(strategies) * len(rrr_values) * len(score_values) * len(sl_mults) * len(rsi_combos)
+    if total_combos > MAX_SWEEP_COMBOS:
+        return {"error": f"Sweep would run {total_combos} backtests (cap is {MAX_SWEEP_COMBOS}). "
+                          f"Sweep fewer dimensions at once, or narrow the value lists."}
+
+    combos = [
+        (strat, r, s, sl, rsi_pair)
+        for strat in strategies for r in rrr_values for s in score_values
+        for sl in sl_mults for rsi_pair in rsi_combos
+    ]
     results = []
-    total = len(combos)
 
-    for idx, (rrr, score) in enumerate(combos):
+    for idx, (strat, rrr, score, sl_mult, (rsi_buy, rsi_sell)) in enumerate(combos):
         if progress_callback:
             try:
-                progress_callback(int(idx / total * 100))
+                progress_callback(int(idx / len(combos) * 100))
             except Exception:
                 pass
 
         res = run_backtest(symbol, days=days, timeframe_mode=timeframe_mode,
-                            min_confluence_score=score, min_rrr=rrr, spread_pips=spread_pips)
+                            min_confluence_score=score, min_rrr=rrr, spread_pips=spread_pips,
+                            strategy_name=strat, sl_atr_mult=sl_mult,
+                            rsi_buy_threshold=rsi_buy, rsi_sell_threshold=rsi_sell)
+
+        resolved_strategy = strat or ALERT_STATE.get("active_strategy", "smc_confluence")
+        resolved_sl = sl_mult if sl_mult is not None else ALERT_STATE["sl_atr_mult"]
+        resolved_rsi = (
+            rsi_buy if rsi_buy is not None else ALERT_STATE["rsi_buy_threshold"],
+            rsi_sell if rsi_sell is not None else ALERT_STATE["rsi_sell_threshold"],
+        )
+
+        row = {"strategy": resolved_strategy, "min_rrr": rrr, "min_confluence_score": score,
+               "sl_atr_mult": resolved_sl, "rsi_pair": resolved_rsi}
 
         if "error" in res:
-            results.append({"min_rrr": rrr, "min_confluence_score": score, "error": res["error"]})
-            continue
-
-        results.append({
-            "min_rrr": rrr,
-            "min_confluence_score": score,
-            "total_trades": res["total_trades"],
-            "wins": res["wins"],
-            "losses": res["losses"],
-            "open": res["open"],
-            "win_rate": res["win_rate"],
-            "avg_r": res["avg_r"],
-            "net_r": res["net_r"],
-            "max_drawdown_r": res["max_drawdown_r"],
-        })
+            row["error"] = res["error"]
+        else:
+            row.update({
+                "total_trades": res["total_trades"], "wins": res["wins"], "losses": res["losses"],
+                "open": res["open"], "win_rate": res["win_rate"], "avg_r": res["avg_r"],
+                "net_r": res["net_r"], "max_drawdown_r": res["max_drawdown_r"],
+            })
+        results.append(row)
 
     if progress_callback:
         try:
@@ -562,7 +601,12 @@ def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, sc
         except Exception:
             pass
 
-    return {"symbol": symbol, "mode": timeframe_mode, "days": days, "grid": results}
+    return {
+        "symbol": symbol, "mode": timeframe_mode, "days": days, "grid": results,
+        "swept_strategies": strategy_values is not None,
+        "swept_sl": sl_values is not None,
+        "swept_rsi": rsi_pairs is not None,
+    }
 
 def generate_equity_chart(equity_curve, title="Backtest Equity Curve"):
     if not equity_curve or len(equity_curve) < 2:

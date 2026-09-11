@@ -284,10 +284,11 @@ def format_confluence_breakdown(score, breakdown):
         lines.append(f"  {check} {label}: `{earned}/{possible}`")
     return "\n".join(lines)
 
-def calculate_targets(direction, close_price, atr_val, order_block, near_zone):
-    sl_mult = ALERT_STATE["sl_atr_mult"]
-    tp1_mult = ALERT_STATE["tp1_atr_mult"]
-    tp2_mult = ALERT_STATE["tp2_atr_mult"]
+def calculate_targets(direction, close_price, atr_val, order_block, near_zone,
+                       sl_mult=None, tp1_mult=None, tp2_mult=None):
+    sl_mult = sl_mult if sl_mult is not None else ALERT_STATE["sl_atr_mult"]
+    tp1_mult = tp1_mult if tp1_mult is not None else ALERT_STATE["tp1_atr_mult"]
+    tp2_mult = tp2_mult if tp2_mult is not None else ALERT_STATE["tp2_atr_mult"]
     min_dist = atr_val * 0.5
     ob_buffer = atr_val * 0.25
 
@@ -478,15 +479,27 @@ def evaluate_smc_confluence(a):
                 signals_found.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, msg))
 
     elif ALERT_STATE["setup_forming_enabled"] and in_approach_zone:
-        if ALERT_STATE["last_watch_signal"] is None:
-            ALERT_STATE["last_watch_signal"] = "FORMING"
-            watch_msg = (
-                f"👀 **SETUP FORMING (EARLY HEADS-UP)** 👀\n\n"
-                f"• **Symbol:** `XAUUSD` | **Price:** `${close_price}`\n"
-                f"• **Current RSI:** `{rsi_val}` (Approaching Zone: `{buy_th}` / `{sell_th}`)\n"
-                f"💡 *Monitor charts for imminent breakout or rejection.*"
-            )
-            watch_found.append(watch_msg)
+        # Split the approach zone to identify the intended direction
+        is_bullish_approach = (buy_th < rsi_val <= buy_th + ALERT_STATE["watch_rsi_margin"])
+        is_bearish_approach = (sell_th - ALERT_STATE["watch_rsi_margin"] <= rsi_val < sell_th)
+
+        # GATE: Only allow watchlist pings if the HTF trend aligns with the impending setup
+        valid_bullish_watch = is_bullish_approach and (trend_bullish or macro_bullish)
+        valid_bearish_watch = is_bearish_approach and (not trend_bullish or not macro_bullish)
+
+        if (valid_bullish_watch or valid_bearish_watch):
+            if ALERT_STATE["last_watch_signal"] is None:
+                ALERT_STATE["last_watch_signal"] = "FORMING"
+                direction_icon = "🟢 BULLISH" if valid_bullish_watch else "🔴 BEARISH"
+                
+                watch_msg = (
+                    f"👀 **{direction_icon} SETUP FORMING (EARLY HEADS-UP)** 👀\n\n"
+                    f"• **Symbol:** `XAUUSD` | **Price:** `${close_price}`\n"
+                    f"• **Current RSI:** `{rsi_val}` (Approaching Zone: `{buy_th}` / `{sell_th}`)\n"
+                    f"• **HTF Alignment:** Verified ✅\n"
+                    f"💡 *Monitor charts for imminent breakout or rejection.*"
+                )
+                watch_found.append(watch_msg)
 
     else:
         ALERT_STATE["last_rsi_signal"] = None

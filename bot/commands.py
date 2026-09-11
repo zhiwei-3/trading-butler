@@ -569,20 +569,41 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     days = 30
     mode = None
+    flags = set()
 
     if args:
         try:
             days = int(args[0])
         except ValueError:
-            await update.message.reply_text("⚠️ **Usage:** `/optimize <days> [scalp|intraday|swing]`", parse_mode="Markdown")
+            await update.message.reply_text(
+                "⚠️ **Usage:** `/optimize <days> [scalp|intraday|swing] [strategies] [sl] [rsi]`\n\n"
+                "Each flag adds a swept dimension: `strategies` compares strategy presets, "
+                "`sl` sweeps the SL ATR multiplier, `rsi` sweeps RSI buy/sell threshold pairs. "
+                "Combine at most 2 flags at once to keep the grid manageable.",
+                parse_mode="Markdown"
+            )
             return
-        if len(args) >= 2:
-            mode = args[1].lower()
-            if mode not in TIMEFRAME_PRESETS:
+
+        remaining = [a.lower() for a in args[1:]]
+        for flag in ("strategies", "sl", "rsi"):
+            if flag in remaining:
+                flags.add(flag)
+                remaining.remove(flag)
+        if remaining:
+            if remaining[0] not in TIMEFRAME_PRESETS:
                 await update.message.reply_text("⚠️ Invalid mode. Use `scalp`, `intraday`, or `swing`.", parse_mode="Markdown")
                 return
+            mode = remaining[0]
 
     days = max(1, min(days, 180))
+
+    if len(flags) > 2:
+        await update.message.reply_text(
+            "⚠️ Combine at most 2 of `strategies` / `sl` / `rsi` at once — more than that "
+            "produces a grid too large to trust (and too slow to run).",
+            parse_mode="Markdown"
+        )
+        return
 
     symbol = get_gold_symbol()
     if not symbol:
@@ -590,9 +611,20 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     label = mode or ALERT_STATE['timeframe_mode']
+
+    # Base grid shrinks as more axes are added, to keep total combos sane.
+    if not flags:
+        rrr_values, score_values = [1.3, 1.5, 2.0, 2.5, 3.0], [20, 25, 30, 35, 40]
+    else:
+        rrr_values, score_values = [1.5, 2.0, 3.0], [25, 35]
+
+    strategy_values = list(STRATEGY_PRESETS.keys()) if "strategies" in flags else None
+    sl_values = [1.2, 1.5, 1.7, 2.0, 2.5] if "sl" in flags else None
+    rsi_pairs = [(30, 60), (35, 60), (40, 60), (30, 65)] if "rsi" in flags else None
+
     progress_msg = await update.message.reply_text(
-        f"⏳ Running optimization sweep — `{days}d` on `{label}`... `0%`\n"
-        f"_(this fires ~25 backtests, may take a while)_",
+        f"⏳ Running optimization sweep — `{days}d` on `{label}`"
+        f"{' [' + ', '.join(sorted(flags)) + ']' if flags else ''}... `0%`",
         parse_mode="Markdown"
     )
 
@@ -602,7 +634,8 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async def _edit():
             try:
                 await progress_msg.edit_text(
-                    f"⏳ Running optimization sweep — `{days}d` on `{label}`... `{pct}%`",
+                    f"⏳ Running optimization sweep — `{days}d` on `{label}`"
+                    f"{' [' + ', '.join(sorted(flags)) + ']' if flags else ''}... `{pct}%`",
                     parse_mode="Markdown"
                 )
             except Exception:
@@ -610,10 +643,19 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.run_coroutine_threadsafe(_edit(), loop)
 
     try:
-        result = await asyncio.to_thread(run_backtest_sweep, symbol, days, mode, progress_callback=progress_callback)
+        result = await asyncio.to_thread(
+            run_backtest_sweep, symbol, days, mode,
+            rrr_values=rrr_values, score_values=score_values,
+            strategy_values=strategy_values, sl_values=sl_values, rsi_pairs=rsi_pairs,
+            progress_callback=progress_callback
+        )
     except Exception as e:
         logging.exception("Optimization sweep crashed")
         await update.message.reply_text(f"❌ **Sweep crashed:** `{e}`", parse_mode="Markdown")
+        return
+
+    if "error" in result:
+        await update.message.reply_text(f"❌ **Sweep rejected:** {result['error']}", parse_mode="Markdown")
         return
 
     grid = result["grid"]
@@ -624,32 +666,48 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     valid_sorted = sorted(valid, key=lambda g: g["net_r"], reverse=True)
+    lines = [f"🧪 **OPTIMIZATION SWEEP — {label.upper()}** ({days}d)\n"]
 
-    lines = [f"🧪 **OPTIMIZATION SWEEP — {label.upper()}** ({days}d)\n", "`RRR  Score  Trades  Win%   NetR    MaxDD`"]
-    for g in valid:
-        lines.append(
-            f"`1:{g['min_rrr']:<4}{g['min_confluence_score']:<7}{g['total_trades']:<8}"
-            f"{g['win_rate']:<7}{g['net_r']:<8}{g['max_drawdown_r']}`"
-        )
+    def describe(g):
+        parts = [f"RRR `1:{g['min_rrr']}`", f"Score `{g['min_confluence_score']}`"]
+        if result["swept_strategies"]:
+            parts.insert(0, f"`{g['strategy']}`")
+        if result["swept_sl"]:
+            parts.append(f"SL `{g['sl_atr_mult']}x`")
+        if result["swept_rsi"]:
+            parts.append(f"RSI `{g['rsi_pair'][0]}/{g['rsi_pair'][1]}`")
+        return " ".join(parts)
 
-    lines.append("\n🏆 **Top 3 by Net R:**")
-    for g in valid_sorted[:3]:
-        trades_per_day = round(g['total_trades'] / days, 2)
-        lines.append(
-            f"  • RRR `1:{g['min_rrr']}`, Score `{g['min_confluence_score']}` → "
-            f"`{g['total_trades']}` trades (`{trades_per_day}/day`), `{g['win_rate']}%` win, `{g['net_r']}R` net, "
-            f"`{g['max_drawdown_r']}R` max DD"
-        )
+    if flags:
+        lines.append("🏆 **Top 8 combos by Net R:**")
+        for g in valid_sorted[:8]:
+            trades_per_day = round(g['total_trades'] / days, 2)
+            lines.append(
+                f"  • {describe(g)} → `{g['total_trades']}` trades (`{trades_per_day}/day`), "
+                f"`{g['win_rate']}%` win, `{g['net_r']}R` net, `{g['max_drawdown_r']}R` max DD"
+            )
+    else:
+        lines.append("`RRR  Score  Trades  Win%   NetR    MaxDD`")
+        for g in valid:
+            lines.append(
+                f"`1:{g['min_rrr']:<4}{g['min_confluence_score']:<7}{g['total_trades']:<8}"
+                f"{g['win_rate']:<7}{g['net_r']:<8}{g['max_drawdown_r']}`"
+            )
+        lines.append("\n🏆 **Top 3 by Net R:**")
+        for g in valid_sorted[:3]:
+            trades_per_day = round(g['total_trades'] / days, 2)
+            lines.append(f"  • {describe(g)} → `{g['total_trades']}` trades (`{trades_per_day}/day`), "
+                         f"`{g['win_rate']}%` win, `{g['net_r']}R` net, `{g['max_drawdown_r']}R` max DD")
 
     lines.append(
-        "\n⚠️ *Backtested on historical bars with a synthetic spread — real fills, slippage, "
-        "and news gaps will vary. More trades/day is not the goal by itself; weigh it against "
-        "win rate, net R, and max drawdown together. Hypothetical results are not indicative of "
-        "future performance.*"
+        "\n⚠️ *Backtested on historical bars with a synthetic spread — real fills, slippage, and "
+        "news gaps will vary. The more dimensions swept at once, the more likely the 'winner' is "
+        "overfit to this specific date range rather than a durable edge — validate on a separate "
+        "out-of-sample window before trusting it live.*"
     )
 
     msg = "\n".join(lines)
     if len(msg) > 4000:
-        msg = msg[:3900] + "\n\n... (truncated — grid too large for one message)"
+        msg = msg[:3900] + "\n\n... (truncated)"
 
     await update.message.reply_text(msg, parse_mode="Markdown")
