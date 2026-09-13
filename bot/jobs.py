@@ -2,7 +2,7 @@ import sqlite3
 import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
 from telegram.ext import ContextTypes
-from config import ALERT_STATE, YOUR_CHAT_ID, BOT_START_TIME, DB_FILE
+from config import ALERT_STATE, USER_ID, BOT_START_TIME, DB_FILE
 from database import get_db_connection
 from mt5_engine import MT5_LOCK, get_gold_symbol, check_mt5_alive, fetch_candles
 from news_engine import news_guard_check
@@ -45,7 +45,7 @@ def build_status_snapshot() -> str:
 async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
     if not ALERT_STATE["scanner_enabled"]:
         return
-    chat_id = context.job.chat_id or YOUR_CHAT_ID
+    chat_id = context.job.chat_id or USER_ID
     if not chat_id:
         return
     symbol = get_gold_symbol()

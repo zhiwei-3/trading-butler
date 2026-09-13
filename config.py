@@ -8,7 +8,7 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
-YOUR_CHAT_ID = os.getenv("CHAT_ID", None)
+USER_ID = os.getenv("TELEGRAM_USER_ID", None)
 DB_FILE = "trading_butler.db"
 SETTINGS_FILE = "settings.json"
 

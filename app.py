@@ -1,6 +1,7 @@
 import logging
-from telegram.ext import Application, CommandHandler, ContextTypes
-from config import ALERT_STATE, TELEGRAM_TOKEN, YOUR_CHAT_ID
+from telegram import BotCommand
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from config import ALERT_STATE, TELEGRAM_TOKEN, USER_ID
 from database import init_db
 from mt5_engine import init_mt5
 from bot.commands import *
@@ -14,6 +15,23 @@ from bot.jobs import (
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Logs uncaught exceptions raised by command handlers."""
     logging.error("Exception occurred while handling an update:", exc_info=context.error)
+
+async def post_init_setup(application: Application) -> None:
+    """Registers bot command auto-completion hints in the Telegram UI."""
+    commands = [
+        BotCommand("menu", "🎛️ Interactive Control Dashboard"),
+        BotCommand("start", "🤵‍♂️ Show Quick Command Guide"),
+        BotCommand("gold", "📊 Real-Time Chart & Analysis"),
+        BotCommand("spread", "🔍 Check Spread & Guard Status"),
+        BotCommand("news", "🗓️ High-Impact USD Calendar"),
+        BotCommand("strategy", "⚙️ Switch Active Trading Strategy"),
+        BotCommand("timeframe", "🕒 Change Analysis Timeframe Mode"),
+        BotCommand("set", "🔧 View & Adjust Dynamic Parameters"),
+        BotCommand("stats", "📈 Performance & Win Rate"),
+        BotCommand("backtest", "🧪 Replay Strategy Over History"),
+        BotCommand("optimize", "⚡ Parameter Optimization Sweep"),
+    ]
+    await application.bot.set_my_commands(commands)
 
 def main():
     if not TELEGRAM_TOKEN:
@@ -32,13 +50,14 @@ def main():
         .pool_timeout(30.0)
         .build()
     )
+    app.post_init = post_init_setup
 
     if init_mt5():
         print("✅ MT5 Engine Online!")
         if ALERT_STATE.get("heartbeat_enabled") and ALERT_STATE.get("heartbeat_chat_id"):
             restart_heartbeat_job(app.job_queue, int(ALERT_STATE["heartbeat_chat_id"]))
-        if YOUR_CHAT_ID:
-            ensure_watchdog_running(app.job_queue, int(YOUR_CHAT_ID))
+        if USER_ID:
+            ensure_watchdog_running(app.job_queue, int(USER_ID))
     else:
         print("⚠️ Warning: MT5 connection failed.")
 
@@ -47,6 +66,8 @@ def main():
 
     # Register All Command Handlers
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("menu", menu_cmd))
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(CommandHandler("scanner_on", enable_scanner))
     app.add_handler(CommandHandler("scanner_off", disable_scanner))
     app.add_handler(CommandHandler("news", news_calendar_cmd))
@@ -68,8 +89,8 @@ def main():
     app.add_handler(CommandHandler("optimize", optimize_cmd))
 
     # Auto-start Background Jobs
-    if YOUR_CHAT_ID:
-        boot_id = int(YOUR_CHAT_ID)
+    if USER_ID:
+        boot_id = int(USER_ID)
         app.job_queue.run_repeating(
             market_scanner_job, 
             interval=60, 

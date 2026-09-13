@@ -3,7 +3,7 @@ import asyncio
 import MetaTrader5 as mt5
 import pandas_ta as ta
 from datetime import datetime, timezone
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, CONFLUENCE_WEIGHTS, save_settings
@@ -47,6 +47,44 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays an interactive control menu with dynamic inline buttons."""
+    scanner_status = "🔴 OFF" if not ALERT_STATE.get("scanner_enabled") else "🟢 ON"
+    strat = ALERT_STATE.get("active_strategy", "smc_confluence").replace("_", " ").upper()
+    tf_mode = ALERT_STATE.get("timeframe_mode", "scalp").upper()
+
+    text = (
+        "🎛️ **TRADING BUTLER CONTROL DASHBOARD**\n\n"
+        f"• **Scanner:** `{scanner_status}`\n"
+        f"• **Active Strategy:** `{strat}`\n"
+        f"• **Timeframe Preset:** `{tf_mode}`\n"
+        f"• **Min Confluence Score:** `{ALERT_STATE.get('min_confluence_score')}/100`\n"
+        f"• **Min RRR:** `1:{ALERT_STATE.get('min_rrr')}`\n\n"
+        "Tap a button below for instant quick actions:"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🟢 Scanner ON", callback_data="btn_scanner_on"),
+            InlineKeyboardButton("🔴 Scanner OFF", callback_data="btn_scanner_off"),
+        ],
+        [
+            InlineKeyboardButton("📊 Gold Chart", callback_data="btn_gold"),
+            InlineKeyboardButton("🔍 Spread Check", callback_data="btn_spread"),
+            InlineKeyboardButton("📈 Stats", callback_data="btn_stats"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Strategy Selector", callback_data="btn_strat_menu"),
+            InlineKeyboardButton("🕒 Timeframe Selector", callback_data="btn_tf_menu"),
+        ],
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
 async def enable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ALERT_STATE["scanner_enabled"] = True
@@ -59,7 +97,7 @@ async def enable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_watchdog_running(context.job_queue, chat_id)
     if not ALERT_STATE["heartbeat_chat_id"]:
         restart_heartbeat_job(context.job_queue, chat_id)
-    await update.message.reply_text("🟢 **Market Scanner Activated!** Checking XAUUSD every 60 seconds.", parse_mode="Markdown")
+    await update.effective_message.reply_text("🟢 **Market Scanner Activated!** Checking XAUUSD every 60 seconds.", parse_mode="Markdown")
 
 async def disable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ALERT_STATE["scanner_enabled"] = False
@@ -67,7 +105,7 @@ async def disable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_jobs = context.job_queue.get_jobs_by_name("xauusd_scanner")
     for job in current_jobs:
         job.schedule_removal()
-    await update.message.reply_text("🔴 **Market Scanner Deactivated.**", parse_mode="Markdown")
+    await update.effective_message.reply_text("🔴 **Market Scanner Deactivated.**", parse_mode="Markdown")
 
 async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -137,11 +175,11 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def spread_check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = get_gold_symbol()
     if not symbol:
-        await update.message.reply_text("❌ MT5 Gold symbol not found.")
+        await update.effective_message.reply_text("❌ MT5 Gold symbol not found.")
         return
     tick = mt5.symbol_info_tick(symbol)
     if not tick:
-        await update.message.reply_text("❌ Unable to fetch live tick data.")
+        await update.effective_message.reply_text("❌ Unable to fetch live tick data.")
         return
 
     bid, ask = round(tick.bid, 2), round(tick.ask, 2)
@@ -154,7 +192,7 @@ async def spread_check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **Spread:** `{spread_pips} pips` (Limit: `{ALERT_STATE['max_allowed_spread_pips']} pips`)\n"
         f"• **Status:** {status_msg}"
     )
-    await update.message.reply_text(reply, parse_mode="Markdown")
+    await update.effective_message.reply_text(reply, parse_mode="Markdown")
 
 async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -191,14 +229,15 @@ async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Calculation error: {e}")
 
 async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles /gold and /snapshot commands by returning live metrics with an annotated chart photo."""
+    """Handles /gold command and menu button callbacks."""
     symbol = get_gold_symbol() or "XAUUSD"
     
-    await update.message.reply_chat_action("upload_photo")
+    # update.effective_message handles both slash commands and callback buttons safely
+    await update.effective_message.reply_chat_action("upload_photo")
     analysis = analyze_market(symbol)
 
     if not analysis:
-        await update.message.reply_text("❌ Failed to fetch MT5 market data for Gold.")
+        await update.effective_message.reply_text("❌ Failed to fetch MT5 market data for Gold.")
         return
 
     close_p = analysis["close_price"]
@@ -207,7 +246,6 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tf_lbl = analysis["tf_label"]
     struct = analysis["structure"]
 
-    # Caption text summary
     caption = (
         f"📊 **XAUUSD REAL-TIME MARKET SNAPSHOT**\n\n"
         f"• **Timeframe:** `{tf_lbl}` | **Price:** `${close_p:.2f}`\n"
@@ -217,7 +255,6 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **Macro Bias:** {'🟢 Bullish' if analysis['macro_bullish'] else '🔴 Bearish'}"
     )
 
-    # Generate real-time candlestick chart image
     chart_buf = generate_chart_snapshot(
         df=analysis["df_entry"],
         title=f"XAUUSD Real-Time Chart ({tf_lbl})",
@@ -226,13 +263,13 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if chart_buf:
-        await update.message.reply_photo(
+        await update.effective_message.reply_photo(
             photo=chart_buf,
             caption=caption,
             parse_mode="Markdown"
         )
     else:
-        await update.message.reply_text(caption, parse_mode="Markdown")
+        await update.effective_message.reply_text(caption, parse_mode="Markdown")
 
 async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_utc = datetime.now(timezone.utc)
@@ -490,7 +527,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **Stop Loss Hits:** `{sl}` 🛡️\n\n"
         f"📈 **Win Rate:** `{win_rate}%` (`{wins}/{total_closed}` closed trades)"
     )
-    await update.message.reply_text(reply, parse_mode="Markdown")
+    await update.effective_message.reply_text(reply, parse_mode="Markdown")
 
 async def diagnose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = get_gold_symbol()
@@ -751,18 +788,21 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parts.append(f"RSI `{g['rsi_pair'][0]}/{g['rsi_pair'][1]}`")
         return " ".join(parts)
 
+    base_strat = ALERT_STATE.get("active_strategy", "smc_confluence").replace("_", " ").title()
+    base_rsi = f"{ALERT_STATE.get('rsi_buy_threshold', 30)}/{ALERT_STATE.get('rsi_sell_threshold', 70)}"
+    base_sl = f"{ALERT_STATE.get('sl_atr_mult', 1.5)}x"
+    struct_gate = "ON ✅" if ALERT_STATE.get("require_structure_break") else "OFF ❌"
+    vol_gate = "ON ✅" if ALERT_STATE.get("require_volume_atr_filter") else "OFF ❌"
+
     lines = [f"🧪 **OPTIMIZATION SWEEP — {label.upper()}** ({days}d | ⚡ `{elapsed}s`)\n"]
 
-    top_count = 8 if flags else 5
-    lines.append(f"🏆 **Top {top_count} combinations by Net R:**")
+    baselines = []
+    if "strategies" not in flags: baselines.append(f"Strategy: `{base_strat}`")
+    if "sl" not in flags: baselines.append(f"SL: `{base_sl}`")
+    if "rsi" not in flags: baselines.append(f"RSI: `{base_rsi}`")
 
-    for g in valid_sorted[:top_count]:
-        trades_per_day = round(g['total_trades'] / days, 2)
-        lines.append(
-            f"  • {describe(g)} ➡️ `{g['total_trades']}` trades (`{trades_per_day}/d`), "
-            f"`{g['win_rate']}%` win, `{g['net_r']}R` net, `{g['max_drawdown_r']}R` max DD"
-        )
-
+    lines.append("📌 **Fixed Baselines:** " + " | ".join(baselines))
+    lines.append(f"⚙️ **Hard Gates:** Structure: {struct_gate} | Vol/ATR: {vol_gate}\n")
     lines.append(
         "\n⚠️ *Backtested on historical bars with synthetic spread. Sweeping multiple dimensions increases overfit risk — validate on out-of-sample data before live deployment.*"
     )
@@ -778,3 +818,55 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_len += len(line) + 1
 
     await update.message.reply_text("\n".join(final_lines), parse_mode="Markdown")
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+
+    if data == "btn_scanner_on":
+        await enable_scanner(update, context)
+    elif data == "btn_scanner_off":
+        await disable_scanner(update, context)
+    elif data == "btn_gold":
+        await gold_snapshot(update, context)
+    elif data == "btn_spread":
+        await spread_check_cmd(update, context)
+    elif data == "btn_stats":
+        await stats_cmd(update, context)
+    elif data == "btn_strat_menu":
+        keyboard = [
+            [InlineKeyboardButton("SMC Confluence", callback_data="set_strat_smc_confluence")],
+            [InlineKeyboardButton("EMA Cross", callback_data="set_strat_ema_cross")],
+            [InlineKeyboardButton("RSI Reversion", callback_data="set_strat_rsi_reversion")],
+            [InlineKeyboardButton("MTF FVG Sweep", callback_data="set_strat_htf_fvg_sweep")],
+            [InlineKeyboardButton("« Back to Menu", callback_data="btn_main_menu")],
+        ]
+        await query.edit_message_text("⚙️ **Select Active Strategy:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    elif data.startswith("set_strat_"):
+        new_strat = data.replace("set_strat_", "")
+        ALERT_STATE["active_strategy"] = new_strat
+        save_settings()
+        await menu_cmd(update, context)
+    elif data == "btn_tf_menu":
+        keyboard = [
+            [InlineKeyboardButton("Scalp (1M / 5M / 15M)", callback_data="set_tf_scalp")],
+            [InlineKeyboardButton("Intraday (5M / 15M / 1H)", callback_data="set_tf_intraday")],
+            [InlineKeyboardButton("Swing (15M / 1H / 4H)", callback_data="set_tf_swing")],
+            [InlineKeyboardButton("« Back to Menu", callback_data="btn_main_menu")],
+        ]
+        await query.edit_message_text("🕒 **Select Timeframe Preset:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    elif data.startswith("set_tf_"):
+        mode = data.replace("set_tf_", "")
+        preset = TIMEFRAME_PRESETS.get(mode)
+        if preset:
+            ALERT_STATE["timeframe_mode"] = mode
+            ALERT_STATE["entry_tf"] = preset["entry"]
+            ALERT_STATE["trend_tf"] = preset["trend"]
+            ALERT_STATE["macro_tf"] = preset["macro"]
+            ALERT_STATE["last_rsi_signal"] = None
+            save_settings()
+        await menu_cmd(update, context)
+    elif data == "btn_main_menu":
+        await menu_cmd(update, context)
