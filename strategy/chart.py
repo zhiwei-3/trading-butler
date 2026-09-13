@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=60, near_zone=None, macro_fvg=None):
     """Generates a real-time candlestick chart buffer for market snapshots."""
@@ -107,4 +108,43 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2, fvg=None
     fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
     plt.close(fig)
     buf.seek(0)
+    return buf
+
+def generate_outcome_chart(df: pd.DataFrame, entry_p: float, sl_p: float, tp1_p: float, tp2_p: float, outcome_status: str, symbol: str = "XAUUSD") -> io.BytesIO:
+    """Generates a post-trade visual chart with Entry, SL, and TP horizontal levels."""
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
+    
+    # Plot closing price line or candles
+    if 'time' in df.columns:
+        df['time'] = pd.to_datetime(df['time'])
+        ax.plot(df['time'], df['close'], label="Price", color="#1f77b4", linewidth=1.5)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    else:
+        ax.plot(df['close'], label="Price", color="#1f77b4", linewidth=1.5)
+
+    # Horizontal Price Lines
+    ax.axhline(entry_p, color="#3357FF", linestyle="--", linewidth=1.2, label=f"Entry: ${entry_p:.2f}")
+    ax.axhline(sl_p, color="#FF3333", linestyle="--", linewidth=1.2, label=f"SL: ${sl_p:.2f}")
+    ax.axhline(tp1_p, color="#28A745", linestyle=":", linewidth=1.2, label=f"TP1: ${tp1_p:.2f}")
+    if tp2_p:
+        ax.axhline(tp2_p, color="#1E7E34", linestyle="--", linewidth=1.2, label=f"TP2: ${tp2_p:.2f}")
+
+    # Color badge mapping
+    status_colors = {
+        "HIT_TP1": "#28A745",
+        "HIT_TP2": "#1E7E34",
+        "CLOSED_BE": "#17A2B8",
+        "HIT_SL": "#DC3545"
+    }
+    title_color = status_colors.get(outcome_status, "#000000")
+
+    ax.set_title(f"[{symbol}] Trade Outcome Post-Mortem: {outcome_status}", color=title_color, fontsize=12, fontweight="bold")
+    ax.grid(True, linestyle=":", alpha=0.6)
+    ax.legend(loc="upper left", frameon=True)
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
     return buf

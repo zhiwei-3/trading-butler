@@ -3,12 +3,14 @@ import sqlite3
 import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
 from telegram.ext import ContextTypes
-from config import ALERT_STATE, USER_ID, BOT_START_TIME, DB_FILE
+from telegram.error import NetworkError, TelegramError
+
+from config import ALERT_STATE, USER_ID, BOT_START_TIME, DB_FILE, save_settings
 from database import get_db_connection, get_daily_performance_stats
 from mt5_engine import MT5_LOCK, get_gold_symbol, check_mt5_alive, fetch_candles
 from news_engine import news_guard_check, check_news_blockade
 from strategy.evaluator import analyze_market, evaluate_signals
-from strategy.chart import generate_chart_snapshot
+from strategy.chart import generate_chart_snapshot, generate_outcome_chart
 
 def format_uptime(delta: timedelta) -> str:
     total_seconds = int(delta.total_seconds())
@@ -123,10 +125,10 @@ async def signal_outcome_tracker_job(context):
         return
 
     current_price = round(df['close'].iloc[-1], 2)
+    chat_id = context.job.chat_id if (context.job and context.job.chat_id) else ALERT_STATE.get("heartbeat_chat_id")
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        # Stage 1: Fetch both PENDING trades and TP1 runners
         cursor.execute(
             "SELECT id, status, direction, entry_price, sl_price, tp1_price, tp2_price "
             "FROM signals WHERE status IN ('PENDING', 'HIT_TP1')"
@@ -142,42 +144,81 @@ async def signal_outcome_tracker_job(context):
                 if status == "PENDING":
                     if current_price >= tp1:
                         new_status = "HIT_TP1"
-                        msg = f"🎯 **XAUUSD BUY — TP1 HIT!** (${tp1})\n🛡️ *Stop Loss moved to Break-Even (${entry})*"
+                        msg = f"🎯 **XAUUSD BUY — TP1 HIT!** (${tp1:.2f})\n🛡️ *Stop Loss moved to Break-Even (${entry:.2f})*"
                     elif current_price <= sl:
                         new_status = "HIT_SL"
-                        msg = f"🛡️ **XAUUSD BUY — STOP LOSS HIT** (${sl})"
+                        msg = f"🛡️ **XAUUSD BUY — STOP LOSS HIT** (${sl:.2f})"
 
                 elif status == "HIT_TP1":
                     if current_price >= tp2:
                         new_status = "HIT_TP2"
-                        msg = f"🚀 **XAUUSD BUY — TP2 HIT!** (${tp2}) — Full Target Reached!"
+                        msg = f"🚀 **XAUUSD BUY — TP2 HIT!** (${tp2:.2f}) — Full Target Reached!"
                     elif current_price <= entry:
                         new_status = "CLOSED_BE"
-                        msg = f"🔒 **XAUUSD BUY — RUNNER CLOSED AT BREAK-EVEN** (${entry})"
+                        msg = f"🔒 **XAUUSD BUY — RUNNER CLOSED AT BREAK-EVEN** (${entry:.2f})"
 
             elif direction == "SELL":
                 if status == "PENDING":
                     if current_price <= tp1:
                         new_status = "HIT_TP1"
-                        msg = f"🎯 **XAUUSD SELL — TP1 HIT!** (${tp1})\n🛡️ *Stop Loss moved to Break-Even (${entry})*"
+                        msg = f"🎯 **XAUUSD SELL — TP1 HIT!** (${tp1:.2f})\n🛡️ *Stop Loss moved to Break-Even (${entry:.2f})*"
                     elif current_price >= sl:
                         new_status = "HIT_SL"
-                        msg = f"🛡️ **XAUUSD SELL — STOP LOSS HIT** (${sl})"
+                        msg = f"🛡️ **XAUUSD SELL — STOP LOSS HIT** (${sl:.2f})"
 
                 elif status == "HIT_TP1":
                     if current_price <= tp2:
                         new_status = "HIT_TP2"
-                        msg = f"🚀 **XAUUSD SELL — TP2 HIT!** (${tp2}) — Full Target Reached!"
+                        msg = f"🚀 **XAUUSD SELL — TP2 HIT!** (${tp2:.2f}) — Full Target Reached!"
                     elif current_price >= entry:
                         new_status = "CLOSED_BE"
-                        msg = f"🔒 **XAUUSD SELL — RUNNER CLOSED AT BREAK-EVEN** (${entry})"
+                        msg = f"🔒 **XAUUSD SELL — RUNNER CLOSED AT BREAK-EVEN** (${entry:.2f})"
 
-            # Update DB and notify Telegram if state changed
             if new_status:
-                cursor.execute("UPDATE signals SET status = ? WHERE id = ?", (new_status, sig_id))
+                # 1. Update DB with explicit UTC timestamp for daily circuit breaker checks
+                now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+                cursor.execute(
+                    "UPDATE signals SET status = ?, updated_at = ? WHERE id = ?",
+                    (new_status, now_str, sig_id)
+                )
                 conn.commit()
-                if msg and context.job.chat_id:
-                    await context.bot.send_message(chat_id=context.job.chat_id, text=msg, parse_mode="Markdown")
+
+                # 2. Evaluate Circuit Breaker stats
+                await evaluate_circuit_breaker(context)
+
+                # 3. Generate Post-Trade Chart & Broadcast Alert
+                if chat_id and msg:
+                    try:
+                        df_chart = fetch_candles(symbol, mt5.TIMEFRAME_M5, 60)
+                        chart_buf = None
+                        if df_chart is not None and not df_chart.empty:
+                            chart_buf = generate_outcome_chart(
+                                df=df_chart,
+                                entry_p=entry,
+                                sl_p=sl,
+                                tp1_p=tp1,
+                                tp2_p=tp2,
+                                outcome_status=new_status,
+                                symbol=symbol
+                            )
+
+                        if chart_buf:
+                            await context.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=chart_buf,
+                                caption=msg,
+                                parse_mode="Markdown"
+                            )
+                        else:
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text=msg,
+                                parse_mode="Markdown"
+                            )
+                    except (NetworkError, TelegramError) as e:
+                        logging.warning(f"⚠️ Telegram alert skipped due to network error: {e}")
+                    except Exception as e:
+                        logging.exception(f"Unexpected error sending trade outcome alert: {e}")
 
 async def evaluate_circuit_breaker(context):
     """
