@@ -4,7 +4,7 @@ import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
 from telegram.ext import ContextTypes
 from config import ALERT_STATE, USER_ID, BOT_START_TIME, DB_FILE
-from database import get_db_connection
+from database import get_db_connection, get_daily_performance_stats
 from mt5_engine import MT5_LOCK, get_gold_symbol, check_mt5_alive, fetch_candles
 from news_engine import news_guard_check, check_news_blockade
 from strategy.evaluator import analyze_market, evaluate_signals
@@ -69,6 +69,16 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
         if spread_pips > ALERT_STATE["max_allowed_spread_pips"]:
             logging.info(f"⚠️ Scanner skipped: Spread too high ({spread_pips} pips)")
             return
+
+    # 1. Check Circuit Breaker Gate
+    if await evaluate_circuit_breaker(context):
+        return
+
+    # 2. Check News Blockade Gate
+    is_blocked, reason = await check_news_blockade()
+    if is_blocked:
+        logging.info(f"📰 Market scanner paused due to news blockade: {reason}")
+        return
 
     analysis = analyze_market(symbol)
     if analysis:
@@ -168,6 +178,51 @@ async def signal_outcome_tracker_job(context):
                 conn.commit()
                 if msg and context.job.chat_id:
                     await context.bot.send_message(chat_id=context.job.chat_id, text=msg, parse_mode="Markdown")
+
+async def evaluate_circuit_breaker(context):
+    """
+    Evaluates daily performance. If thresholds are breached, shuts down scanner
+    and broadcasts an emergency Telegram alert.
+    """
+    if not ALERT_STATE.get("circuit_breaker_enabled", True):
+        return False
+
+    stats = get_daily_performance_stats()
+    max_losses = ALERT_STATE.get("max_daily_losses", 3)
+    max_drawdown = ALERT_STATE.get("max_daily_drawdown_r", 3.0)
+
+    triggered = False
+    reason = ""
+
+    if stats["consecutive_losses"] >= max_losses:
+        triggered = True
+        reason = f"Hit **{stats['consecutive_losses']} consecutive losses** today (Limit: `{max_losses}`)."
+    elif stats["net_r"] <= -abs(max_drawdown):
+        triggered = True
+        reason = f"Daily drawdown reached **{stats['net_r']:.1f}R** (Limit: `-{abs(max_drawdown):.1f}R`)."
+
+    if triggered and ALERT_STATE.get("scanner_enabled"):
+        ALERT_STATE["scanner_enabled"] = False
+        save_settings()
+
+        # Remove active scanner job loop
+        current_jobs = context.job_queue.get_jobs_by_name("xauusd_scanner")
+        for job in current_jobs:
+            job.schedule_removal()
+
+        msg = (
+            f"🚨 **CIRCUIT BREAKER TRIGGERED — SCANNER DEACTIVATED** 🚨\n\n"
+            f"• **Reason:** {reason}\n"
+            f"• **Today's Net R:** `{stats['net_r']:.1f}R`\n"
+            f"• **Today's Record:** `{stats['today_wins']}W - {stats['today_losses']}L`\n\n"
+            "🛡️ *Scanner has been paused to protect capital. Review market conditions before re-enabling.*"
+        )
+        chat_id = context.job.chat_id if context.job else ALERT_STATE.get("heartbeat_chat_id")
+        if chat_id:
+            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+        return True
+
+    return False
 
 async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id

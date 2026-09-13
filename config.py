@@ -70,6 +70,10 @@ ALERT_STATE = {
     "watch_rsi_margin": 5,
     "watch_score_margin": 10,
 
+    "circuit_breaker_enabled": True,        # Master ON/OFF toggle
+    "max_daily_losses": 3,                  # Max consecutive losses allowed per day
+    "max_daily_drawdown_r": 3.0,            # Max daily R-multiple drawdown allowed (-3.0R)
+
     "news_blockade_enabled": True,             # Master ON/OFF toggle
     "news_blockade_impacts": ["high"],         # Levels to block: ["high"], ["high", "medium"], etc.
     "news_blockade_mins_before": 30,           # Pause scanner N minutes BEFORE news release

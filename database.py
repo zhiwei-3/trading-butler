@@ -50,3 +50,49 @@ def get_signal_stats():
         cursor.execute("SELECT status, COUNT(*) FROM signals GROUP BY status")
         counts = dict(cursor.fetchall())
     return counts
+
+def get_daily_performance_stats():
+    """
+    Calculates today's closed trade performance (UTC day) from the database.
+    Returns dict: {'consecutive_losses': int, 'net_r': float, 'today_wins': int, 'today_losses': int}
+    """
+    today_start = datetime.now(timezone.utc).strftime('%Y-%m-%d 00:00:00')
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT status FROM signals "
+            "WHERE status IN ('HIT_TP1', 'HIT_TP2', 'CLOSED_BE', 'HIT_SL') "
+            "AND updated_at >= ? ORDER BY id ASC",
+            (today_start,)
+        )
+        rows = cursor.fetchall()
+
+        consecutive_losses = 0
+        net_r = 0.0
+        today_wins = 0
+        today_losses = 0
+
+        for (status,) in rows:
+            if status == 'HIT_SL':
+                today_losses += 1
+                consecutive_losses += 1
+                net_r -= 1.0  # -1R per Stop Loss
+            elif status == 'HIT_TP1':
+                today_wins += 1
+                consecutive_losses = 0
+                net_r += 1.0  # +1R for TP1
+            elif status == 'HIT_TP2':
+                today_wins += 1
+                consecutive_losses = 0
+                net_r += 2.0  # +2R for TP2
+            elif status == 'CLOSED_BE':
+                today_wins += 1
+                consecutive_losses = 0  # 0R for Break-Even
+
+        return {
+            "consecutive_losses": consecutive_losses,
+            "net_r": net_r,
+            "today_wins": today_wins,
+            "today_losses": today_losses
+        }

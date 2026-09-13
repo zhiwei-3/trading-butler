@@ -338,11 +338,18 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• **TP1 ATR Mult (`tp1_mult`):** `{ALERT_STATE.get('tp1_atr_mult', 1.0)}x`\n"
             f"• **TP2 ATR Mult (`tp2_mult`):** `{ALERT_STATE.get('tp2_atr_mult', 2.0)}x`\n"
             f"• **Max Spread (`spread`):** `{ALERT_STATE.get('max_allowed_spread_pips', 30)} pips`\n\n"
+
+            "🚨 **Circuit Breaker Settings:**\n"
+            f"• **Status (`cb_enabled`):** `{'ON 🟢' if ALERT_STATE.get('circuit_breaker_enabled', True) else 'OFF 🔴'}`\n"
+            f"• **Max Consecutive Losses (`cb_losses`):** `{ALERT_STATE.get('max_daily_losses', 3)}`\n"
+            f"• **Max Daily Drawdown (`cb_drawdown`):** `-{ALERT_STATE.get('max_daily_drawdown_r', 3.0)}R`\n\n"
+
             "📰 **News Blockade Settings:**\n"
             f"• **Blockade Status (`news_blockade`):** `{news_status}`\n"
             f"• **Mins Before (`news_before`):** `{ALERT_STATE.get('news_blockade_mins_before', 30)}m`\n"
             f"• **Mins After (`news_after`):** `{ALERT_STATE.get('news_blockade_mins_after', 15)}m`\n"
             f"• **Impact Levels (`news_impact`):** `{impacts_str}`\n\n"
+
             "**Usage:** `/set <key> <value>`\n"
             "• `/set tp1_mult 1.5`\n"
             "• `/set news_blockade 1` *(1 = ON, 0 = OFF)*\n"
@@ -378,6 +385,17 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             setting_name = "tp2_atr_mult"
         elif key in ("spread", "max_spread"):
             setting_name = "max_allowed_spread_pips"
+
+        elif key in ("cb_enabled", "circuit_breaker", "cb_toggle"):
+            setting_name = "circuit_breaker_enabled"
+            val = bool(int(val_str))  # 1 = ON, 0 = OFF
+        elif key in ("cb_losses", "max_losses", "cb_max_losses"):
+            setting_name = "max_daily_losses"
+            val = int(val_str)
+        elif key in ("cb_drawdown", "max_drawdown", "cb_max_drawdown"):
+            setting_name = "max_daily_drawdown_r"
+            val = float(val_str)
+            
         elif key in ("news_blockade", "news_toggle"):
             setting_name = "news_blockade_enabled"
             val = bool(int(val))  # Use /set news_blockade 1 (ON) or 0 (OFF)
