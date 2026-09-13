@@ -13,9 +13,12 @@ MT5_LOCK = threading.RLock()
 
 def init_mt5():
     with MT5_LOCK:
-        if not mt5.initialize():
-            logging.error(f"MT5 Initialization failed: {mt5.last_error()}")
-            return False
+        if mt5.terminal_info() is None:
+            logging.warning("⚠️ MT5 connection lost. Re-initializing...")
+            mt5.shutdown()
+            if not mt5.initialize():
+                logging.error(f"MT5 Initialization failed: {mt5.last_error()}")
+                return False
         return True
 
 def check_mt5_alive() -> bool:

@@ -1,31 +1,42 @@
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from config import DB_FILE
+from contextlib import contextmanager
 
+@contextmanager
 def get_db_connection():
-    """Returns a SQLite connection configured with a 10-second busy timeout."""
-    conn = sqlite3.connect(DB_FILE, timeout=10.0)
-    return conn
+    conn = sqlite3.connect(DB_FILE, timeout=15)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 def init_db():
-    """Creates the SQLite table for signal performance tracking."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT,
-                symbol TEXT,
                 direction TEXT,
                 entry_price REAL,
                 sl_price REAL,
                 tp1_price REAL,
                 tp2_price REAL,
-                score INTEGER,
-                status TEXT DEFAULT 'PENDING',
-                closed_at TEXT
+                status TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
+        """)
+        # Safe migration check for existing databases missing updated_at
+        cursor.execute("PRAGMA table_info(signals)")
+        columns = [column[1] for column in cursor.fetchall()]
+        if "updated_at" not in columns:
+            cursor.execute("ALTER TABLE signals ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP")
         conn.commit()
 
 def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score):

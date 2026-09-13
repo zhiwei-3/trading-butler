@@ -1,4 +1,5 @@
 import logging
+import asyncio
 import sqlite3
 import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
@@ -45,182 +46,7 @@ def build_status_snapshot() -> str:
         f"• **Last Heartbeat Sent:** `{last_hb_str}`"
     )
 
-async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
-    if not ALERT_STATE["scanner_enabled"]:
-        return
-    chat_id = context.job.chat_id or USER_ID
-    if not chat_id:
-        return
-    symbol = get_gold_symbol()
-    if not symbol:
-        return
-    if await news_guard_check(context, chat_id):
-        return
-
-    # 1. Check News Blockade Gate
-    is_blocked, reason = await check_news_blockade()
-    if is_blocked:
-        logging.info(f"📰 Market scanner paused due to news blockade: {reason}")
-        return
-
-    # 2. Check Spread Guard
-    symbol = get_gold_symbol() or "XAUUSD"
-    tick = mt5.symbol_info_tick(symbol)
-    if tick:
-        spread_pips = round((tick.ask - tick.bid) * 10, 1)
-        if spread_pips > ALERT_STATE["max_allowed_spread_pips"]:
-            logging.info(f"⚠️ Scanner skipped: Spread too high ({spread_pips} pips)")
-            return
-
-    # 1. Check Circuit Breaker Gate
-    if await evaluate_circuit_breaker(context):
-        return
-
-    # 2. Check News Blockade Gate
-    is_blocked, reason = await check_news_blockade()
-    if is_blocked:
-        logging.info(f"📰 Market scanner paused due to news blockade: {reason}")
-        return
-
-    analysis = analyze_market(symbol)
-    if analysis:
-        signals_found, watch_found = evaluate_signals(analysis)
-        
-        # Dispatch executable signal alerts with position sizing & annotated charts
-        for item in signals_found:
-            if isinstance(item, tuple):
-                msg_text, chart_buffer = item
-                if chart_buffer:
-                    await context.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=chart_buffer,
-                        caption=msg_text,
-                        parse_mode="Markdown"
-                    )
-                else:
-                    await context.bot.send_message(
-                        chat_id=chat_id, 
-                        text=msg_text, 
-                        parse_mode="Markdown"
-                    )
-            else:
-                await context.bot.send_message(
-                    chat_id=chat_id, 
-                    text=item, 
-                    parse_mode="Markdown"
-                )
-
-        # Dispatch early watch pings as text-only messages
-        for watch_msg in watch_found:
-            await context.bot.send_message(
-                chat_id=chat_id, 
-                text=watch_msg, 
-                parse_mode="Markdown"
-            )
-
-async def signal_outcome_tracker_job(context):
-    symbol = get_gold_symbol() or "XAUUSD"
-    df = fetch_candles(symbol, mt5.TIMEFRAME_M1, 5)
-    if df is None or df.empty:
-        return
-
-    current_price = round(df['close'].iloc[-1], 2)
-    chat_id = context.job.chat_id if (context.job and context.job.chat_id) else ALERT_STATE.get("heartbeat_chat_id")
-
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, status, direction, entry_price, sl_price, tp1_price, tp2_price "
-            "FROM signals WHERE status IN ('PENDING', 'HIT_TP1')"
-        )
-        active_signals = cursor.fetchall()
-
-        for sig in active_signals:
-            sig_id, status, direction, entry, sl, tp1, tp2 = sig
-            new_status = None
-            msg = None
-
-            if direction == "BUY":
-                if status == "PENDING":
-                    if current_price >= tp1:
-                        new_status = "HIT_TP1"
-                        msg = f"🎯 **XAUUSD BUY — TP1 HIT!** (${tp1:.2f})\n🛡️ *Stop Loss moved to Break-Even (${entry:.2f})*"
-                    elif current_price <= sl:
-                        new_status = "HIT_SL"
-                        msg = f"🛡️ **XAUUSD BUY — STOP LOSS HIT** (${sl:.2f})"
-
-                elif status == "HIT_TP1":
-                    if current_price >= tp2:
-                        new_status = "HIT_TP2"
-                        msg = f"🚀 **XAUUSD BUY — TP2 HIT!** (${tp2:.2f}) — Full Target Reached!"
-                    elif current_price <= entry:
-                        new_status = "CLOSED_BE"
-                        msg = f"🔒 **XAUUSD BUY — RUNNER CLOSED AT BREAK-EVEN** (${entry:.2f})"
-
-            elif direction == "SELL":
-                if status == "PENDING":
-                    if current_price <= tp1:
-                        new_status = "HIT_TP1"
-                        msg = f"🎯 **XAUUSD SELL — TP1 HIT!** (${tp1:.2f})\n🛡️ *Stop Loss moved to Break-Even (${entry:.2f})*"
-                    elif current_price >= sl:
-                        new_status = "HIT_SL"
-                        msg = f"🛡️ **XAUUSD SELL — STOP LOSS HIT** (${sl:.2f})"
-
-                elif status == "HIT_TP1":
-                    if current_price <= tp2:
-                        new_status = "HIT_TP2"
-                        msg = f"🚀 **XAUUSD SELL — TP2 HIT!** (${tp2:.2f}) — Full Target Reached!"
-                    elif current_price >= entry:
-                        new_status = "CLOSED_BE"
-                        msg = f"🔒 **XAUUSD SELL — RUNNER CLOSED AT BREAK-EVEN** (${entry:.2f})"
-
-            if new_status:
-                # 1. Update DB with explicit UTC timestamp for daily circuit breaker checks
-                now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-                cursor.execute(
-                    "UPDATE signals SET status = ?, updated_at = ? WHERE id = ?",
-                    (new_status, now_str, sig_id)
-                )
-                conn.commit()
-
-                # 2. Evaluate Circuit Breaker stats
-                await evaluate_circuit_breaker(context)
-
-                # 3. Generate Post-Trade Chart & Broadcast Alert
-                if chat_id and msg:
-                    try:
-                        df_chart = fetch_candles(symbol, mt5.TIMEFRAME_M5, 60)
-                        chart_buf = None
-                        if df_chart is not None and not df_chart.empty:
-                            chart_buf = generate_outcome_chart(
-                                df=df_chart,
-                                entry_p=entry,
-                                sl_p=sl,
-                                tp1_p=tp1,
-                                tp2_p=tp2,
-                                outcome_status=new_status,
-                                symbol=symbol
-                            )
-
-                        if chart_buf:
-                            await context.bot.send_photo(
-                                chat_id=chat_id,
-                                photo=chart_buf,
-                                caption=msg,
-                                parse_mode="Markdown"
-                            )
-                        else:
-                            await context.bot.send_message(
-                                chat_id=chat_id,
-                                text=msg,
-                                parse_mode="Markdown"
-                            )
-                    except (NetworkError, TelegramError) as e:
-                        logging.warning(f"⚠️ Telegram alert skipped due to network error: {e}")
-                    except Exception as e:
-                        logging.exception(f"Unexpected error sending trade outcome alert: {e}")
-
-async def evaluate_circuit_breaker(context):
+async def evaluate_circuit_breaker(context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
     Evaluates daily performance. If thresholds are breached, shuts down scanner
     and broadcasts an emergency Telegram alert.
@@ -246,7 +72,6 @@ async def evaluate_circuit_breaker(context):
         ALERT_STATE["scanner_enabled"] = False
         save_settings()
 
-        # Remove active scanner job loop
         current_jobs = context.job_queue.get_jobs_by_name("xauusd_scanner")
         for job in current_jobs:
             job.schedule_removal()
@@ -258,12 +83,177 @@ async def evaluate_circuit_breaker(context):
             f"• **Today's Record:** `{stats['today_wins']}W - {stats['today_losses']}L`\n\n"
             "🛡️ *Scanner has been paused to protect capital. Review market conditions before re-enabling.*"
         )
-        chat_id = context.job.chat_id if context.job else ALERT_STATE.get("heartbeat_chat_id")
+        chat_id = context.job.chat_id if (context.job and context.job.chat_id) else ALERT_STATE.get("heartbeat_chat_id")
         if chat_id:
             await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
         return True
 
     return False
+
+async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
+    if not ALERT_STATE["scanner_enabled"]:
+        return
+    chat_id = context.job.chat_id or USER_ID
+    if not chat_id:
+        return
+    symbol = get_gold_symbol() or "XAUUSD"
+
+    # 1. Circuit Breaker Gate
+    if await evaluate_circuit_breaker(context):
+        return
+
+    # 2. News Guard Gate (External API / Event check)
+    if await news_guard_check(context, chat_id):
+        return
+
+    # 3. News Blockade Gate (Local blackout window check)
+    is_blocked, reason = await check_news_blockade()
+    if is_blocked:
+        logging.info(f"📰 Market scanner paused due to news blockade: {reason}")
+        return
+
+    # 4. Spread Guard Gate
+    tick = mt5.symbol_info_tick(symbol)
+    if tick:
+        spread_pips = round((tick.ask - tick.bid) * 10, 1)
+        if spread_pips > ALERT_STATE["max_allowed_spread_pips"]:
+            logging.info(f"⚠️ Scanner skipped: Spread too high ({spread_pips} pips)")
+            return
+
+    # 5. Market Technical Evaluation
+    analysis = analyze_market(symbol)
+    if analysis:
+        signals_found, watch_found = evaluate_signals(analysis)
+        
+        for item in signals_found:
+            if isinstance(item, tuple):
+                msg_text, chart_buffer = item
+                if chart_buffer:
+                    await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=chart_buffer,
+                        caption=msg_text,
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=chat_id, 
+                        text=msg_text, 
+                        parse_mode="Markdown"
+                    )
+            else:
+                await context.bot.send_message(
+                    chat_id=chat_id, 
+                    text=item, 
+                    parse_mode="Markdown"
+                )
+
+        for watch_msg in watch_found:
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text=watch_msg, 
+                parse_mode="Markdown"
+            )
+
+async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
+    symbol = get_gold_symbol() or "XAUUSD"
+    df = fetch_candles(symbol, mt5.TIMEFRAME_M1, 5)
+    if df is None or df.empty:
+        return
+
+    current_price = round(df['close'].iloc[-1], 2)
+    chat_id = context.job.chat_id if (context.job and context.job.chat_id) else ALERT_STATE.get("heartbeat_chat_id")
+
+    updates_to_send = []
+
+    # 1. Batch Database Updates in standard connection block
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, status, direction, entry_price, sl_price, tp1_price, tp2_price "
+            "FROM signals WHERE status IN ('PENDING', 'HIT_TP1')"
+        )
+        active_signals = cursor.fetchall()
+
+        now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+
+        for sig in active_signals:
+            sig_id, status, direction, entry, sl, tp1, tp2 = sig
+            new_status = None
+            msg = None
+
+            if direction == "BUY":
+                if status == "PENDING":
+                    if current_price >= tp1:
+                        new_status = "HIT_TP1"
+                        msg = f"🎯 **XAUUSD BUY — TP1 HIT!** (${tp1:.2f})\n🛡️ *Stop Loss moved to Break-Even (${entry:.2f})*"
+                    elif current_price <= sl:
+                        new_status = "HIT_SL"
+                        msg = f"🛡️ **XAUUSD BUY — STOP LOSS HIT** (${sl:.2f})"
+                elif status == "HIT_TP1":
+                    if current_price >= tp2:
+                        new_status = "HIT_TP2"
+                        msg = f"🚀 **XAUUSD BUY — TP2 HIT!** (${tp2:.2f}) — Full Target Reached!"
+                    elif current_price <= entry:
+                        new_status = "CLOSED_BE"
+                        msg = f"🔒 **XAUUSD BUY — RUNNER CLOSED AT BREAK-EVEN** (${entry:.2f})"
+
+            elif direction == "SELL":
+                if status == "PENDING":
+                    if current_price <= tp1:
+                        new_status = "HIT_TP1"
+                        msg = f"🎯 **XAUUSD SELL — TP1 HIT!** (${tp1:.2f})\n🛡️ *Stop Loss moved to Break-Even (${entry:.2f})*"
+                    elif current_price >= sl:
+                        new_status = "HIT_SL"
+                        msg = f"🛡️ **XAUUSD SELL — STOP LOSS HIT** (${sl:.2f})"
+                elif status == "HIT_TP1":
+                    if current_price <= tp2:
+                        new_status = "HIT_TP2"
+                        msg = f"🚀 **XAUUSD SELL — TP2 HIT!** (${tp2:.2f}) — Full Target Reached!"
+                    elif current_price >= entry:
+                        new_status = "CLOSED_BE"
+                        msg = f"🔒 **XAUUSD SELL — RUNNER CLOSED AT BREAK-EVEN** (${entry:.2f})"
+
+            if new_status:
+                cursor.execute(
+                    "UPDATE signals SET status = ?, updated_at = ? WHERE id = ?",
+                    (new_status, now_str, sig_id)
+                )
+                updates_to_send.append((sig, new_status, msg))
+
+        conn.commit()
+
+    # 2. Evaluate Circuit Breaker once for all batch updates
+    if updates_to_send:
+        await evaluate_circuit_breaker(context)
+
+    # 3. Process visual charts asynchronously off the main thread
+    for sig, new_status, msg in updates_to_send:
+        sig_id, status, direction, entry, sl, tp1, tp2 = sig
+        if chat_id and msg:
+            try:
+                df_chart = fetch_candles(symbol, mt5.TIMEFRAME_M5, 60)
+                chart_buf = None
+                if df_chart is not None and not df_chart.empty:
+                    chart_buf = await asyncio.to_thread(
+                        generate_outcome_chart,
+                        df=df_chart,
+                        entry_p=entry,
+                        sl_p=sl,
+                        tp1_p=tp1,
+                        tp2_p=tp2,
+                        outcome_status=new_status,
+                        symbol=symbol
+                    )
+
+                if chart_buf:
+                    await context.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=msg, parse_mode="Markdown")
+                else:
+                    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+            except (NetworkError, TelegramError) as e:
+                logging.warning(f"⚠️ Telegram alert skipped due to network issue: {e}")
+            except Exception as e:
+                logging.exception(f"Error sending outcome alert for signal {sig_id}: {e}")
 
 async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
