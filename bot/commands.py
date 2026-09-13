@@ -1,12 +1,14 @@
+import time
 import logging
 import asyncio
 import MetaTrader5 as mt5
 import pandas_ta as ta
+from functools import wraps
 from datetime import datetime, timezone
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, CONFLUENCE_WEIGHTS, save_settings
+from config import USER_ID, ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, CONFLUENCE_WEIGHTS, save_settings
 from database import get_signal_stats
 from mt5_engine import get_gold_symbol, fetch_candles, calculate_position_size
 from news_engine import fetch_economic_events
@@ -20,6 +22,19 @@ from bot.jobs import (
     restart_heartbeat_job,
 )
 
+def admin_only(func):
+    """Decorator to restrict command access strictly to USER_ID."""
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = update.effective_user.id if update.effective_user else None
+        if user_id != int(USER_ID):
+            if update.effective_message:
+                await update.effective_message.reply_text("⛔ **Access Denied:** You are not authorized to use this bot.")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+@admin_only
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ensure_watchdog_running(context.job_queue, chat_id)
@@ -47,6 +62,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+@admin_only
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays an interactive control menu with dynamic inline buttons."""
     scanner_status = "🔴 OFF" if not ALERT_STATE.get("scanner_enabled") else "🟢 ON"
@@ -85,6 +101,7 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
+@admin_only
 async def enable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ALERT_STATE["scanner_enabled"] = True
@@ -99,6 +116,7 @@ async def enable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
         restart_heartbeat_job(context.job_queue, chat_id)
     await update.effective_message.reply_text("🟢 **Market Scanner Activated!** Checking XAUUSD every 60 seconds.", parse_mode="Markdown")
 
+@admin_only
 async def disable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ALERT_STATE["scanner_enabled"] = False
     save_settings()
@@ -107,6 +125,7 @@ async def disable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job.schedule_removal()
     await update.effective_message.reply_text("🔴 **Market Scanner Deactivated.**", parse_mode="Markdown")
 
+@admin_only
 async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     impact = args[0].strip().lower() if args else "high"
@@ -172,6 +191,7 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg, parse_mode="Markdown")
 
+@admin_only
 async def spread_check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = get_gold_symbol()
     if not symbol:
@@ -194,6 +214,7 @@ async def spread_check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.effective_message.reply_text(reply, parse_mode="Markdown")
 
+@admin_only
 async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         args = context.args
@@ -228,6 +249,7 @@ async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Calculation error: {e}")
 
+@admin_only
 async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /gold command and menu button callbacks."""
     symbol = get_gold_symbol() or "XAUUSD"
@@ -271,6 +293,7 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.effective_message.reply_text(caption, parse_mode="Markdown")
 
+@admin_only
 async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_utc = datetime.now(timezone.utc)
     ch = now_utc.hour
@@ -296,6 +319,7 @@ async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(reply, parse_mode="Markdown")
 
+@admin_only
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Dynamically updates bot settings in ALERT_STATE."""
     if not context.args or len(context.args) < 2:
@@ -367,6 +391,7 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Please provide a valid numeric value.", parse_mode="Markdown")
 
+@admin_only
 async def set_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args or args[0].lower() not in TIMEFRAME_PRESETS:
@@ -383,6 +408,7 @@ async def set_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_settings()
     await update.message.reply_text(f"✅ Timeframe set to `{mode.upper()}` ({preset['label']})", parse_mode="Markdown")
 
+@admin_only
 async def set_strategy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     current = ALERT_STATE.get("active_strategy", "smc_confluence")
@@ -407,7 +433,8 @@ async def set_strategy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📝 `{strategy_label}`",
         parse_mode="Markdown"
     )
-    
+
+@admin_only 
 async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -434,6 +461,7 @@ async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     await update.message.reply_text("⚠️ Invalid format. Send `/filters` alone to see usage.", parse_mode="Markdown")
 
+@admin_only
 async def confluence_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -450,6 +478,7 @@ async def confluence_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Provide a number between 0 and 100.")
 
+@admin_only
 async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -477,6 +506,7 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_settings()
     await update.message.reply_text("✅ Watchlist setting updated.", parse_mode="Markdown")
 
+@admin_only
 async def heartbeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     chat_id = update.effective_chat.id
@@ -501,10 +531,12 @@ async def heartbeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("⚠️ **Unknown option.** Usage: `/heartbeat on|off|test`", parse_mode="Markdown")
 
+@admin_only
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     snapshot = build_status_snapshot()
     await update.message.reply_text(f"🩺 **BOT STATUS CHECK**\n\n{snapshot}", parse_mode="Markdown")
 
+@admin_only
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     counts = get_signal_stats()
     pending = counts.get('PENDING', 0)
@@ -529,6 +561,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.effective_message.reply_text(reply, parse_mode="Markdown")
 
+@admin_only
 async def diagnose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = get_gold_symbol()
     analysis = analyze_market(symbol) if symbol else None
@@ -557,6 +590,7 @@ async def diagnose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
+@admin_only
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     days = 30
@@ -651,12 +685,7 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(msg, parse_mode="Markdown")
 
-import time
-import asyncio
-import logging
-from telegram import Update
-from telegram.ext import ContextTypes
-
+@admin_only
 async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     days = 30
@@ -819,6 +848,7 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("\n".join(final_lines), parse_mode="Markdown")
 
+@admin_only
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
