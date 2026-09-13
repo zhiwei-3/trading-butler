@@ -324,6 +324,9 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Dynamically updates bot settings in ALERT_STATE."""
     if not context.args or len(context.args) < 2:
         # Show all current configurations if no arguments are provided
+        news_status = "ON 🟢" if ALERT_STATE.get("news_blockade_enabled", True) else "OFF 🔴"
+        impacts_str = ",".join(ALERT_STATE.get("news_blockade_impacts", ["high"]))
+
         reply = (
             "⚙️ **DYNAMIC SETTINGS MANAGER**\n\n"
             f"• **Buy RSI (`buy_rsi`):** `{ALERT_STATE.get('rsi_buy_threshold', 30)}`\n"
@@ -335,7 +338,15 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• **TP1 ATR Mult (`tp1_mult`):** `{ALERT_STATE.get('tp1_atr_mult', 1.0)}x`\n"
             f"• **TP2 ATR Mult (`tp2_mult`):** `{ALERT_STATE.get('tp2_atr_mult', 2.0)}x`\n"
             f"• **Max Spread (`spread`):** `{ALERT_STATE.get('max_allowed_spread_pips', 30)} pips`\n\n"
-            "**Usage:** `/set <key> <value>` (e.g., `/set tp1_mult 1.5`)"
+            "📰 **News Blockade Settings:**\n"
+            f"• **Blockade Status (`news_blockade`):** `{news_status}`\n"
+            f"• **Mins Before (`news_before`):** `{ALERT_STATE.get('news_blockade_mins_before', 30)}m`\n"
+            f"• **Mins After (`news_after`):** `{ALERT_STATE.get('news_blockade_mins_after', 15)}m`\n"
+            f"• **Impact Levels (`news_impact`):** `{impacts_str}`\n\n"
+            "**Usage:** `/set <key> <value>`\n"
+            "• `/set tp1_mult 1.5`\n"
+            "• `/set news_blockade 1` *(1 = ON, 0 = OFF)*\n"
+            "• `/set news_impact high,medium`"
         )
         await update.message.reply_text(reply, parse_mode="Markdown")
         return
@@ -367,6 +378,19 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             setting_name = "tp2_atr_mult"
         elif key in ("spread", "max_spread"):
             setting_name = "max_allowed_spread_pips"
+        elif key in ("news_blockade", "news_toggle"):
+            setting_name = "news_blockade_enabled"
+            val = bool(int(val))  # Use /set news_blockade 1 (ON) or 0 (OFF)
+        elif key in ("news_before", "news_mins_before"):
+            setting_name = "news_blockade_mins_before"
+            val = int(val)
+        elif key in ("news_after", "news_mins_after"):
+            setting_name = "news_blockade_mins_after"
+            val = int(val)
+        elif key in ("news_impact", "news_level"):
+            # Usage: /set news_impact high OR /set news_impact high,medium
+            setting_name = "news_blockade_impacts"
+            val = [x.strip().lower() for x in val_str.split(",")]
         else:
             await update.message.reply_text(f"❌ Unknown setting key `{key}`.", parse_mode="Markdown")
             return
@@ -389,7 +413,7 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     except ValueError:
-        await update.message.reply_text("❌ Please provide a valid numeric value.", parse_mode="Markdown")
+        await update.message.reply_text("❌ Invalid value provided for this setting.", parse_mode="Markdown")
 
 @admin_only
 async def set_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):

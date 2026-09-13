@@ -70,6 +70,11 @@ ALERT_STATE = {
     "watch_rsi_margin": 5,
     "watch_score_margin": 10,
 
+    "news_blockade_enabled": True,             # Master ON/OFF toggle
+    "news_blockade_impacts": ["high"],         # Levels to block: ["high"], ["high", "medium"], etc.
+    "news_blockade_mins_before": 30,           # Pause scanner N minutes BEFORE news release
+    "news_blockade_mins_after": 15,            # Keep scanner paused N minutes AFTER news release
+
     "heartbeat_enabled": True,
     "heartbeat_interval_hours": 1,
     "heartbeat_chat_id": None,

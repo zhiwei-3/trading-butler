@@ -123,3 +123,45 @@ async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
 
     ALERT_STATE["news_lockout"] = in_lockout_period
     return in_lockout_period
+
+async def check_news_blockade():
+    """
+    Checks if the current UTC time falls within the configured blackout window
+    for upcoming or recent USD economic events.
+    Returns: (is_blocked: bool, reason_string: str)
+    """
+    if not ALERT_STATE.get("news_blockade_enabled", True):
+        return False, ""
+
+    target_impacts = [imp.lower() for imp in ALERT_STATE.get("news_blockade_impacts", ["high"])]
+    mins_before = ALERT_STATE.get("news_blockade_mins_before", 30)
+    mins_after = ALERT_STATE.get("news_blockade_mins_after", 15)
+
+    # Query weekly USD events
+    events = await fetch_economic_events(impact_level="all", currency="USD")
+    if not events:
+        return False, ""
+
+    now_utc = datetime.now(timezone.utc)
+
+    for ev in events:
+        ev_impact = str(ev.get("impact", "")).strip().lower()
+        if ev_impact not in target_impacts:
+            continue
+
+        raw_date = ev.get("date", "")
+        try:
+            event_dt = datetime.fromisoformat(raw_date).astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            continue
+
+        block_start = event_dt - timedelta(minutes=mins_before)
+        block_end = event_dt + timedelta(minutes=mins_after)
+
+        if block_start <= now_utc <= block_end:
+            title = ev.get("title", "USD News Event")
+            event_time_str = event_dt.strftime("%H:%M UTC")
+            reason = f"{ev_impact.upper()} Impact: {title} @ {event_time_str}"
+            return True, reason
+
+    return False, ""
