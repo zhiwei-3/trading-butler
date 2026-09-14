@@ -38,7 +38,7 @@ def admin_only(func):
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ensure_watchdog_running(context.job_queue, chat_id)
-    if not ALERT_STATE["heartbeat_chat_id"]:
+    if not USER_ID:
         restart_heartbeat_job(context.job_queue, chat_id)
         save_settings()
     await update.message.reply_text(
@@ -112,7 +112,7 @@ async def enable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.job_queue.run_repeating(market_scanner_job, interval=60, first=5, chat_id=chat_id, name="xauusd_scanner")
     ensure_watchdog_running(context.job_queue, chat_id)
-    if not ALERT_STATE["heartbeat_chat_id"]:
+    if not USER_ID:
         restart_heartbeat_job(context.job_queue, chat_id)
     await update.effective_message.reply_text("🟢 **Market Scanner Activated!** Checking XAUUSD every 60 seconds.", parse_mode="Markdown")
 
@@ -395,7 +395,7 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif key in ("cb_drawdown", "max_drawdown", "cb_max_drawdown"):
             setting_name = "max_daily_drawdown_r"
             val = float(val_str)
-            
+
         elif key in ("news_blockade", "news_toggle"):
             setting_name = "news_blockade_enabled"
             val = bool(int(val))  # Use /set news_blockade 1 (ON) or 0 (OFF)

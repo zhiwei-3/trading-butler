@@ -83,7 +83,7 @@ async def evaluate_circuit_breaker(context: ContextTypes.DEFAULT_TYPE) -> bool:
             f"• **Today's Record:** `{stats['today_wins']}W - {stats['today_losses']}L`\n\n"
             "🛡️ *Scanner has been paused to protect capital. Review market conditions before re-enabling.*"
         )
-        chat_id = context.job.chat_id if (context.job and context.job.chat_id) else ALERT_STATE.get("heartbeat_chat_id")
+        chat_id = context.job.chat_id if (context.job and context.job.chat_id) else int(USER_ID)
         if chat_id:
             await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
         return True
@@ -162,7 +162,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
         return
 
     current_price = round(df['close'].iloc[-1], 2)
-    chat_id = context.job.chat_id if (context.job and context.job.chat_id) else ALERT_STATE.get("heartbeat_chat_id")
+    chat_id = context.job.chat_id if (context.job and context.job.chat_id) else int(USER_ID)
 
     updates_to_send = []
 
@@ -287,7 +287,6 @@ def ensure_watchdog_running(job_queue, chat_id):
 def restart_heartbeat_job(job_queue, chat_id):
     for job in job_queue.get_jobs_by_name("heartbeat_ping"):
         job.schedule_removal()
-    ALERT_STATE["heartbeat_chat_id"] = chat_id
     if ALERT_STATE["heartbeat_enabled"]:
         interval_seconds = ALERT_STATE["heartbeat_interval_hours"] * 3600
         job_queue.run_repeating(heartbeat_job, interval=interval_seconds, first=10, chat_id=chat_id, name="heartbeat_ping")

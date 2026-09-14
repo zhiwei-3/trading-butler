@@ -22,37 +22,35 @@ def init_db():
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT,
+                symbol TEXT,
                 direction TEXT,
                 entry_price REAL,
                 sl_price REAL,
                 tp1_price REAL,
                 tp2_price REAL,
+                score INTEGER,
                 status TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Safe migration check for existing databases missing updated_at
         cursor.execute("PRAGMA table_info(signals)")
         columns = [column[1] for column in cursor.fetchall()]
-        if "updated_at" not in columns:
-            cursor.execute("ALTER TABLE signals ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP")
+        for col, coltype in [("symbol", "TEXT"), ("score", "INTEGER"), ("updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")]:
+            if col not in columns:
+                cursor.execute(f"ALTER TABLE signals ADD COLUMN {col} {coltype}")
         conn.commit()
 
 def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score):
     """Logs generated signal details to SQLite."""
     timestamp = datetime.now(timezone.utc).isoformat()
-    conn = get_db_connection()
-    try:
-        with conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO signals (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
-            ''', (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score))
-            conn.commit()
-    finally:
-        conn.close()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO signals (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
+        ''', (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score))
+        conn.commit()
 
 def get_signal_stats():
     """Retrieves current signal outcome statistics."""

@@ -33,7 +33,7 @@ ALERT_STATE = {
     "scanner_enabled": True,
     "news_lockout": False,
     "news_warned_events": set(),
-    "max_allowed_spread_pips": 30.0,
+    "max_allowed_spread_pips": 10.0,
 
     "timeframe_mode": "scalp",
     "entry_tf": TIMEFRAME_PRESETS["scalp"]["entry"],
@@ -50,13 +50,13 @@ ALERT_STATE = {
     "volume_multiplier": 1.2,
     "vol_atr_avg_period": 20,
 
-    "rsi_buy_threshold": 40.0,
-    "rsi_sell_threshold": 60.0,
+    "rsi_buy_threshold": 30.0,
+    "rsi_sell_threshold": 70.0,
 
-    "sl_atr_mult": 1.7,
+    "sl_atr_mult": 1.2,
     "tp1_atr_mult": 2.0,
     "tp2_atr_mult": 3.5,
-    "min_rrr": 2,  # minimum TP1:SL reward-to-risk ratio required to fire a signal
+    "min_rrr": 1.5,  # minimum TP1:SL reward-to-risk ratio required to fire a signal
     "risk_percent": 1.0,  # Default 1% risk per trade
 
     "min_confluence_score": 35,
@@ -81,7 +81,6 @@ ALERT_STATE = {
 
     "heartbeat_enabled": True,
     "heartbeat_interval_hours": 1,
-    "heartbeat_chat_id": None,
     "last_heartbeat_at": None,
     "mt5_connected": True,
     "consecutive_mt5_failures": 0,
@@ -123,7 +122,6 @@ PERSISTENT_KEYS = [
     "watch_score_margin",
     "heartbeat_enabled",
     "heartbeat_interval_hours",
-    "heartbeat_chat_id",
 ]
 
 def save_settings():

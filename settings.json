@@ -19,6 +19,5 @@
     "watch_rsi_margin": 5.0,
     "watch_score_margin": 10,
     "heartbeat_enabled": true,
-    "heartbeat_interval_hours": 1,
-    "heartbeat_chat_id": 6994380411
+    "heartbeat_interval_hours": 1
 }

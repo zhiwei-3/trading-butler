@@ -54,8 +54,8 @@ def main():
 
     if init_mt5():
         print("✅ MT5 Engine Online!")
-        if ALERT_STATE.get("heartbeat_enabled") and ALERT_STATE.get("heartbeat_chat_id"):
-            restart_heartbeat_job(app.job_queue, int(ALERT_STATE["heartbeat_chat_id"]))
+        if ALERT_STATE.get("heartbeat_enabled") and USER_ID:
+            restart_heartbeat_job(app.job_queue, int(USER_ID))
         if USER_ID:
             ensure_watchdog_running(app.job_queue, int(USER_ID))
     else:
