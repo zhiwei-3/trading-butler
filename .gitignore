@@ -1,3 +1,32 @@
-/.env
-/.venv
-/__pycache__
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv
+venv/
+env/
+
+# Python bytecode / cache (the old "/__pycache__" only matched the repo root —
+# this pattern matches it at every depth: bot/__pycache__, strategy/__pycache__, etc.)
+__pycache__/
+*.py[cod]
+*.pyo
+
+# SQLite database — this is runtime state, not source. Committing it is what let
+# the signals-table schema drift silently (CREATE TABLE IF NOT EXISTS never
+# re-applied the real schema because a stale .db file was already tracked).
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Settings with live operator data (chat IDs, thresholds tuned to a real account).
+# Commit settings.example.json instead and let each deployment generate its own.
+settings.json
+
+# Editor / OS cruft
+.vscode/
+.idea/
+.DS_Store

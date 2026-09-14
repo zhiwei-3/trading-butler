@@ -410,15 +410,14 @@ def evaluate_smc_confluence(a):
 
     signals_found, watch_found = [], []
 
+    is_oversold = rsi_val <= buy_th
+    is_overbought = rsi_val >= sell_th
     buy_structure_ok = (not ALERT_STATE["require_structure_break"]) or (a["structure"] == "BULLISH_BOS")
     sell_structure_ok = (not ALERT_STATE["require_structure_break"]) or (a["structure"] == "BEARISH_BOS")
     vol_filter_hard_ok = a["vol_filter_ok"] if ALERT_STATE["require_volume_atr_filter"] else True
-    in_approach_zone = (
-        (buy_th < rsi_val <= buy_th + ALERT_STATE["watch_rsi_margin"]) or
-        (sell_th - ALERT_STATE["watch_rsi_margin"] <= rsi_val < sell_th)
-    )
 
-    if rsi_val <= buy_th and (trend_bullish or macro_bullish) and buy_structure_ok and vol_filter_hard_ok:
+    # 1. Evaluate BUY Signal
+    if is_oversold and (trend_bullish or macro_bullish) and buy_structure_ok and vol_filter_hard_ok:
         sr_confluence = bool(a["near_zone"] and a["near_zone"]["type"] in ("support", "mixed") and close_price >= a["near_zone"]["price"])
         score, breakdown = compute_confluence_score(
             "BUY", rsi_val, a["structure"], a["sweeps"], a["fvg"], 
@@ -426,11 +425,9 @@ def evaluate_smc_confluence(a):
             a["divergence"], sr_confluence, entry_bullish, macro_bullish
         )
 
-        if score >= min_score and ALERT_STATE["last_rsi_signal"] != "BUY":
+        if score >= min_score and ALERT_STATE.get("last_rsi_signal") != "BUY":
             targets = calculate_targets("BUY", close_price, atr_val, a["order_block"], a["near_zone"])
-            min_rrr_target = ALERT_STATE.get("min_rrr", 1.3)
-
-            if targets["rrr"] >= min_rrr_target:
+            if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.3):
                 ALERT_STATE["last_rsi_signal"] = "BUY"
                 sl_price, tp1_price, tp2_price, rrr = targets["sl_price"], targets["tp1_price"], targets["tp2_price"], targets["rrr"]
                 log_signal_to_db("XAUUSD", "BUY", close_price, sl_price, tp1_price, tp2_price, score)
@@ -448,7 +445,8 @@ def evaluate_smc_confluence(a):
                 )
                 signals_found.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, msg))
 
-    elif rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok and vol_filter_hard_ok:
+    # 2. Evaluate SELL Signal
+    elif is_overbought and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok and vol_filter_hard_ok:
         sr_confluence = bool(a["near_zone"] and a["near_zone"]["type"] in ("resistance", "mixed") and close_price <= a["near_zone"]["price"])
         score, breakdown = compute_confluence_score(
             "SELL", rsi_val, a["structure"], a["sweeps"], a["fvg"], 
@@ -456,11 +454,9 @@ def evaluate_smc_confluence(a):
             a["divergence"], sr_confluence, entry_bullish, not macro_bullish
         )
 
-        if score >= min_score and ALERT_STATE["last_rsi_signal"] != "SELL":
+        if score >= min_score and ALERT_STATE.get("last_rsi_signal") != "SELL":
             targets = calculate_targets("SELL", close_price, atr_val, a["order_block"], a["near_zone"])
-            min_rrr_target = ALERT_STATE.get("min_rrr", 1.3)
-
-            if targets["rrr"] >= min_rrr_target:
+            if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.3):
                 ALERT_STATE["last_rsi_signal"] = "SELL"
                 sl_price, tp1_price, tp2_price, rrr = targets["sl_price"], targets["tp1_price"], targets["tp2_price"], targets["rrr"]
                 log_signal_to_db("XAUUSD", "SELL", close_price, sl_price, tp1_price, tp2_price, score)
@@ -478,33 +474,34 @@ def evaluate_smc_confluence(a):
                 )
                 signals_found.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, msg))
 
-    elif ALERT_STATE["setup_forming_enabled"] and in_approach_zone:
-        # Split the approach zone to identify the intended direction
-        is_bullish_approach = (buy_th < rsi_val <= buy_th + ALERT_STATE["watch_rsi_margin"])
-        is_bearish_approach = (sell_th - ALERT_STATE["watch_rsi_margin"] <= rsi_val < sell_th)
-
-        # GATE: Only allow watchlist pings if the HTF trend aligns with the impending setup
-        valid_bullish_watch = is_bullish_approach and (trend_bullish or macro_bullish)
-        valid_bearish_watch = is_bearish_approach and (not trend_bullish or not macro_bullish)
-
-        if (valid_bullish_watch or valid_bearish_watch):
-            if ALERT_STATE["last_watch_signal"] is None:
-                ALERT_STATE["last_watch_signal"] = "FORMING"
-                direction_icon = "🟢 BULLISH" if valid_bullish_watch else "🔴 BEARISH"
-                
-                watch_msg = (
-                    f"👀 **{direction_icon} SETUP FORMING (EARLY HEADS-UP)** 👀\n\n"
-                    f"• **Symbol:** `XAUUSD` | **Price:** `${close_price}`\n"
-                    f"• **Current RSI:** `{rsi_val}` (Approaching Zone: `{buy_th}` / `{sell_th}`)\n"
-                    f"• **HTF Alignment:** Verified ✅\n"
-                    f"💡 *Monitor charts for imminent breakout or rejection.*"
-                )
-                watch_found.append(watch_msg)
-
-    else:
+    # Reset signal deduplication state once price exits extreme zones
+    if not (is_oversold or is_overbought):
         ALERT_STATE["last_rsi_signal"] = None
 
-    if not in_approach_zone:
+    # 3. Evaluate Setup Forming (Watchlist) Pings
+    in_approach_zone = (
+        (buy_th < rsi_val <= buy_th + ALERT_STATE["watch_rsi_margin"]) or
+        (sell_th - ALERT_STATE["watch_rsi_margin"] <= rsi_val < sell_th)
+    )
+
+    if ALERT_STATE["setup_forming_enabled"] and in_approach_zone:
+        is_bullish_approach = (buy_th < rsi_val <= buy_th + ALERT_STATE["watch_rsi_margin"])
+        valid_bullish_watch = is_bullish_approach and (trend_bullish or macro_bullish)
+        valid_bearish_watch = (not is_bullish_approach) and (not trend_bullish or not macro_bullish)
+
+        if (valid_bullish_watch or valid_bearish_watch) and ALERT_STATE.get("last_watch_signal") is None:
+            ALERT_STATE["last_watch_signal"] = "FORMING"
+            direction_icon = "🟢 BULLISH" if valid_bullish_watch else "🔴 BEARISH"
+            
+            watch_msg = (
+                f"👀 **{direction_icon} SETUP FORMING (EARLY HEADS-UP)** 👀\n\n"
+                f"• **Symbol:** `XAUUSD` | **Price:** `${close_price}`\n"
+                f"• **Current RSI:** `{rsi_val}` (Approaching Zone: `{buy_th}` / `{sell_th}`)\n"
+                f"• **HTF Alignment:** Verified ✅\n"
+                f"💡 *Monitor charts for imminent breakout or rejection.*"
+            )
+            watch_found.append(watch_msg)
+    elif not in_approach_zone:
         ALERT_STATE["last_watch_signal"] = None
 
     return signals_found, watch_found

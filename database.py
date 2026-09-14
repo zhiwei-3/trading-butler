@@ -36,35 +36,40 @@ def init_db():
         """)
         cursor.execute("PRAGMA table_info(signals)")
         columns = [column[1] for column in cursor.fetchall()]
-        for col, coltype in [("symbol", "TEXT"), ("score", "INTEGER"), ("updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")]:
-            if col not in columns:
-                cursor.execute(f"ALTER TABLE signals ADD COLUMN {col} {coltype}")
+        migrations = [
+            ("symbol", "TEXT"),
+            ("score", "INTEGER"),
+            ("updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"),
+        ]
+        for col_name, col_type in migrations:
+            if col_name not in columns:
+                cursor.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}")
         conn.commit()
 
 def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score):
     """Logs generated signal details to SQLite."""
     timestamp = datetime.now(timezone.utc).isoformat()
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO signals (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
-        ''', (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score))
-        conn.commit()
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO signals (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
+            ''', (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score))
+            conn.commit()
+    except Exception as e:
+        logging.error(f"⚠️ Failed to log signal to DB: {e}")
 
 def get_signal_stats():
     """Retrieves current signal outcome statistics."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT status, COUNT(*) FROM signals GROUP BY status")
-        counts = dict(cursor.fetchall())
+        cursor.execute("SELECT status, COUNT(*) AS count FROM signals GROUP BY status")
+        counts = {row["status"]: row["count"] for row in cursor.fetchall()}
     return counts
 
 def get_daily_performance_stats():
-    """
-    Calculates today's closed trade performance (UTC day) from the database.
-    Returns dict: {'consecutive_losses': int, 'net_r': float, 'today_wins': int, 'today_losses': int}
-    """
+    """Calculates today's closed trade performance (UTC day) from the database."""
     today_start = datetime.now(timezone.utc).strftime('%Y-%m-%d 00:00:00')
 
     with get_db_connection() as conn:
@@ -82,22 +87,23 @@ def get_daily_performance_stats():
         today_wins = 0
         today_losses = 0
 
-        for (status,) in rows:
+        for row in rows:
+            status = row["status"]
             if status == 'HIT_SL':
                 today_losses += 1
                 consecutive_losses += 1
-                net_r -= 1.0  # -1R per Stop Loss
+                net_r -= 1.0
             elif status == 'HIT_TP1':
                 today_wins += 1
                 consecutive_losses = 0
-                net_r += 1.0  # +1R for TP1
+                net_r += 1.0
             elif status == 'HIT_TP2':
                 today_wins += 1
                 consecutive_losses = 0
-                net_r += 2.0  # +2R for TP2
+                net_r += 2.0
             elif status == 'CLOSED_BE':
                 today_wins += 1
-                consecutive_losses = 0  # 0R for Break-Even
+                consecutive_losses = 0
 
         return {
             "consecutive_losses": consecutive_losses,
