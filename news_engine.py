@@ -89,24 +89,27 @@ async def fetch_economic_events(impact_level="high", currency="USD"):
     return filtered_events
 
 async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
+    """Sends a Telegram warning ping ~30 minutes before high-impact news releases."""
     events = await fetch_economic_events(impact_level="high", currency="USD")
     if not events:
-        return False
+        return
 
     now_utc = datetime.now(timezone.utc)
-    in_lockout_period = False
 
     for ev in events:
         event_title = ev.get("title", "USD High Impact Event")
         raw_date = ev.get("date", "")
         try:
-            event_dt = datetime.fromisoformat(raw_date).astimezone(timezone.utc)
+            # Robust ISO parsing supporting 'Z' suffix
+            clean_date = raw_date.replace("Z", "+00:00")
+            event_dt = datetime.fromisoformat(clean_date).astimezone(timezone.utc)
         except (ValueError, TypeError):
             continue
 
         time_diff = (event_dt - now_utc).total_seconds() / 60.0
-
         warn_key = f"{event_title}|{raw_date}"
+
+        # Dispatch warning message 25-35 minutes prior to release
         if 25 <= time_diff <= 35 and warn_key not in ALERT_STATE["news_warned_events"]:
             ALERT_STATE["news_warned_events"].add(warn_key)
             time_str = event_dt.strftime("%Y-%m-%d %H:%M UTC")
@@ -116,17 +119,14 @@ async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
                 f"• **Scheduled Time:** `{time_str}` (~30 mins away)\n\n"
                 f"💡 *Consider tightening Stop Losses or securing open profits.*"
             )
-            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-
-        if -15 <= time_diff <= 5:
-            in_lockout_period = True
-
-    ALERT_STATE["news_lockout"] = in_lockout_period
-    return in_lockout_period
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+            except Exception as e:
+                logging.warning(f"Failed to send news warning: {e}")
 
 async def check_news_blockade():
     """
-    Checks if the current UTC time falls within the configured blackout window
+    Checks if current UTC time falls within the configured blackout window
     for upcoming or recent USD economic events.
     Returns: (is_blocked: bool, reason_string: str)
     """
@@ -137,7 +137,6 @@ async def check_news_blockade():
     mins_before = ALERT_STATE.get("news_blockade_mins_before", 30)
     mins_after = ALERT_STATE.get("news_blockade_mins_after", 15)
 
-    # Query weekly USD events
     events = await fetch_economic_events(impact_level="all", currency="USD")
     if not events:
         return False, ""
@@ -151,7 +150,8 @@ async def check_news_blockade():
 
         raw_date = ev.get("date", "")
         try:
-            event_dt = datetime.fromisoformat(raw_date).astimezone(timezone.utc)
+            clean_date = raw_date.replace("Z", "+00:00")
+            event_dt = datetime.fromisoformat(clean_date).astimezone(timezone.utc)
         except (ValueError, TypeError):
             continue
 
