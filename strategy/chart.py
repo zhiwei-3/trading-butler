@@ -122,9 +122,19 @@ def generate_outcome_chart(df: pd.DataFrame, entry_p: float, sl_p: float, tp1_p:
     else:
         ax.plot(df['close'], label="Price", color="#1f77b4", linewidth=1.5)
 
+    # Automatically trail Stop Loss to Break-Even for TP1/TP2/BE states
+    if outcome_status in ("HIT_TP1", "HIT_TP2", "CLOSED_BE"):
+        effective_sl = entry_p
+        sl_label = f"SL (Break-Even): ${entry_p:.2f}"
+        sl_color = "#17A2B8"  # Cyan badge color for Break-Even
+    else:
+        effective_sl = sl_p
+        sl_label = f"SL: ${sl_p:.2f}"
+        sl_color = "#FF3333"
+
     # Horizontal Price Lines
     ax.axhline(entry_p, color="#3357FF", linestyle="--", linewidth=1.2, label=f"Entry: ${entry_p:.2f}")
-    ax.axhline(sl_p, color="#FF3333", linestyle="--", linewidth=1.2, label=f"SL: ${sl_p:.2f}")
+    ax.axhline(effective_sl, color=sl_color, linestyle="--", linewidth=1.2, label=sl_label)
     ax.axhline(tp1_p, color="#28A745", linestyle=":", linewidth=1.2, label=f"TP1: ${tp1_p:.2f}")
     if tp2_p:
         ax.axhline(tp2_p, color="#1E7E34", linestyle="--", linewidth=1.2, label=f"TP2: ${tp2_p:.2f}")
