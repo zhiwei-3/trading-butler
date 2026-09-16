@@ -1,3 +1,4 @@
+# news_engine.py
 import logging
 import asyncio
 import json
@@ -7,10 +8,12 @@ from datetime import datetime, timezone, timedelta
 from telegram.ext import ContextTypes
 from config import ALERT_STATE
 
-# In-Memory Cache Variables
+# In-Memory Cache & State Variables
 _NEWS_CACHE = None
 _LAST_FETCH_TIME = None
-_CACHE_DURATION = timedelta(minutes=15)
+_CACHE_DURATION = timedelta(minutes=10)
+_ANNOUNCED_RESULTS = set()  # Tracks already broadcasted post-release events
+
 
 def _fetch_via_curl(url):
     """Fallback fetcher using native system curl to bypass Python OpenSSL TLS blocks."""
@@ -29,12 +32,12 @@ def _fetch_via_curl(url):
         logging.error(f"curl Fallback Error: {e}")
     return None
 
+
 def _fetch_calendar_sync():
-    """Synchronous HTTP fetcher with curl fallback and 15-minute caching."""
+    """Synchronous HTTP fetcher with curl fallback and 10-minute caching."""
     global _NEWS_CACHE, _LAST_FETCH_TIME
     now = datetime.now(timezone.utc)
 
-    # Return cached data if still valid
     if _NEWS_CACHE is not None and _LAST_FETCH_TIME and (now - _LAST_FETCH_TIME) < _CACHE_DURATION:
         return _NEWS_CACHE
 
@@ -45,7 +48,6 @@ def _fetch_calendar_sync():
     }
 
     data = None
-    # Primary Attempt: Python requests
     try:
         resp = requests.get(url, headers=headers, timeout=5)
         if resp.status_code == 200:
@@ -53,18 +55,16 @@ def _fetch_calendar_sync():
     except Exception as e:
         logging.warning(f"Primary requests fetch failed ({e}). Attempting curl fallback...")
 
-    # Secondary Attempt: System curl fallback (bypasses SSL EOF issues)
     if not data:
         data = _fetch_via_curl(url)
 
-    # Update cache if successful
     if data:
         _NEWS_CACHE = data
         _LAST_FETCH_TIME = now
         return _NEWS_CACHE
 
-    # Return stale cache during total outages if available
     return _NEWS_CACHE if _NEWS_CACHE is not None else None
+
 
 async def fetch_economic_events(impact_level="high", currency="USD"):
     """Asynchronous fetcher returning filtered economic events or None on failure."""
@@ -88,8 +88,50 @@ async def fetch_economic_events(impact_level="high", currency="USD"):
 
     return filtered_events
 
+
+def generate_xauusd_news_insight(event_title: str, forecast: str, previous: str, actual: str = None) -> str:
+    """
+    Generates directional and volatility insights for XAUUSD based on economic metrics.
+    """
+    title_upper = event_title.upper()
+    
+    # 1. Inflation & Growth (CPI, PPI, PCE, GDP, Retail Sales)
+    if any(k in title_upper for k in ["CPI", "PPI", "PCE", "GDP", "RETAIL SALES"]):
+        if actual:
+            return "📈 **Bullish XAUUSD** (Lower inflation/growth weakens USD)" if actual < forecast else "📉 **Bearish XAUUSD** (Higher inflation/growth strengthens USD)"
+        return "💡 *Higher actual figures strengthen USD (Bearish Gold); lower figures weaken USD (Bullish Gold).*"
+
+    # 2. Employment Data (NFP, Non-Farm, ADP, Employment Change)
+    elif any(k in title_upper for k in ["NFP", "NON-FARM", "EMPLOYMENT", "ADP"]):
+        if actual:
+            return "📈 **Bullish XAUUSD** (Weaker labor market weakens USD)" if actual < forecast else "📉 **Bearish XAUUSD** (Strong labor market boosts USD)"
+        return "💡 *Strong job growth boosts Fed rate hike expectations (Bearish Gold).* "
+
+    # 3. Unemployment Claims & Unemployment Rate
+    elif "UNEMPLOYMENT" in title_upper:
+        if actual:
+            return "📈 **Bullish XAUUSD** (Higher unemployment hurts USD)" if actual > forecast else "📉 **Bearish XAUUSD** (Lower unemployment supports USD)"
+        return "💡 *Higher unemployment weakens USD (Bullish Gold).* "
+
+    # 4. Central Bank Rates (FOMC, Federal Funds Rate)
+    elif any(k in title_upper for k in ["FOMC", "FED", "RATE"]):
+        return "⚡ **High Volatility Risk!** Rate hikes/hawkish stance = Bearish Gold 📉; Rate cuts/dovish stance = Bullish Gold 📈."
+
+    return "💡 *High market volatility expected upon release.*"
+
+
+def _clean_val(val):
+    """Formats missing or blank JSON values cleanly."""
+    if not val or str(val).strip() == "":
+        return "N/A"
+    return str(val).strip()
+
+
 async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
-    """Sends a Telegram warning ping ~30 minutes before high-impact news releases."""
+    """
+    Sends an enriched pre-event warning ping ~30 minutes before high-impact news releases,
+    including forecast, previous metrics, and XAUUSD strategic insights.
+    """
     events = await fetch_economic_events(impact_level="high", currency="USD")
     if not events:
         return
@@ -100,7 +142,6 @@ async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
         event_title = ev.get("title", "USD High Impact Event")
         raw_date = ev.get("date", "")
         try:
-            # Robust ISO parsing supporting 'Z' suffix
             clean_date = raw_date.replace("Z", "+00:00")
             event_dt = datetime.fromisoformat(clean_date).astimezone(timezone.utc)
         except (ValueError, TypeError):
@@ -109,25 +150,84 @@ async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
         time_diff = (event_dt - now_utc).total_seconds() / 60.0
         warn_key = f"{event_title}|{raw_date}"
 
-        # Dispatch warning message 25-35 minutes prior to release
+        # Dispatch enriched warning message 25-35 minutes prior to release
         if 25 <= time_diff <= 35 and warn_key not in ALERT_STATE["news_warned_events"]:
             ALERT_STATE["news_warned_events"].add(warn_key)
-            time_str = event_dt.strftime("%Y-%m-%d %H:%M UTC")
+            time_str = event_dt.strftime("%H:%M UTC")
+            
+            forecast = _clean_val(ev.get("forecast"))
+            previous = _clean_val(ev.get("previous"))
+            insight = generate_xauusd_news_insight(event_title, forecast, previous)
+
             msg = (
-                f"⚠️ **HIGH IMPACT NEWS WARNING** ⚠️\n\n"
-                f"• **Event:** {event_title}\n"
-                f"• **Scheduled Time:** `{time_str}` (~30 mins away)\n\n"
-                f"💡 *Consider tightening Stop Losses or securing open profits.*"
+                f"🚨 **HIGH IMPACT NEWS HEADS-UP** 🚨\n\n"
+                f"• **Event:** `{event_title}`\n"
+                f"• **Time:** `{time_str}` (~30 mins away)\n"
+                f"• **Forecast:** `{forecast}` | **Previous:** `{previous}`\n\n"
+                f"📊 **XAUUSD Macro Insight:**\n{insight}\n\n"
+                f"🛡️ *Scanner will auto-pause during release. Tighten SL or lock profits.*"
             )
             try:
                 await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
             except Exception as e:
                 logging.warning(f"Failed to send news warning: {e}")
 
+
+async def check_news_post_release(context: ContextTypes.DEFAULT_TYPE, chat_id):
+    """
+    Monitors calendar feed for newly published actual results and broadcasts live outcome analysis.
+    """
+    events = await fetch_economic_events(impact_level="high", currency="USD")
+    if not events:
+        return
+
+    now_utc = datetime.now(timezone.utc)
+
+    for ev in events:
+        actual = ev.get("actual")
+        if not actual or str(actual).strip() == "":
+            continue
+
+        event_title = ev.get("title", "USD News Event")
+        raw_date = ev.get("date", "")
+        event_key = f"RESULT|{event_title}|{raw_date}"
+
+        if event_key in _ANNOUNCED_RESULTS:
+            continue
+
+        try:
+            clean_date = raw_date.replace("Z", "+00:00")
+            event_dt = datetime.fromisoformat(clean_date).astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            continue
+
+        # Only broadcast outcomes for events released within the past 60 minutes
+        minutes_since_release = (now_utc - event_dt).total_seconds() / 60.0
+        if 0 <= minutes_since_release <= 60:
+            _ANNOUNCED_RESULTS.add(event_key)
+            forecast = _clean_val(ev.get("forecast"))
+            previous = _clean_val(ev.get("previous"))
+            actual_str = _clean_val(actual)
+            
+            outcome_insight = generate_xauusd_news_insight(event_title, forecast, previous, actual=actual_str)
+
+            msg = (
+                f"📊 **ECONOMIC NEWS RESULT DISPATCH** 📊\n\n"
+                f"• **Event:** `{event_title}`\n"
+                f"• **Actual:** `{actual_str}`\n"
+                f"• **Forecast:** `{forecast}` | **Previous:** `{previous}`\n\n"
+                f"⚡ **XAUUSD Market Impact:**\n{outcome_insight}\n\n"
+                f"🔎 *Monitor MT5 price structure for post-news momentum or mean-reversion signals.*"
+            )
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+            except Exception as e:
+                logging.warning(f"Failed to send news result dispatch: {e}")
+
+
 async def check_news_blockade():
     """
-    Checks if current UTC time falls within the configured blackout window
-    for upcoming or recent USD economic events.
+    Checks if current UTC time falls within the configured blackout window.
     Returns: (is_blocked: bool, reason_string: str)
     """
     if not ALERT_STATE.get("news_blockade_enabled", True):

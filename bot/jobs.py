@@ -4,12 +4,12 @@ import sqlite3
 import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
 from telegram.ext import ContextTypes
-from telegram.error import NetworkError, TelegramError
+from telegram.error import NetworkError, TelegramError, TimedOut
 
 from config import ALERT_STATE, USER_ID, BOT_START_TIME, DB_FILE, save_settings
 from database import get_db_connection, get_daily_performance_stats
 from mt5_engine import MT5_LOCK, get_gold_symbol, check_mt5_alive, fetch_candles
-from news_engine import news_guard_check, check_news_blockade
+from news_engine import news_guard_check, check_news_blockade, check_news_post_release
 from strategy.evaluator import analyze_market, evaluate_signals
 from strategy.chart import generate_chart_snapshot, generate_outcome_chart
 
@@ -102,17 +102,19 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
     if await evaluate_circuit_breaker(context):
         return
 
-    # 2. News Guard Gate (External API / Event check)
-    if await news_guard_check(context, chat_id):
-        return
+    # 2. Pre-Event Warning Check
+    await news_guard_check(context, chat_id)
 
-    # 3. News Blockade Gate (Local blackout window check)
+    # 3. Live Outcome Result Broadcast Check
+    await check_news_post_release(context, chat_id)
+
+    # 4. News Blackout Guard Gate
     is_blocked, reason = await check_news_blockade()
     if is_blocked:
         logging.info(f"📰 Market scanner paused due to news blockade: {reason}")
         return
 
-    # 4. Spread Guard Gate
+    # 5. Spread Guard Gate
     tick = mt5.symbol_info_tick(symbol)
     if tick:
         spread_pips = round((tick.ask - tick.bid) * 10, 1)
@@ -120,7 +122,7 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
             logging.info(f"⚠️ Scanner skipped: Spread too high ({spread_pips} pips)")
             return
 
-    # 5. Market Technical Evaluation
+    # 6. Market Technical Evaluation
     analysis = analyze_market(symbol)
     if analysis:
         signals_found, watch_found = evaluate_signals(analysis)
@@ -149,11 +151,14 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
                 )
 
         for watch_msg in watch_found:
-            await context.bot.send_message(
-                chat_id=chat_id, 
-                text=watch_msg, 
-                parse_mode="Markdown"
-            )
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id, 
+                    text=watch_msg, 
+                    parse_mode="Markdown"
+                )
+            except (TimedOut, NetworkError, TelegramError) as e:
+                    logging.warning(f"⚠️ Telegram dispatch timed out: {e}")
 
 async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     symbol = get_gold_symbol() or "XAUUSD"
