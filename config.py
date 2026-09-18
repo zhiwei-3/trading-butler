@@ -59,6 +59,19 @@ ALERT_STATE = {
     "min_rrr": 1.5,  # minimum TP1:SL reward-to-risk ratio required to fire a signal
     "risk_percent": 1.0,  # Default 1% risk per trade
 
+    # === LIVE TRADE EXECUTION ===
+    "auto_trade_enabled": False,        # master switch — bot places orders
+    "trade_dry_run": True,              # build+log the request, never send it
+    "magic_number": 770077,             # bot only ever touches its own positions
+    "max_slippage_points": 30,          # 'deviation' passed to order_send
+    "max_open_positions": 1,            # managed positions held at once
+    "max_daily_trades": 5,              # hard cap on live fills per UTC day
+    "max_entry_drift_pct": 25.0,        # abort if price drifted >25% of SL dist since signal
+    "tp1_close_pct": 50.0,              # % of volume banked at TP1 (0 = disable partial)
+    "move_sl_to_be_on_tp1": True,
+    "flatten_on_circuit_breaker": True,
+    "trade_comment": "TradingButler",
+
     "min_confluence_score": 35,
     "sr_lookback": 180,
     "sr_cluster_pct": 0.0015,
@@ -116,6 +129,19 @@ PERSISTENT_KEYS = [
     "tp2_atr_mult",
     "min_rrr",
     "risk_percent",
+
+    "auto_trade_enabled",
+    "trade_dry_run",
+    "magic_number",
+    "max_slippage_points",
+    "max_open_positions",
+    "max_daily_trades",
+    "max_entry_drift_pct",
+    "tp1_close_pct",
+    "move_sl_to_be_on_tp1",
+    "flatten_on_circuit_breaker",
+    "trade_comment",
+
     "min_confluence_score",
     "setup_forming_enabled",
     "watch_rsi_margin",

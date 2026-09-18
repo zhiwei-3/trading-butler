@@ -1,3 +1,4 @@
+import math
 import logging
 import threading
 import pandas as pd
@@ -80,8 +81,8 @@ def calculate_position_size(symbol: str, sl_dist_pts: float, risk_pct: float = 1
 
     lots = (risk_usd / cost_per_lot_sl) if cost_per_lot_sl > 0 else symbol_info.volume_min
 
-    step = symbol_info.volume_step
-    lots = round(lots / step) * step
+    step = symbol_info.volume_step or 0.01
+    lots = math.floor((lots / step) + 1e-9) * step          # never round risk UP
     lots = max(symbol_info.volume_min, min(symbol_info.volume_max, lots))
 
     return {

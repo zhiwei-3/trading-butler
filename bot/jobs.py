@@ -7,7 +7,11 @@ from telegram.ext import ContextTypes
 from telegram.error import NetworkError, TelegramError, TimedOut
 
 from config import ALERT_STATE, USER_ID, BOT_START_TIME, DB_FILE, save_settings
-from database import get_db_connection, get_daily_performance_stats
+from database import get_db_connection, get_daily_performance_stats, mark_trade_flags
+from trade_engine import (
+    execute_pending_intents, handle_tp1, reconcile_ticket,
+    close_all_managed, list_managed_positions,
+)
 from mt5_engine import MT5_LOCK, get_gold_symbol, check_mt5_alive, fetch_candles
 from news_engine import news_guard_check, check_news_blockade, check_news_post_release
 from strategy.evaluator import analyze_market, evaluate_signals
@@ -31,10 +35,19 @@ def build_status_snapshot() -> str:
     last_hb = ALERT_STATE["last_heartbeat_at"]
     last_hb_str = last_hb.strftime("%Y-%m-%d %H:%M UTC") if last_hb else "Not sent yet"
 
+    trade_mode = "🔴 OFF"
+    if ALERT_STATE.get("auto_trade_enabled"):
+        trade_mode = "🧪 DRY-RUN" if ALERT_STATE.get("trade_dry_run", True) else "🟢 LIVE"
+    try:
+        open_managed = len(list_managed_positions())
+    except Exception:
+        open_managed = 0
+
     return (
         f"• **Uptime:** `{uptime}`\n"
         f"• **MT5 Connection:** {'🟢 Connected' if mt5_ok else '🔴 Disconnected'}\n"
         f"• **Scanner:** {'🟢 Running' if ALERT_STATE['scanner_enabled'] else '🔴 Stopped'}\n"
+        f"• **Auto-Trade:** {trade_mode} | **Open Positions:** `{open_managed}`\n"
         f"• **Active Strategy:** `{ALERT_STATE.get('active_strategy', 'smc_confluence').upper()}`\n"
         f"• **Risk Sizing:** `{ALERT_STATE.get('risk_percent', 1.0)}%` per trade\n"
         f"• **Timeframe Mode:** `{ALERT_STATE['timeframe_mode']}`\n"
@@ -72,6 +85,11 @@ async def evaluate_circuit_breaker(context: ContextTypes.DEFAULT_TYPE) -> bool:
         ALERT_STATE["scanner_enabled"] = False
         save_settings()
 
+        flatten_note = ""
+        if ALERT_STATE.get("flatten_on_circuit_breaker", True) and list_managed_positions():
+            results = await asyncio.to_thread(close_all_managed)
+            flatten_note = "\n\n🧯 **Flattened managed positions:**\n" + "\n".join(f"• {r}" for r in results)
+
         current_jobs = context.job_queue.get_jobs_by_name("xauusd_scanner")
         for job in current_jobs:
             job.schedule_removal()
@@ -82,6 +100,7 @@ async def evaluate_circuit_breaker(context: ContextTypes.DEFAULT_TYPE) -> bool:
             f"• **Today's Net R:** `{stats['net_r']:.1f}R`\n"
             f"• **Today's Record:** `{stats['today_wins']}W - {stats['today_losses']}L`\n\n"
             "🛡️ *Scanner has been paused to protect capital. Review market conditions before re-enabling.*"
+            f"{flatten_note}"
         )
         chat_id = context.job.chat_id if (context.job and context.job.chat_id) else int(USER_ID)
         if chat_id:
@@ -160,6 +179,19 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
             except (TimedOut, NetworkError, TelegramError) as e:
                     logging.warning(f"⚠️ Telegram dispatch timed out: {e}")
 
+    # 7. Live Execution Drain (blocking MT5 order_send, kept off the event loop)
+    try:
+        exec_reports = await asyncio.to_thread(execute_pending_intents)
+    except Exception as e:
+        logging.exception("Trade execution drain crashed")
+        exec_reports = [f"❌ **Execution engine error:** `{e}`"]
+
+    for report in exec_reports:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=report, parse_mode="Markdown")
+        except (TimedOut, NetworkError, TelegramError) as e:
+            logging.warning(f"⚠️ Execution report dispatch failed: {e}")
+
 async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     symbol = get_gold_symbol() or "XAUUSD"
     df = fetch_candles(symbol, mt5.TIMEFRAME_M1, 5)
@@ -171,21 +203,42 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
 
     updates_to_send = []
 
-    # 1. Batch Database Updates in standard connection block
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, status, direction, entry_price, sl_price, tp1_price, tp2_price "
+            "SELECT id, status, direction, entry_price, sl_price, tp1_price, tp2_price, "
+            "ticket, lots, exec_mode, tp1_partial_done, be_moved "
             "FROM signals WHERE status IN ('PENDING', 'HIT_TP1')"
         )
         active_signals = cursor.fetchall()
-
         now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
         for sig in active_signals:
-            sig_id, status, direction, entry, sl, tp1, tp2 = sig
+            sig_id = sig["id"]
+            status = sig["status"]
+            direction = sig["direction"]
+            entry, sl = sig["entry_price"], sig["sl_price"]
+            tp1, tp2 = sig["tp1_price"], sig["tp2_price"]
+            ticket = sig["ticket"]
             new_status = None
             msg = None
+
+            # A live position closed broker-side between polls -> trust deal history
+            if ticket and sig["exec_mode"] == "LIVE":
+                try:
+                    reconciled = await asyncio.to_thread(reconcile_ticket, ticket, status)
+                except Exception as e:
+                    logging.warning(f"Reconcile failed for #{ticket}: {e}")
+                    reconciled = None
+                if reconciled:
+                    cursor.execute(
+                        "UPDATE signals SET status = ?, updated_at = ? WHERE id = ?",
+                        (reconciled, now_str, sig_id)
+                    )
+                    updates_to_send.append((sig, reconciled,
+                        f"📕 **XAUUSD {direction} — POSITION CLOSED BY BROKER** (`#{ticket}`)\n"
+                        f"• Reconciled outcome: `{reconciled}`"))
+                    continue
 
             if direction == "BUY":
                 if status == "PENDING":
@@ -228,13 +281,27 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
 
         conn.commit()
 
-    # 2. Evaluate Circuit Breaker once for all batch updates
+    # Broker-side management: bank part of the trade at TP1 and trail SL to BE
+    for sig, new_status, _ in updates_to_send:
+        if new_status != "HIT_TP1" or not sig["ticket"] or sig["tp1_partial_done"]:
+            continue
+        try:
+            note = await asyncio.to_thread(handle_tp1, sig["ticket"], sig["entry_price"])
+            mark_trade_flags(sig["id"], tp1_partial_done=1, be_moved=1)
+            if chat_id:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🤖 **TP1 MANAGEMENT — `#{sig['ticket']}`**\n{note}",
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            logging.exception(f"TP1 management failed for ticket {sig['ticket']}: {e}")
+
     if updates_to_send:
         await evaluate_circuit_breaker(context)
 
-    # 3. Process visual charts asynchronously off the main thread
     for sig, new_status, msg in updates_to_send:
-        sig_id, status, direction, entry, sl, tp1, tp2 = sig
+        entry, sl, tp1, tp2 = sig["entry_price"], sig["sl_price"], sig["tp1_price"], sig["tp2_price"]
         if chat_id and msg:
             try:
                 df_chart = fetch_candles(symbol, mt5.TIMEFRAME_M5, 60)
@@ -242,15 +309,9 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
                 if df_chart is not None and not df_chart.empty:
                     chart_buf = await asyncio.to_thread(
                         generate_outcome_chart,
-                        df=df_chart,
-                        entry_p=entry,
-                        sl_p=sl,
-                        tp1_p=tp1,
-                        tp2_p=tp2,
-                        outcome_status=new_status,
-                        symbol=symbol
+                        df=df_chart, entry_p=entry, sl_p=sl, tp1_p=tp1, tp2_p=tp2,
+                        outcome_status=new_status, symbol=symbol
                     )
-
                 if chart_buf:
                     await context.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=msg, parse_mode="Markdown")
                 else:
@@ -258,7 +319,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
             except (NetworkError, TelegramError) as e:
                 logging.warning(f"⚠️ Telegram alert skipped due to network issue: {e}")
             except Exception as e:
-                logging.exception(f"Error sending outcome alert for signal {sig_id}: {e}")
+                logging.exception(f"Error sending outcome alert for signal {sig['id']}: {e}")
 
 async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id

@@ -1,7 +1,7 @@
 import logging
 from telegram import BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from config import ALERT_STATE, TELEGRAM_TOKEN, USER_ID
+from config import ALERT_STATE, TELEGRAM_TOKEN, USER_ID, save_settings
 from database import init_db
 from mt5_engine import init_mt5
 from bot.commands import *
@@ -27,6 +27,9 @@ async def post_init_setup(application: Application) -> None:
         BotCommand("strategy", "⚙️ Switch Active Trading Strategy"),
         BotCommand("timeframe", "🕒 Change Analysis Timeframe Mode"),
         BotCommand("set", "🔧 View & Adjust Dynamic Parameters"),
+        BotCommand("trade", "🤖 Arm / Disarm Live Execution"),
+        BotCommand("positions", "💼 Open Managed Positions"),
+        BotCommand("close", "🧯 Close Position or Flatten All"),
         BotCommand("stats", "📈 Performance & Win Rate"),
         BotCommand("backtest", "🧪 Replay Strategy Over History"),
         BotCommand("optimize", "⚡ Parameter Optimization Sweep"),
@@ -39,6 +42,10 @@ def main():
         return
 
     init_db()
+    if ALERT_STATE.get("auto_trade_enabled") and not ALERT_STATE.get("trade_dry_run", True):
+        ALERT_STATE["trade_dry_run"] = True
+        save_settings()
+        print("⚠️ Live execution reset to DRY-RUN on startup. Re-arm with /trade live CONFIRM.")
 
     # Build app instance BEFORE calling app.job_queue
     app = (
@@ -81,6 +88,10 @@ def main():
     app.add_handler(CommandHandler("filters", filters_cmd))
     app.add_handler(CommandHandler("confluence", confluence_cmd))
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))
+    app.add_handler(CommandHandler("trade", trade_cmd))
+    app.add_handler(CommandHandler("positions", positions_cmd))
+    app.add_handler(CommandHandler("close", close_cmd))
+    app.add_handler(CommandHandler("breakeven", breakeven_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("heartbeat", heartbeat_cmd))

@@ -40,14 +40,22 @@ def init_db():
             ("symbol", "TEXT"),
             ("score", "INTEGER"),
             ("updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"),
+            # --- live execution linkage ---
+            ("ticket", "INTEGER"),
+            ("lots", "REAL"),
+            ("exec_mode", "TEXT DEFAULT 'NONE'"),      # NONE | DRY | LIVE
+            ("fill_price", "REAL"),
+            ("tp1_partial_done", "INTEGER DEFAULT 0"),
+            ("be_moved", "INTEGER DEFAULT 0"),
         ]
         for col_name, col_type in migrations:
             if col_name not in columns:
                 cursor.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_ticket ON signals(ticket)")
         conn.commit()
 
 def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score):
-    """Logs generated signal details to SQLite."""
+    """Logs generated signal details to SQLite. Returns the new row id (or None)."""
     timestamp = datetime.now(timezone.utc).isoformat()
     try:
         with get_db_connection() as conn:
@@ -57,8 +65,60 @@ def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_pr
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
             ''', (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score))
             conn.commit()
+            return cursor.lastrowid
     except Exception as e:
         logging.error(f"⚠️ Failed to log signal to DB: {e}")
+        return None
+
+def attach_trade_execution(signal_id, ticket, lots, exec_mode, fill_price=None):
+    """Links a live/dry MT5 fill back onto its originating signal row."""
+    if not signal_id:
+        return
+    now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                "UPDATE signals SET ticket = ?, lots = ?, exec_mode = ?, fill_price = ?, updated_at = ? WHERE id = ?",
+                (ticket, lots, exec_mode, fill_price, now_str, signal_id)
+            )
+            conn.commit()
+    except Exception as e:
+        logging.error(f"⚠️ Failed to attach execution to signal {signal_id}: {e}")
+
+def mark_trade_flags(signal_id, tp1_partial_done=None, be_moved=None):
+    sets, params = [], []
+    if tp1_partial_done is not None:
+        sets.append("tp1_partial_done = ?"); params.append(int(tp1_partial_done))
+    if be_moved is not None:
+        sets.append("be_moved = ?"); params.append(int(be_moved))
+    if not sets or not signal_id:
+        return
+    params.append(signal_id)
+    try:
+        with get_db_connection() as conn:
+            conn.execute(f"UPDATE signals SET {', '.join(sets)} WHERE id = ?", params)
+            conn.commit()
+    except Exception as e:
+        logging.error(f"⚠️ Failed to update trade flags for signal {signal_id}: {e}")
+
+def count_live_trades_today():
+    """Live fills opened since 00:00 UTC — feeds the daily execution cap."""
+    today_start = datetime.now(timezone.utc).strftime('%Y-%m-%d 00:00:00')
+    try:
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM signals WHERE exec_mode = 'LIVE' AND ticket IS NOT NULL AND created_at >= ?",
+                (today_start,)
+            ).fetchone()
+        return int(row["n"]) if row else 0
+    except Exception:
+        return 0
+
+def set_signal_status(signal_id, status):
+    now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    with get_db_connection() as conn:
+        conn.execute("UPDATE signals SET status = ?, updated_at = ? WHERE id = ?", (status, now_str, signal_id))
+        conn.commit()
 
 def get_signal_stats():
     """Retrieves current signal outcome statistics."""

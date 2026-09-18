@@ -11,6 +11,10 @@ from telegram.ext import ContextTypes
 from config import USER_ID, ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, CONFLUENCE_WEIGHTS, save_settings
 from database import get_signal_stats
 from mt5_engine import get_gold_symbol, fetch_candles, calculate_position_size
+from trade_engine import (
+    list_managed_positions, close_position, close_all_managed,
+    modify_position_sltp, pending_intent_count,
+)
 from news_engine import fetch_economic_events
 from strategy.backtester import run_backtest, generate_equity_chart, run_backtest_sweep
 from strategy.evaluator import analyze_market
@@ -124,6 +128,150 @@ async def disable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for job in current_jobs:
         job.schedule_removal()
     await update.effective_message.reply_text("🔴 **Market Scanner Deactivated.**", parse_mode="Markdown")
+
+@admin_only
+async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Arms/disarms live execution. Going LIVE requires an explicit confirmation token."""
+    args = [a.lower() for a in (context.args or [])]
+
+    if not args:
+        armed = ALERT_STATE.get("auto_trade_enabled", False)
+        dry = ALERT_STATE.get("trade_dry_run", True)
+        mode = "🔴 DISARMED" if not armed else ("🧪 ARMED (DRY-RUN)" if dry else "🟢 ARMED (LIVE MONEY)")
+        await update.effective_message.reply_text(
+            "🤖 **TRADE EXECUTION ENGINE**\n\n"
+            f"• **Status:** `{mode}`\n"
+            f"• **Magic Number:** `{ALERT_STATE.get('magic_number')}`\n"
+            f"• **Risk / Trade:** `{ALERT_STATE.get('risk_percent')}%`\n"
+            f"• **Max Open Positions:** `{ALERT_STATE.get('max_open_positions')}`\n"
+            f"• **Max Trades / Day:** `{ALERT_STATE.get('max_daily_trades')}`\n"
+            f"• **Slippage Allowance:** `{ALERT_STATE.get('max_slippage_points')}` points\n"
+            f"• **Entry Drift Abort:** `{ALERT_STATE.get('max_entry_drift_pct')}%` of SL\n"
+            f"• **TP1 Partial Close:** `{ALERT_STATE.get('tp1_close_pct')}%` | "
+            f"**SL→BE:** {'ON ✅' if ALERT_STATE.get('move_sl_to_be_on_tp1') else 'OFF ❌'}\n"
+            f"• **Flatten on Circuit Breaker:** {'ON ✅' if ALERT_STATE.get('flatten_on_circuit_breaker') else 'OFF ❌'}\n"
+            f"• **Queued Intents:** `{pending_intent_count()}`\n\n"
+            "**Usage:**\n"
+            "• `/trade on` — arm in dry-run (safe)\n"
+            "• `/trade off` — disarm entirely\n"
+            "• `/trade dry` — back to dry-run\n"
+            "• `/trade live CONFIRM` — ⚠️ send **real orders**\n"
+            "• `/positions` · `/close <ticket|all>`",
+            parse_mode="Markdown"
+        )
+        return
+
+    sub = args[0]
+    if sub == "on":
+        ALERT_STATE["auto_trade_enabled"] = True
+        ALERT_STATE["trade_dry_run"] = True
+        save_settings()
+        await update.effective_message.reply_text(
+            "🧪 **Auto-trade ARMED in DRY-RUN.** Orders will be built and logged but never sent.\n"
+            "Watch a few signals, then `/trade live CONFIRM`.", parse_mode="Markdown")
+    elif sub == "off":
+        ALERT_STATE["auto_trade_enabled"] = False
+        save_settings()
+        await update.effective_message.reply_text(
+            "🔴 **Auto-trade DISARMED.** Open positions are untouched — use `/close all` to flatten.",
+            parse_mode="Markdown")
+    elif sub == "dry":
+        ALERT_STATE["trade_dry_run"] = True
+        save_settings()
+        await update.effective_message.reply_text("🧪 **Dry-run re-enabled.** No further orders will be sent.", parse_mode="Markdown")
+    elif sub == "live":
+        if len(args) < 2 or context.args[1] != "CONFIRM":
+            await update.effective_message.reply_text(
+                "⚠️ **This sends real orders with real money.**\n\n"
+                "Confirm with exactly: `/trade live CONFIRM`", parse_mode="Markdown")
+            return
+        ALERT_STATE["auto_trade_enabled"] = True
+        ALERT_STATE["trade_dry_run"] = False
+        save_settings()
+        await update.effective_message.reply_text(
+            "🟢 **LIVE EXECUTION ENABLED.**\n\n"
+            f"• Risk `{ALERT_STATE.get('risk_percent')}%` per trade\n"
+            f"• Max `{ALERT_STATE.get('max_daily_trades')}` fills/day, "
+            f"`{ALERT_STATE.get('max_open_positions')}` open at once\n"
+            f"• Circuit breaker: `{ALERT_STATE.get('max_daily_losses')}` losses / "
+            f"`-{ALERT_STATE.get('max_daily_drawdown_r')}R`\n\n"
+            "🧯 Kill switch: `/trade off` then `/close all`.\n"
+            "*Confirm AutoTrading is enabled in the MT5 terminal.*", parse_mode="Markdown")
+    else:
+        await update.effective_message.reply_text("⚠️ Unknown option. Send `/trade` for usage.", parse_mode="Markdown")
+
+@admin_only
+async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    positions = await asyncio.to_thread(list_managed_positions)
+    if not positions:
+        await update.effective_message.reply_text("📭 **No bot-managed positions open.**", parse_mode="Markdown")
+        return
+
+    lines = ["💼 **OPEN MANAGED POSITIONS**\n"]
+    total = 0.0
+    for p in positions:
+        side = "BUY 🟢" if p.type == mt5.POSITION_TYPE_BUY else "SELL 🔴"
+        total += p.profit
+        lines.append(
+            f"• `#{p.ticket}` {side} `{p.volume}` lots {p.symbol}\n"
+            f"   Entry `${p.price_open:.2f}` → Now `${p.price_current:.2f}`\n"
+            f"   SL `${p.sl:.2f}` | TP `${p.tp:.2f}` | P&L `${p.profit:.2f}`"
+        )
+    lines.append(f"\n📊 **Floating P&L:** `${total:.2f}`")
+    lines.append("\n*Close with* `/close <ticket>` *or* `/close all`.")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+@admin_only
+async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args:
+        await update.effective_message.reply_text(
+            "⚠️ **Usage:** `/close <ticket>` · `/close all` · `/close <ticket> <lots>`",
+            parse_mode="Markdown")
+        return
+
+    if args[0].lower() == "all":
+        results = await asyncio.to_thread(close_all_managed)
+        await update.effective_message.reply_text(
+            "🧯 **FLATTEN MANAGED POSITIONS**\n\n" + "\n".join(f"• {r}" for r in results),
+            parse_mode="Markdown")
+        return
+
+    try:
+        ticket = int(args[0])
+        lots = float(args[1]) if len(args) > 1 else None
+    except ValueError:
+        await update.effective_message.reply_text("❌ Ticket must be numeric.", parse_mode="Markdown")
+        return
+
+    res = await asyncio.to_thread(close_position, ticket, lots)
+    icon = "✅" if res["ok"] else "❌"
+    await update.effective_message.reply_text(
+        f"{icon} **Close `#{ticket}`** — {res['reason']}", parse_mode="Markdown")
+
+@admin_only
+async def breakeven_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually trail a managed position's SL to its entry price."""
+    if not context.args:
+        await update.effective_message.reply_text("⚠️ **Usage:** `/breakeven <ticket>`", parse_mode="Markdown")
+        return
+    try:
+        ticket = int(context.args[0])
+    except ValueError:
+        await update.effective_message.reply_text("❌ Ticket must be numeric.", parse_mode="Markdown")
+        return
+
+    positions = await asyncio.to_thread(list_managed_positions)
+    pos = next((p for p in positions if p.ticket == ticket), None)
+    if pos is None:
+        await update.effective_message.reply_text(f"❌ No managed position `#{ticket}`.", parse_mode="Markdown")
+        return
+
+    res = await asyncio.to_thread(modify_position_sltp, ticket, pos.price_open, pos.tp or None)
+    icon = "✅" if res["ok"] else "❌"
+    await update.effective_message.reply_text(
+        f"{icon} **`#{ticket}` SL → break-even** (`${pos.price_open:.2f}`) — {res['reason']}",
+        parse_mode="Markdown")
 
 @admin_only
 async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -395,6 +543,31 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif key in ("cb_drawdown", "max_drawdown", "cb_max_drawdown"):
             setting_name = "max_daily_drawdown_r"
             val = float(val_str)
+
+        elif key in ("magic", "magic_number"):
+            setting_name = "magic_number"
+            val = int(val_str)
+        elif key in ("slippage", "deviation", "max_slippage_points"):
+            setting_name = "max_slippage_points"
+            val = int(val_str)
+        elif key in ("max_positions", "max_open_positions"):
+            setting_name = "max_open_positions"
+            val = int(val_str)
+        elif key in ("max_trades", "max_daily_trades"):
+            setting_name = "max_daily_trades"
+            val = int(val_str)
+        elif key in ("drift", "max_drift", "max_entry_drift_pct"):
+            setting_name = "max_entry_drift_pct"
+            val = float(val_str)
+        elif key in ("tp1_close", "tp1_close_pct", "partial"):
+            setting_name = "tp1_close_pct"
+            val = float(val_str)
+        elif key in ("be_on_tp1", "move_sl_be"):
+            setting_name = "move_sl_to_be_on_tp1"
+            val = bool(int(val_str))
+        elif key in ("flatten_cb", "flatten_on_circuit_breaker"):
+            setting_name = "flatten_on_circuit_breaker"
+            val = bool(int(val_str))
 
         elif key in ("news_blockade", "news_toggle"):
             setting_name = "news_blockade_enabled"
