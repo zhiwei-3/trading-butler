@@ -129,14 +129,22 @@ def get_signal_stats():
     return counts
 
 def get_daily_performance_stats():
-    """Calculates today's closed trade performance (UTC day) from the database."""
+    """
+    Calculates today's CLOSED trade performance (UTC day) from the database.
+
+    BUGFIX: HIT_TP1 is deliberately excluded from this query. It is a still-open
+    runner — the tracker keeps managing it and it can still resolve to HIT_TP2 or
+    CLOSED_BE later. The original query counted it as a closed +1R win, which
+    could mask a real drawdown and suppress the circuit breaker (or, on a later
+    swing, double-count once the runner's real outcome also lands).
+    """
     today_start = datetime.now(timezone.utc).strftime('%Y-%m-%d 00:00:00')
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT status FROM signals "
-            "WHERE status IN ('HIT_TP1', 'HIT_TP2', 'CLOSED_BE', 'HIT_SL') "
+            "WHERE status IN ('HIT_TP2', 'CLOSED_BE', 'HIT_SL') "
             "AND updated_at >= ? ORDER BY id ASC",
             (today_start,)
         )
@@ -153,10 +161,6 @@ def get_daily_performance_stats():
                 today_losses += 1
                 consecutive_losses += 1
                 net_r -= 1.0
-            elif status == 'HIT_TP1':
-                today_wins += 1
-                consecutive_losses = 0
-                net_r += 1.0
             elif status == 'HIT_TP2':
                 today_wins += 1
                 consecutive_losses = 0

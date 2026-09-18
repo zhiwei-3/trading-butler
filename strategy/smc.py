@@ -25,10 +25,9 @@ def detect_market_structure(df, lookback=60, left=2, right=2):
 
     last_swing_high = swing_highs[-1][1]
     last_swing_low = swing_lows[-1][1]
-    
+
     # Verify the break occurred on the current or previous candle while earlier candles stayed inside range
     c_curr = recent_df['close'].iloc[-1]
-    c_prev = recent_df['close'].iloc[-2]
     c_prior = recent_df['close'].iloc[-3]
 
     if c_curr > last_swing_high and c_prior <= last_swing_high:
@@ -51,14 +50,90 @@ def detect_liquidity_sweeps(df, swing_highs, swing_lows):
     return {"bullish_sweep": bullish_sweep, "bearish_sweep": bearish_sweep}
 
 def detect_fvg(df):
-    """Detects 3-candle Fair Value Gaps."""
+    """
+    Detects a 3-candle Fair Value Gap at the END of the window (i.e. the most
+    recent gap only). Used for the LTF/entry-timeframe check, where "did a gap
+    just form" is exactly what's wanted.
+
+    BUGFIX: previously returned only bullish_fvg/bearish_fvg/gap_size, but three
+    call sites (the htf_fvg_sweep strategy's price-containment check, and the
+    signal chart's FVG shading) read fvg_top/fvg_bottom that were never present
+    — so the containment check silently degraded to "always true" and the chart
+    never drew the box. Both fields are now always returned (None when no gap).
+    """
+    empty = {"bullish_fvg": False, "bearish_fvg": False, "gap_size": 0.0,
+             "fvg_top": None, "fvg_bottom": None}
     if len(df) < 3:
-        return {"bullish_fvg": False, "bearish_fvg": False, "gap_size": 0.0}
+        return empty
     c1, c3 = df.iloc[-3], df.iloc[-1]
-    bullish_fvg = bool(c3['low'] > c1['high'])
-    bearish_fvg = bool(c3['high'] < c1['low'])
-    gap_size = round(c3['low'] - c1['high'], 2) if bullish_fvg else (round(c1['low'] - c3['high'], 2) if bearish_fvg else 0.0)
-    return {"bullish_fvg": bullish_fvg, "bearish_fvg": bearish_fvg, "gap_size": gap_size}
+    if c3['low'] > c1['high']:
+        return {"bullish_fvg": True, "bearish_fvg": False,
+                "gap_size": round(c3['low'] - c1['high'], 2),
+                "fvg_bottom": round(float(c1['high']), 2), "fvg_top": round(float(c3['low']), 2)}
+    if c3['high'] < c1['low']:
+        return {"bullish_fvg": False, "bearish_fvg": True,
+                "gap_size": round(c1['low'] - c3['high'], 2),
+                "fvg_bottom": round(float(c3['high']), 2), "fvg_top": round(float(c1['low']), 2)}
+    return empty
+
+def find_unmitigated_fvgs(df, lookback=100, max_gaps=5):
+    """
+    Scans a window for 3-candle Fair Value Gaps and returns the ones that
+    haven't yet been filled by later price action (i.e. still "live" zones).
+
+    BUGFIX: the HTF/macro FVG tap used detect_fvg(df_macro), which only ever
+    inspects the LAST 3 macro bars — so a macro gap was visible to the strategy
+    for exactly one bar and there was no way to detect price returning to tap an
+    older gap later, which is the entire premise of "HTF FVG tap" strategies.
+    """
+    if len(df) < 3:
+        return []
+    recent = df.iloc[-lookback:].reset_index(drop=True)
+    n = len(recent)
+    gaps = []
+    for i in range(2, n):
+        c1 = recent.iloc[i - 2]
+        c3 = recent.iloc[i]
+        if c3['low'] > c1['high']:
+            gaps.append({"type": "bullish", "top": float(c3['low']), "bottom": float(c1['high']), "formed_at": i})
+        elif c3['high'] < c1['low']:
+            gaps.append({"type": "bearish", "top": float(c1['low']), "bottom": float(c3['high']), "formed_at": i})
+
+    unmitigated = []
+    for gap in gaps:
+        filled = False
+        for j in range(gap["formed_at"] + 1, n):
+            low_j, high_j = recent['low'].iloc[j], recent['high'].iloc[j]
+            if gap["type"] == "bullish" and low_j <= gap["bottom"]:
+                filled = True
+                break
+            if gap["type"] == "bearish" and high_j >= gap["top"]:
+                filled = True
+                break
+        if not filled:
+            unmitigated.append(gap)
+
+    return unmitigated[-max_gaps:]
+
+def fvg_snapshot_from_gaps(gaps, price):
+    """Picks the unmitigated gap price is currently sitting inside (if any) and
+    formats it into the bullish_fvg/bearish_fvg/fvg_top/fvg_bottom shape the
+    strategies expect."""
+    inside = [g for g in gaps if g["bottom"] <= price <= g["top"]]
+    hit = inside[-1] if inside else None
+    if hit is None:
+        return {"bullish_fvg": False, "bearish_fvg": False, "fvg_top": None, "fvg_bottom": None}
+    return {
+        "bullish_fvg": hit["type"] == "bullish",
+        "bearish_fvg": hit["type"] == "bearish",
+        "fvg_top": round(hit["top"], 2),
+        "fvg_bottom": round(hit["bottom"], 2),
+    }
+
+def macro_fvg_snapshot(df, price, lookback=100, max_gaps=5):
+    """Convenience wrapper: find unmitigated HTF gaps and report whether the
+    current price is tapping one of them right now."""
+    return fvg_snapshot_from_gaps(find_unmitigated_fvgs(df, lookback, max_gaps), price)
 
 def detect_order_block(df, lookback=20):
     """Detects recent Bullish/Bearish Order Blocks (OB) and mitigation zones."""

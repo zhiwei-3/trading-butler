@@ -20,6 +20,15 @@ TIMEFRAME_PRESETS = {
     "swing":    {"entry": mt5.TIMEFRAME_H1,  "trend": mt5.TIMEFRAME_H4,  "macro": mt5.TIMEFRAME_D1, "label": "1H Entry / 4H Trend / Daily Macro (Swing)"},
 }
 
+# BUGFIX: used by /diagnose and the timeframe-selector menu so displayed labels
+# always match the ACTUAL active preset instead of being hardcoded strings that
+# drift out of sync with TIMEFRAME_PRESETS.
+TF_LABELS = {
+    mt5.TIMEFRAME_M1: "1M", mt5.TIMEFRAME_M5: "5M", mt5.TIMEFRAME_M15: "15M",
+    mt5.TIMEFRAME_M30: "30M", mt5.TIMEFRAME_H1: "1H", mt5.TIMEFRAME_H4: "4H",
+    mt5.TIMEFRAME_D1: "1D",
+}
+
 STRATEGY_PRESETS = {
     "smc_confluence": "Smart Money Concepts + Multi-TF Confluence (Default)",
     "htf_fvg_sweep": "HTF (1H) FVG Tap + LTF (5M) Sweep & Shift Model",
@@ -32,7 +41,9 @@ ALERT_STATE = {
     "last_rsi_signal": None,
     "scanner_enabled": True,
     "news_lockout": False,
-    "news_warned_events": set(),
+    # BUGFIX: was a set() — sets aren't prunable-by-age without extra bookkeeping
+    # and this dict lets news_engine.py evict stale keys instead of growing forever.
+    "news_warned_events": {},
     "max_allowed_spread_pips": 10.0,
 
     "timeframe_mode": "scalp",
@@ -59,19 +70,6 @@ ALERT_STATE = {
     "min_rrr": 1.5,  # minimum TP1:SL reward-to-risk ratio required to fire a signal
     "risk_percent": 1.0,  # Default 1% risk per trade
 
-    # === LIVE TRADE EXECUTION ===
-    "auto_trade_enabled": False,        # master switch — bot places orders
-    "trade_dry_run": True,              # build+log the request, never send it
-    "magic_number": 770077,             # bot only ever touches its own positions
-    "max_slippage_points": 30,          # 'deviation' passed to order_send
-    "max_open_positions": 1,            # managed positions held at once
-    "max_daily_trades": 5,              # hard cap on live fills per UTC day
-    "max_entry_drift_pct": 25.0,        # abort if price drifted >25% of SL dist since signal
-    "tp1_close_pct": 50.0,              # % of volume banked at TP1 (0 = disable partial)
-    "move_sl_to_be_on_tp1": True,
-    "flatten_on_circuit_breaker": True,
-    "trade_comment": "TradingButler",
-
     "min_confluence_score": 35,
     "sr_lookback": 180,
     "sr_cluster_pct": 0.0015,
@@ -97,6 +95,19 @@ ALERT_STATE = {
     "last_heartbeat_at": None,
     "mt5_connected": True,
     "consecutive_mt5_failures": 0,
+
+    # === LIVE TRADE EXECUTION ===
+    "auto_trade_enabled": False,        # master switch — bot places orders
+    "trade_dry_run": True,              # build+log the request, never send it
+    "magic_number": 770077,             # bot only ever touches its own positions
+    "max_slippage_points": 30,          # 'deviation' passed to order_send
+    "max_open_positions": 1,            # managed positions held at once
+    "max_daily_trades": 5,              # hard cap on live fills per UTC day
+    "max_entry_drift_pct": 25.0,        # abort if price drifted >25% of SL dist since signal
+    "tp1_close_pct": 50.0,              # % of volume banked at TP1 (0 = disable partial)
+    "move_sl_to_be_on_tp1": True,
+    "flatten_on_circuit_breaker": True,
+    "trade_comment": "TradingButler",
 }
 
 CONFLUENCE_WEIGHTS = {
@@ -129,7 +140,13 @@ PERSISTENT_KEYS = [
     "tp2_atr_mult",
     "min_rrr",
     "risk_percent",
-
+    "min_confluence_score",
+    "setup_forming_enabled",
+    "watch_rsi_margin",
+    "watch_score_margin",
+    "heartbeat_enabled",
+    "heartbeat_interval_hours",
+    # --- live execution ---
     "auto_trade_enabled",
     "trade_dry_run",
     "magic_number",
@@ -141,13 +158,6 @@ PERSISTENT_KEYS = [
     "move_sl_to_be_on_tp1",
     "flatten_on_circuit_breaker",
     "trade_comment",
-
-    "min_confluence_score",
-    "setup_forming_enabled",
-    "watch_rsi_margin",
-    "watch_score_margin",
-    "heartbeat_enabled",
-    "heartbeat_interval_hours",
 ]
 
 def save_settings():
@@ -175,6 +185,14 @@ def load_settings():
             ALERT_STATE["entry_tf"] = TIMEFRAME_PRESETS[mode]["entry"]
             ALERT_STATE["trend_tf"] = TIMEFRAME_PRESETS[mode]["trend"]
             ALERT_STATE["macro_tf"] = TIMEFRAME_PRESETS[mode]["macro"]
+
+        # BUGFIX: a bot restarted while a real position was open must never resume
+        # sending live orders silently — force back to dry-run and make the
+        # operator re-confirm with /trade live CONFIRM.
+        if ALERT_STATE.get("auto_trade_enabled") and not ALERT_STATE.get("trade_dry_run", True):
+            ALERT_STATE["trade_dry_run"] = True
+            print("⚠️ Live execution reset to DRY-RUN on startup. Re-arm with /trade live CONFIRM.")
+
         print("✅ Loaded persistent settings from settings.json")
     except Exception as e:
         print(f"⚠️ Failed to load settings: {e}")

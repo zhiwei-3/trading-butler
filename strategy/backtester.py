@@ -5,11 +5,12 @@ import pandas_ta as ta
 import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS
+from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
 from mt5_engine import MT5_LOCK
 from strategy.smc import (
     find_swing_points, detect_market_structure,
-    detect_liquidity_sweeps, detect_fvg, detect_order_block
+    detect_liquidity_sweeps, detect_fvg, detect_order_block,
+    find_unmitigated_fvgs, fvg_snapshot_from_gaps,
 )
 from strategy.indicators import (
     detect_candlestick_pattern, detect_divergence, find_sr_zones, nearest_sr_zone
@@ -107,7 +108,11 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
                    sl_mult=None, tp1_mult=None, tp2_mult=None):
     buy_th, sell_th = state["rsi_buy_threshold"], state["rsi_sell_threshold"]
     structure = full.get("structure", "NEUTRAL")
-    near_zone = nearest_sr_zone(full.get("sr_zones", []), close_price)
+    # BUGFIX: this used to ignore ALERT_STATE["sr_max_distance_pct"] entirely
+    # (used the function default instead), so tightening/loosening that setting
+    # had zero effect on the backtest even though it's honored live.
+    near_zone = nearest_sr_zone(full.get("sr_zones", []), close_price,
+                                 max_distance_pct=ALERT_STATE["sr_max_distance_pct"])
     fvg = full.get("fvg", {})
     sweeps = full.get("sweeps", {})
     order_block = full.get("order_block", {})
@@ -115,23 +120,32 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
 
     # Helper to generate basic factor breakdown for statistics tracking
     def make_breakdown(is_bullish):
+        # BUGFIX: this always checked close_price >= near_zone["price"] regardless
+        # of direction, so every SELL's "Support/Resistance" factor stat was scored
+        # backwards. Point values are now pulled from CONFLUENCE_WEIGHTS instead of
+        # a separate hardcoded (15/15/20/15) scale that didn't match it.
+        sr_ok = bool(
+            near_zone and (
+                (is_bullish and near_zone["type"] in ("support", "mixed") and close_price >= near_zone["price"]) or
+                ((not is_bullish) and near_zone["type"] in ("resistance", "mixed") and close_price <= near_zone["price"])
+            )
+        )
         return [
-            ("EMA Trend Align", 15 if (is_bullish == entry_bullish) else 0, 15),
-            ("Macro Trend Align", 15 if (is_bullish == macro_bullish) else 0, 15),
-            ("Structure BOS", 20 if (structure == ("BULLISH_BOS" if is_bullish else "BEARISH_BOS")) else 0, 20),
-            ("Support/Resistance", 15 if (near_zone and close_price >= near_zone["price"]) else 0, 15),
+            ("EMA Trend Align", CONFLUENCE_WEIGHTS["ema_trend"] if (is_bullish == entry_bullish) else 0, CONFLUENCE_WEIGHTS["ema_trend"]),
+            ("Macro Trend Align", CONFLUENCE_WEIGHTS["macro_trend"] if (is_bullish == macro_bullish) else 0, CONFLUENCE_WEIGHTS["macro_trend"]),
+            ("Structure BOS", CONFLUENCE_WEIGHTS["structure_bos"] if (structure == ("BULLISH_BOS" if is_bullish else "BEARISH_BOS")) else 0, CONFLUENCE_WEIGHTS["structure_bos"]),
+            ("Support/Resistance", CONFLUENCE_WEIGHTS["sr_zone"] if sr_ok else 0, CONFLUENCE_WEIGHTS["sr_zone"]),
         ]
 
     # 1. HTF FVG TAP + LTF SWEEP & SHIFT STRATEGY
     if strategy_name == "htf_fvg_sweep":
-        fvg_top = macro_fvg.get("fvg_top", 0)
-        fvg_bottom = macro_fvg.get("fvg_bottom", 0)
-
-        htf_bull_tap = macro_fvg.get("bullish_fvg", False) and (fvg_bottom <= close_price <= fvg_top if fvg_top > 0 else True)
-        htf_bear_tap = macro_fvg.get("bearish_fvg", False) and (fvg_bottom <= close_price <= fvg_top if fvg_top > 0 else True)
-
-        bullish_setup = htf_bull_tap and (sweeps.get("bullish_sweep", False) or structure == "BULLISH_BOS") and fvg.get("bullish_fvg", False)
-        bearish_setup = htf_bear_tap and (sweeps.get("bearish_sweep", False) or structure == "BEARISH_BOS") and fvg.get("bearish_fvg", False)
+        # BUGFIX: macro_fvg now only reports bullish_fvg/bearish_fvg=True when
+        # price is actually sitting inside an unmitigated HTF gap (see
+        # strategy/smc.py::fvg_snapshot_from_gaps), so the old
+        # "if fvg_top > 0 else True" fallback — which made the price-containment
+        # check a no-op whenever fvg_top happened to be 0/missing — is gone.
+        bullish_setup = macro_fvg.get("bullish_fvg", False) and (sweeps.get("bullish_sweep", False) or structure == "BULLISH_BOS") and fvg.get("bullish_fvg", False)
+        bearish_setup = macro_fvg.get("bearish_fvg", False) and (sweeps.get("bearish_sweep", False) or structure == "BEARISH_BOS") and fvg.get("bearish_fvg", False)
 
         if bullish_setup and state.get("last_signal") != "BUY":
             targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone,
@@ -261,12 +275,19 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
 def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forward=MAX_BARS_FORWARD):
     """
     Simulates a trade sequentially through historical OHLC data.
-    
+
+    BUGFIX: the spread adjustment was inverted. A BUY exits at the bid, so the
+    spread should make TP HARDER to reach and SL EASIER to reach (you're always
+    a spread's-width behind mid-price on exit). The original code did the exact
+    opposite (`high + spread_price` for TP, unadjusted low for SL), which meant
+    raising spread_pips made backtest results LOOK BETTER instead of worse. Same
+    sign error existed on the SELL side.
+
     ⚠️ SINGLE-PATH LIMITATION:
     Due to the lack of intra-bar tick data, this simulation checks SL and TP hits
-    on a bar-by-bar basis. If TP1 is hit, the Stop Loss is moved to Break-Even 
-    starting from the *following* bar. It cannot detect a TP1 hit and a Break-Even 
-    reversal occurring within the exact same candle, which may slightly overstate 
+    on a bar-by-bar basis. If TP1 is hit, the Stop Loss is moved to Break-Even
+    starting from the *following* bar. It cannot detect a TP1 hit and a Break-Even
+    reversal occurring within the exact same candle, which may slightly overstate
     the survival rate of runners in high-volatility environments.
     """
 
@@ -283,7 +304,7 @@ def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forwa
         high, low = highs[i], lows[i]
 
         if direction == "BUY":
-            sim_low, sim_high = low, high + spread_price
+            sim_low, sim_high = low - spread_price, high - spread_price
             if not hit_tp1:
                 if sim_low <= sl:
                     return "HIT_SL", times[i]
@@ -299,7 +320,7 @@ def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forwa
                 if sim_high >= tp2:
                     return "HIT_TP2", times[i]
         else:
-            sim_low, sim_high = low - spread_price, high
+            sim_low, sim_high = low + spread_price, high + spread_price
             if not hit_tp1:
                 if sim_high >= sl:
                     return "HIT_SL", times[i]
@@ -317,35 +338,20 @@ def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forwa
 
     return ("HIT_TP1" if hit_tp1 else "OPEN"), times[end_idx]
 
-def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None, min_rrr=None,
-                  spread_pips=2.0, progress_callback=None, strategy_name=None,
-                  sl_atr_mult=None, tp1_atr_mult=None, tp2_atr_mult=None,
-                  rsi_buy_threshold=None, rsi_sell_threshold=None):
+def _prepare_history(symbol, days, timeframe_mode):
+    """
+    Fetches and precomputes everything a single run_backtest() call needs.
+
+    BUGFIX: run_backtest_sweep() used to call run_backtest() once per grid
+    combination — up to MAX_SWEEP_COMBOS (150) times — and every one of those
+    refetched and reprocessed the identical MT5 history, since only the
+    strategy/threshold parameters vary across a sweep, never the symbol/days/
+    timeframe. Splitting fetch+precompute out lets the sweep do it exactly once.
+    """
     mode = timeframe_mode or ALERT_STATE["timeframe_mode"]
     if mode not in TIMEFRAME_PRESETS:
         return {"error": f"Unknown timeframe mode '{mode}'"}
     preset = TIMEFRAME_PRESETS[mode]
-    active_strat = strategy_name or ALERT_STATE.get("active_strategy", "smc_confluence")
-
-    resolved_sl_mult = sl_atr_mult if sl_atr_mult is not None else ALERT_STATE["sl_atr_mult"]
-    resolved_tp1_mult = tp1_atr_mult if tp1_atr_mult is not None else ALERT_STATE["tp1_atr_mult"]
-    resolved_tp2_mult = tp2_atr_mult if tp2_atr_mult is not None else ALERT_STATE["tp2_atr_mult"]
-
-    state = {
-        "rsi_buy_threshold": rsi_buy_threshold if rsi_buy_threshold is not None else ALERT_STATE["rsi_buy_threshold"],
-        "rsi_sell_threshold": rsi_sell_threshold if rsi_sell_threshold is not None else ALERT_STATE["rsi_sell_threshold"],
-        "require_structure_break": ALERT_STATE["require_structure_break"],
-        "require_volume_atr_filter": ALERT_STATE["require_volume_atr_filter"],
-        "fractal_window": ALERT_STATE["fractal_window"],
-        "last_signal": None,
-        "prev_ema_bearish": False,
-        "prev_ema_bullish": False,
-    }
-    atr_multiplier = ALERT_STATE["atr_multiplier"]
-    volume_multiplier = ALERT_STATE["volume_multiplier"]
-    min_confluence_score = min_confluence_score if min_confluence_score is not None else ALERT_STATE["min_confluence_score"]
-    min_rrr = min_rrr if min_rrr is not None else ALERT_STATE["min_rrr"]
-    spread_price = spread_pips / 10.0
 
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
@@ -369,6 +375,44 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
 
     if df_trend['EMA_50'].notna().sum() == 0 or df_macro['EMA_50'].notna().sum() == 0:
         return {"error": "Not enough historical bars on the trend/macro timeframe to compute a 50-period EMA."}
+
+    return {"mode": mode, "start": start, "df_entry": df_entry, "df_trend": df_trend, "df_macro": df_macro}
+
+def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None, min_rrr=None,
+                  spread_pips=2.0, progress_callback=None, strategy_name=None,
+                  sl_atr_mult=None, tp1_atr_mult=None, tp2_atr_mult=None,
+                  rsi_buy_threshold=None, rsi_sell_threshold=None, _prepared=None):
+    prepared = _prepared or _prepare_history(symbol, days, timeframe_mode)
+    if "error" in prepared:
+        return prepared
+
+    mode = prepared["mode"]
+    start = prepared["start"]
+    df_entry = prepared["df_entry"]
+    df_trend = prepared["df_trend"]
+    df_macro = prepared["df_macro"]
+
+    active_strat = strategy_name or ALERT_STATE.get("active_strategy", "smc_confluence")
+
+    resolved_sl_mult = sl_atr_mult if sl_atr_mult is not None else ALERT_STATE["sl_atr_mult"]
+    resolved_tp1_mult = tp1_atr_mult if tp1_atr_mult is not None else ALERT_STATE["tp1_atr_mult"]
+    resolved_tp2_mult = tp2_atr_mult if tp2_atr_mult is not None else ALERT_STATE["tp2_atr_mult"]
+
+    state = {
+        "rsi_buy_threshold": rsi_buy_threshold if rsi_buy_threshold is not None else ALERT_STATE["rsi_buy_threshold"],
+        "rsi_sell_threshold": rsi_sell_threshold if rsi_sell_threshold is not None else ALERT_STATE["rsi_sell_threshold"],
+        "require_structure_break": ALERT_STATE["require_structure_break"],
+        "require_volume_atr_filter": ALERT_STATE["require_volume_atr_filter"],
+        "fractal_window": ALERT_STATE["fractal_window"],
+        "last_signal": None,
+        "prev_ema_bearish": False,
+        "prev_ema_bullish": False,
+    }
+    atr_multiplier = ALERT_STATE["atr_multiplier"]
+    volume_multiplier = ALERT_STATE["volume_multiplier"]
+    min_confluence_score = min_confluence_score if min_confluence_score is not None else ALERT_STATE["min_confluence_score"]
+    min_rrr = min_rrr if min_rrr is not None else ALERT_STATE["min_rrr"]
+    spread_price = spread_pips / 10.0
 
     first_valid_idx = df_entry['ATR_AVG'].first_valid_index() or 0
     test_start_idx = max(MIN_WARMUP_BARS, first_valid_idx, int(df_entry['time'].searchsorted(start, side='left')))
@@ -395,11 +439,17 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
 
     cached_sr_macro_cursor = -1
     cached_sr_zones = []
-    cached_macro_fvg = {}
+    cached_macro_gaps = []
 
     trades = []
     factor_stats = {}
     equity = [0.0]
+    # BUGFIX: nothing previously stopped a new signal from firing while a
+    # simulated trade was still "open" — live trading holds one position at a
+    # time, but the backtest let trades overlap freely, producing an equity
+    # curve for a strategy the bot doesn't actually run. Gate new entries until
+    # the last simulated trade's close time has passed.
+    blocked_until = time_arr[0] if len(time_arr) else np.datetime64('1970-01-01T00:00:00')
 
     total_iters = max(1, len(df_entry) - test_start_idx)
     last_reported_pct = -1
@@ -415,6 +465,9 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
                     pass
 
         ts = time_arr[i]
+        if ts < blocked_until:
+            continue
+
         rsi_val, close_price, atr_val = rsi_arr[i], close_arr[i], atr_arr[i]
         if np.isnan(rsi_val) or np.isnan(atr_val) or atr_val <= 0:
             continue
@@ -454,13 +507,24 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
 
         if macro_cursor != cached_sr_macro_cursor:
             macro_slice = df_macro.iloc[max(0, macro_cursor - (HTF_WINDOW - 1)):macro_cursor + 1].reset_index(drop=True)
-            cached_sr_zones = find_sr_zones(macro_slice)
-            cached_macro_fvg = detect_fvg(macro_slice)
+            # BUGFIX: previously called with function defaults only, ignoring
+            # ALERT_STATE["sr_lookback"/"sr_cluster_pct"/"sr_min_touches"] —
+            # tuning those in /set had no effect on backtest S/R zones.
+            cached_sr_zones = find_sr_zones(
+                macro_slice,
+                lookback=ALERT_STATE["sr_lookback"],
+                cluster_pct=ALERT_STATE["sr_cluster_pct"],
+                min_touches=ALERT_STATE["sr_min_touches"],
+            )
+            # Gaps depend only on the macro window, not on the current close
+            # price — cache those, and resolve "is price tapping one right now"
+            # freshly on every entry bar below.
+            cached_macro_gaps = find_unmitigated_fvgs(macro_slice)
             cached_sr_macro_cursor = macro_cursor
 
         full = _full_analysis_with_memory(entry_slice, state)
         full["sr_zones"] = cached_sr_zones
-        full["macro_fvg"] = cached_macro_fvg
+        full["macro_fvg"] = fvg_snapshot_from_gaps(cached_macro_gaps, float(close_price))
         full["vol_filter_ok"] = vol_filter_ok
 
         trade = _decide_trade(
@@ -473,6 +537,7 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
             continue
 
         outcome, close_time = _simulate_trade(df_entry, i, trade, spread_price=spread_price)
+        blocked_until = close_time
 
         if outcome == "HIT_SL":
             r_multiple = -1.0
@@ -556,6 +621,14 @@ def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, sc
         return {"error": f"Sweep would run {total_combos} backtests (cap is {MAX_SWEEP_COMBOS}). "
                           f"Sweep fewer dimensions at once, or narrow the value lists."}
 
+    # BUGFIX: previously each of up to 150 combos called run_backtest() fresh,
+    # which refetched + reprocessed identical MT5 history every single time
+    # (symbol/days/timeframe never vary across a sweep — only strategy/threshold
+    # params do). Fetch and precompute once, reuse for every combo.
+    prepared = _prepare_history(symbol, days, timeframe_mode)
+    if "error" in prepared:
+        return {"error": prepared["error"]}
+
     combos = [
         (strat, r, s, sl, rsi_pair)
         for strat in strategies for r in rrr_values for s in score_values
@@ -573,7 +646,8 @@ def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, sc
         res = run_backtest(symbol, days=days, timeframe_mode=timeframe_mode,
                             min_confluence_score=score, min_rrr=rrr, spread_pips=spread_pips,
                             strategy_name=strat, sl_atr_mult=sl_mult,
-                            rsi_buy_threshold=rsi_buy, rsi_sell_threshold=rsi_sell)
+                            rsi_buy_threshold=rsi_buy, rsi_sell_threshold=rsi_sell,
+                            _prepared=prepared)
 
         resolved_strategy = strat or ALERT_STATE.get("active_strategy", "smc_confluence")
         resolved_sl = sl_mult if sl_mult is not None else ALERT_STATE["sl_atr_mult"]

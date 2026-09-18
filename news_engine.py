@@ -12,7 +12,8 @@ from config import ALERT_STATE
 _NEWS_CACHE = None
 _LAST_FETCH_TIME = None
 _CACHE_DURATION = timedelta(minutes=10)
-_ANNOUNCED_RESULTS = set()  # Tracks already broadcasted post-release events
+_ANNOUNCED_RESULTS = {}   # event_key -> added_at (UTC). Dict (not set) so it can be pruned by age.
+_RESULT_TTL = timedelta(days=8)
 
 
 def _fetch_via_curl(url):
@@ -89,28 +90,56 @@ async def fetch_economic_events(impact_level="high", currency="USD"):
     return filtered_events
 
 
+def _to_num(v):
+    """
+    Parses ForexFactory-style numeric strings ('3.1%', '250K', '-0.2', 'N/A') into
+    floats.
+
+    BUGFIX: generate_xauusd_news_insight used to compare these fields as raw
+    strings (`actual < forecast`), which is lexicographic, not numeric — e.g.
+    "10.0" < "9.0" evaluates True. Every directional call for CPI/NFP/etc. was
+    potentially wrong. Returns None (rather than raising) for missing/"N/A"
+    values so callers can fall back to the neutral message.
+    """
+    if v is None:
+        return None
+    s = str(v).strip().replace("%", "").replace(",", "")
+    if not s or s.upper() in ("N/A", "NA"):
+        return None
+    mult = 1.0
+    if s[-1].upper() in ("K", "M", "B"):
+        mult = {"K": 1e3, "M": 1e6, "B": 1e9}[s[-1].upper()]
+        s = s[:-1]
+    try:
+        return float(s) * mult
+    except ValueError:
+        return None
+
+
 def generate_xauusd_news_insight(event_title: str, forecast: str, previous: str, actual: str = None) -> str:
     """
     Generates directional and volatility insights for XAUUSD based on economic metrics.
     """
     title_upper = event_title.upper()
-    
+    actual_n = _to_num(actual)
+    forecast_n = _to_num(forecast)
+
     # 1. Inflation & Growth (CPI, PPI, PCE, GDP, Retail Sales)
     if any(k in title_upper for k in ["CPI", "PPI", "PCE", "GDP", "RETAIL SALES"]):
-        if actual:
-            return "📈 **Bullish XAUUSD** (Lower inflation/growth weakens USD)" if actual < forecast else "📉 **Bearish XAUUSD** (Higher inflation/growth strengthens USD)"
+        if actual_n is not None and forecast_n is not None:
+            return "📈 **Bullish XAUUSD** (Lower inflation/growth weakens USD)" if actual_n < forecast_n else "📉 **Bearish XAUUSD** (Higher inflation/growth strengthens USD)"
         return "💡 *Higher actual figures strengthen USD (Bearish Gold); lower figures weaken USD (Bullish Gold).*"
 
     # 2. Employment Data (NFP, Non-Farm, ADP, Employment Change)
     elif any(k in title_upper for k in ["NFP", "NON-FARM", "EMPLOYMENT", "ADP"]):
-        if actual:
-            return "📈 **Bullish XAUUSD** (Weaker labor market weakens USD)" if actual < forecast else "📉 **Bearish XAUUSD** (Strong labor market boosts USD)"
+        if actual_n is not None and forecast_n is not None:
+            return "📈 **Bullish XAUUSD** (Weaker labor market weakens USD)" if actual_n < forecast_n else "📉 **Bearish XAUUSD** (Strong labor market boosts USD)"
         return "💡 *Strong job growth boosts Fed rate hike expectations (Bearish Gold).* "
 
     # 3. Unemployment Claims & Unemployment Rate
     elif "UNEMPLOYMENT" in title_upper:
-        if actual:
-            return "📈 **Bullish XAUUSD** (Higher unemployment hurts USD)" if actual > forecast else "📉 **Bearish XAUUSD** (Lower unemployment supports USD)"
+        if actual_n is not None and forecast_n is not None:
+            return "📈 **Bullish XAUUSD** (Higher unemployment hurts USD)" if actual_n > forecast_n else "📉 **Bearish XAUUSD** (Lower unemployment supports USD)"
         return "💡 *Higher unemployment weakens USD (Bullish Gold).* "
 
     # 4. Central Bank Rates (FOMC, Federal Funds Rate)
@@ -138,6 +167,13 @@ async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
 
     now_utc = datetime.now(timezone.utc)
 
+    # BUGFIX: this dict grew forever across a long-running process. Prune keys
+    # older than the TTL every time we check.
+    warned = ALERT_STATE["news_warned_events"]
+    cutoff = now_utc - _RESULT_TTL
+    for k in [k for k, t in warned.items() if t < cutoff]:
+        del warned[k]
+
     for ev in events:
         event_title = ev.get("title", "USD High Impact Event")
         raw_date = ev.get("date", "")
@@ -151,10 +187,10 @@ async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
         warn_key = f"{event_title}|{raw_date}"
 
         # Dispatch enriched warning message 25-35 minutes prior to release
-        if 25 <= time_diff <= 35 and warn_key not in ALERT_STATE["news_warned_events"]:
-            ALERT_STATE["news_warned_events"].add(warn_key)
+        if 25 <= time_diff <= 35 and warn_key not in warned:
+            warned[warn_key] = now_utc
             time_str = event_dt.strftime("%H:%M UTC")
-            
+
             forecast = _clean_val(ev.get("forecast"))
             previous = _clean_val(ev.get("previous"))
             insight = generate_xauusd_news_insight(event_title, forecast, previous)
@@ -177,11 +213,14 @@ async def check_news_post_release(context: ContextTypes.DEFAULT_TYPE, chat_id):
     """
     Monitors calendar feed for newly published actual results and broadcasts live outcome analysis.
     """
+    global _ANNOUNCED_RESULTS
     events = await fetch_economic_events(impact_level="high", currency="USD")
     if not events:
         return
 
     now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - _RESULT_TTL
+    _ANNOUNCED_RESULTS = {k: t for k, t in _ANNOUNCED_RESULTS.items() if t >= cutoff}
 
     for ev in events:
         actual = ev.get("actual")
@@ -204,11 +243,11 @@ async def check_news_post_release(context: ContextTypes.DEFAULT_TYPE, chat_id):
         # Only broadcast outcomes for events released within the past 60 minutes
         minutes_since_release = (now_utc - event_dt).total_seconds() / 60.0
         if 0 <= minutes_since_release <= 60:
-            _ANNOUNCED_RESULTS.add(event_key)
+            _ANNOUNCED_RESULTS[event_key] = now_utc
             forecast = _clean_val(ev.get("forecast"))
             previous = _clean_val(ev.get("previous"))
             actual_str = _clean_val(actual)
-            
+
             outcome_insight = generate_xauusd_news_insight(event_title, forecast, previous, actual=actual_str)
 
             msg = (

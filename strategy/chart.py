@@ -23,7 +23,6 @@ def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=60, near_zo
 
     # Render Candlesticks
     up = closes >= opens
-    down = closes < opens
     col_up, col_dn = '#00c853', '#ff3d00'
 
     ax.vlines(times, lows, highs, color=np.where(up, col_up, col_dn), linewidth=1, alpha=0.8)
@@ -42,6 +41,12 @@ def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=60, near_zo
     # Highlight nearest S/R Zone
     if near_zone and near_zone.get("price"):
         ax.axhline(near_zone["price"], color="#aa00ff", linestyle="-.", alpha=0.7, label=f"S/R Zone (${near_zone['price']:.2f})")
+
+    # BUGFIX: macro_fvg was accepted as a parameter and passed in by callers
+    # (gold_snapshot) but was never actually drawn — the HTF FVG zone silently
+    # never appeared on the chart.
+    if macro_fvg and macro_fvg.get("fvg_top") is not None and macro_fvg.get("fvg_bottom") is not None:
+        ax.axhspan(macro_fvg["fvg_bottom"], macro_fvg["fvg_top"], color="#ffd600", alpha=0.15, label="HTF FVG")
 
     ax.set_title(title, color="white", fontsize=12, fontweight="bold")
     ax.legend(facecolor="#1e1e1e", edgecolor="#333333", labelcolor="white", loc="upper left", fontsize=9)
@@ -75,7 +80,6 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2, fvg=None
 
     # Render Candlesticks
     up = closes >= opens
-    down = closes < opens
     col_up, col_dn = '#00c853', '#ff3d00'
 
     ax.vlines(times, lows, highs, color=np.where(up, col_up, col_dn), linewidth=1, alpha=0.8)
@@ -87,8 +91,8 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2, fvg=None
     ax.axhline(tp1, color="#00e676", linestyle="--", linewidth=1.5, label=f"TP1: ${tp1:.2f}")
     ax.axhline(tp2, color="#00b0ff", linestyle=":", linewidth=1.5, label=f"TP2: ${tp2:.2f}")
 
-    # Highlight FVG Zone
-    if fvg and fvg.get("fvg_top") and fvg.get("fvg_bottom"):
+    # Highlight FVG Zone (fvg_top/fvg_bottom are now always populated by detect_fvg)
+    if fvg and fvg.get("fvg_top") is not None and fvg.get("fvg_bottom") is not None:
         ax.axhspan(fvg["fvg_bottom"], fvg["fvg_top"], color="#ffd600", alpha=0.18, label="Active FVG")
 
     # Highlight S/R Level
@@ -112,9 +116,12 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2, fvg=None
 
 def generate_outcome_chart(df: pd.DataFrame, entry_p: float, sl_p: float, tp1_p: float, tp2_p: float, outcome_status: str, symbol: str = "XAUUSD") -> io.BytesIO:
     """Generates a post-trade visual chart with Entry, SL, and TP horizontal levels."""
+    # BUGFIX: this used to mutate the caller's DataFrame in place
+    # (df['time'] = pd.to_datetime(...)), which is surprising for a "generate a
+    # chart" function and could corrupt a frame the caller still needed.
+    df = df.copy()
     fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
-    
-    # Plot closing price line or candles
+
     if 'time' in df.columns:
         df['time'] = pd.to_datetime(df['time'])
         ax.plot(df['time'], df['close'], label="Price", color="#1f77b4", linewidth=1.5)
