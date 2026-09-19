@@ -1,5 +1,6 @@
 import logging
 from telegram import BotCommand
+from telegram.error import NetworkError, TimedOut, TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from config import ALERT_STATE, TELEGRAM_TOKEN, USER_ID, save_settings
 from database import init_db
@@ -13,8 +14,16 @@ from bot.jobs import (
 )
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Logs uncaught exceptions raised by command handlers."""
-    logging.error("Exception occurred while handling an update:", exc_info=context.error)
+    """Logs uncaught exceptions while handling routine network drops gracefully."""
+    err = context.error
+    
+    # Catch routine connection resets and timeout glitches
+    if isinstance(err, (NetworkError, TimedOut)) or "RemoteProtocolError" in str(err):
+        logging.warning(f"🌐 Transient network glitch (polling will auto-recover): {err}")
+        return
+
+    # Log genuine software bugs and uncaught exceptions
+    logging.error("Exception occurred while handling an update:", exc_info=err)
 
 async def post_init_setup(application: Application) -> None:
     """Registers bot command auto-completion hints in the Telegram UI."""
@@ -63,9 +72,9 @@ def main():
         Application.builder()
         .token(TELEGRAM_TOKEN)
         .connect_timeout(30.0)
-        .read_timeout(30.0)
+        .read_timeout(45.0)
         .write_timeout(30.0)
-        .pool_timeout(30.0)
+        .pool_timeout(45.0)
         .build()
     )
     app.post_init = post_init_setup

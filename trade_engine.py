@@ -148,18 +148,23 @@ def _adjust_levels(info, direction, price, sl, tp):
     point = info.point or 0.01
     digits = info.digits
     min_dist = max(int(getattr(info, "trade_stops_level", 0) or 0), 0) * point
+
     if direction == "BUY":
-        if sl is not None and (price - sl) < min_dist:
+        # Only adjust if SL/TP are positive numeric values
+        if sl is not None and sl > 0 and (price - sl) < min_dist:
             sl = price - min_dist
-        if tp is not None and (tp - price) < min_dist:
+        if tp is not None and tp > 0 and (tp - price) < min_dist:
             tp = price + min_dist
-    else:
-        if sl is not None and (sl - price) < min_dist:
+    else:  # SELL
+        if sl is not None and sl > 0 and (sl - price) < min_dist:
             sl = price + min_dist
-        if tp is not None and (price - tp) < min_dist:
+        if tp is not None and tp > 0 and (price - tp) < min_dist:
             tp = price - min_dist
-    return (round(sl, digits) if sl is not None else None,
-            round(tp, digits) if tp is not None else None)
+
+    return (
+        round(sl, digits) if sl is not None and sl > 0 else (0.0 if sl == 0.0 else None),
+        round(tp, digits) if tp is not None and tp > 0 else (0.0 if tp == 0.0 else None)
+    )
 
 def _snap_volume(info, volume):
     step = info.volume_step or 0.01
