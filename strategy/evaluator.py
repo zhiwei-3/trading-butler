@@ -1,12 +1,12 @@
 import pandas_ta as ta
 from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
 from database import log_signal_to_db
-from mt5_engine import fetch_candles, calculate_position_size
+from mt5_engine import fetch_candles
 from trade_engine import request_execution
 from strategy.chart import generate_signal_chart
 from strategy.smc import (
-    find_swing_points, detect_market_structure, 
-    detect_liquidity_sweeps, detect_fvg, detect_order_block
+    find_swing_points, detect_market_structure,
+    detect_liquidity_sweeps, detect_fvg, detect_order_block, macro_fvg_snapshot
 )
 from strategy.indicators import (
     passes_volatility_filter, get_macd_bias, detect_candlestick_pattern,
@@ -149,11 +149,14 @@ def _eval_htf_fvg_ltf_sweep(a):
     fvg, sweeps, structure = a["fvg"], a["sweeps"], a["structure"]
     order_block, near_zone = a["order_block"], a["near_zone"]
 
-    fvg_top = macro_fvg.get("fvg_top", 0)
-    fvg_bottom = macro_fvg.get("fvg_bottom", 0)
-
-    htf_bull_tap = macro_fvg.get("bullish_fvg", False) and (fvg_bottom <= close_price <= fvg_top if fvg_top > 0 else True)
-    htf_bear_tap = macro_fvg.get("bearish_fvg", False) and (fvg_bottom <= close_price <= fvg_top if fvg_top > 0 else True)
+    # BUGFIX: macro_fvg now only reports bullish_fvg/bearish_fvg=True when price
+    # is ACTUALLY sitting inside an unmitigated HTF gap (see
+    # strategy/smc.py::fvg_snapshot_from_gaps), so the old
+    # "if fvg_top > 0 else True" fallback — which made the price-containment
+    # check a no-op whenever fvg_top happened to be 0/missing — is gone. The tap
+    # condition is now just the flag itself.
+    htf_bull_tap = macro_fvg.get("bullish_fvg", False)
+    htf_bear_tap = macro_fvg.get("bearish_fvg", False)
 
     bullish_setup = (
         htf_bull_tap and
@@ -196,30 +199,50 @@ def _eval_htf_fvg_ltf_sweep(a):
 
     return signals, watches
 
+def _is_dual_entry(score):
+    """
+    Per the current design: dual-entry (2 fixed-lot legs — TP1 full close + a
+    TP2/break-even runner) only applies to the smc_confluence strategy's real,
+    graded 0-100 confluence score. The other four strategies emit a fixed
+    "confidence" number rather than a computed score, so they always get a
+    single TP1-only leg regardless of that number.
+    """
+    if ALERT_STATE.get("active_strategy", "smc_confluence") != "smc_confluence":
+        return False
+    return score >= ALERT_STATE.get("dual_entry_score_threshold", 50)
+
 def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, base_msg, score=0):
     """Logs the signal, queues live execution (if armed), and renders the alert."""
-    signal_id = log_signal_to_db("XAUUSD", direction, close_price, sl_price, tp1_price, tp2_price, score)
-    request_execution(signal_id, "XAUUSD", direction, close_price, sl_price, tp1_price, tp2_price, score)
+    symbol = a.get("symbol", "XAUUSD")
+    dual = _is_dual_entry(score)
 
-    sl_dist = abs(close_price - sl_price)
-    risk_pct = ALERT_STATE.get("risk_percent", 1.0)
-    pos = calculate_position_size("XAUUSD", sl_dist, risk_pct)
+    signal_id = log_signal_to_db(symbol, direction, close_price, sl_price, tp1_price, tp2_price, score, dual_entry=dual)
+    request_execution(signal_id, symbol, direction, close_price, sl_price, tp1_price, tp2_price, score, dual_entry=dual)
 
+    fixed_lot = ALERT_STATE.get("fixed_lot_size", 0.01)
     exec_note = ""
     if ALERT_STATE.get("auto_trade_enabled"):
-        exec_note = ("🧪 *Auto-trade armed (DRY-RUN)* — order will be logged, not sent.\n\n"
-                     if ALERT_STATE.get("trade_dry_run", True)
-                     else "🤖 *Auto-trade LIVE* — order is being submitted to MT5.\n\n")
+        mode_lbl = "DRY-RUN" if ALERT_STATE.get("trade_dry_run", True) else "LIVE"
+        if dual:
+            exec_note = (
+                f"🤖 *Auto-trade {mode_lbl}* — 2 legs of `{fixed_lot}` lots each: Leg 1 closes fully "
+                f"at TP1, Leg 2's SL trails to break-even the moment TP1 hits and runs for TP2.\n\n"
+            )
+        else:
+            exec_note = (
+                f"🤖 *Auto-trade {mode_lbl}* — 1 leg of `{fixed_lot}` lots, targeting **TP1 only** "
+                f"(below the dual-entry score threshold, or a non-confluence strategy).\n\n"
+            )
 
     pos_info = (
-        f"💼 **Position Sizing ({risk_pct}% Risk):**\n"
-        f"• **Recommended Lots:** `{pos['lots']}` lots\n"
-        f"• **Risk Amount:** `${pos['risk_usd']}` | **Account Equity:** `${pos['balance']}`\n\n"
+        f"💼 **Position Plan:**\n"
+        f"• **Sizing:** `{fixed_lot}` lots per leg (fixed)\n"
+        f"• **Legs:** {'2 — TP1 full close + TP2/BE runner 🎯🎯' if dual else '1 — TP1 only 🎯'}\n\n"
     )
 
     full_msg = base_msg + "\n" + pos_info + exec_note
     chart_buf = generate_signal_chart(
-        a["df_entry"], "XAUUSD", direction, close_price, sl_price, tp1_price, tp2_price,
+        a["df_entry"], symbol, direction, close_price, sl_price, tp1_price, tp2_price,
         fvg=a.get("fvg"), near_zone=a.get("near_zone")
     )
     return (full_msg, chart_buf)
@@ -353,7 +376,13 @@ def analyze_market(symbol):
     swing_highs, swing_lows = find_swing_points(df_entry, ALERT_STATE["fractal_window"], ALERT_STATE["fractal_window"])
     sweeps = detect_liquidity_sweeps(df_entry, swing_highs, swing_lows)
     fvg = detect_fvg(df_entry)
-    macro_fvg = detect_fvg(df_macro)
+    # BUGFIX: detect_fvg(df_macro) only ever looked at the last 3 macro bars, so
+    # an HTF gap was "visible" for exactly one bar with no way to detect price
+    # returning to tap an older gap later. macro_fvg_snapshot scans a real
+    # lookback window for still-unmitigated gaps and reports one only when
+    # price is actually sitting inside it right now.
+    macro_fvg = macro_fvg_snapshot(df_macro, close_price,
+                                    lookback=ALERT_STATE["sr_lookback"])
     order_block = detect_order_block(df_entry)
     sr_zones = find_sr_zones(df_macro, lookback=ALERT_STATE["sr_lookback"],
                           cluster_pct=ALERT_STATE["sr_cluster_pct"],
@@ -364,6 +393,7 @@ def analyze_market(symbol):
                             volume_multiplier=ALERT_STATE["volume_multiplier"])
 
     return {
+        "symbol": symbol,
         "df_entry": df_entry,   
         "tf_label": TIMEFRAME_PRESETS[ALERT_STATE["timeframe_mode"]]["label"],
         "close_price": close_price,
@@ -375,7 +405,7 @@ def analyze_market(symbol):
         "structure": detect_market_structure(df_entry),
         "sweeps": sweeps,
         "fvg": fvg,
-        "macro_fvg": macro_fvg,  # Added HTF FVG detection
+        "macro_fvg": macro_fvg,
         "order_block": order_block,
         "vol_filter_ok": vol_filter_ok,
         "macd_bias": get_macd_bias(df_entry),

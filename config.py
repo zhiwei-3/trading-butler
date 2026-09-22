@@ -101,11 +101,15 @@ ALERT_STATE = {
     "trade_dry_run": True,              # build+log the request, never send it
     "magic_number": 770077,             # bot only ever touches its own positions
     "max_slippage_points": 30,          # 'deviation' passed to order_send
-    "max_open_positions": 1,            # managed positions held at once
-    "max_daily_trades": 5,              # hard cap on live fills per UTC day
+    # Dual-entry uses 2 tickets per signal (one TP1-only, one TP2-runner), so this
+    # must be >=2 for dual-entry signals to actually get their second leg — but the
+    # second leg of a signal's OWN pair bypasses this cap (see trade_engine.py); it
+    # only limits how many *separate* signals can be open at once.
+    "max_open_positions": 2,
+    "max_daily_trades": 5,              # hard cap on live fills (tickets) per UTC day
     "max_entry_drift_pct": 25.0,        # abort if price drifted >25% of SL dist since signal
-    "tp1_close_pct": 50.0,              # % of volume banked at TP1 (0 = disable partial)
-    "move_sl_to_be_on_tp1": True,
+    "fixed_lot_size": 0.01,             # flat lot size per leg — NOT scaled by risk_percent
+    "dual_entry_score_threshold": 50,   # smc_confluence score >= this -> open 2 legs (TP1 + TP2/BE runner)
     "flatten_on_circuit_breaker": True,
     "trade_comment": "TradingButler",
 }
@@ -154,8 +158,8 @@ PERSISTENT_KEYS = [
     "max_open_positions",
     "max_daily_trades",
     "max_entry_drift_pct",
-    "tp1_close_pct",
-    "move_sl_to_be_on_tp1",
+    "fixed_lot_size",
+    "dual_entry_score_threshold",
     "flatten_on_circuit_breaker",
     "trade_comment",
 ]

@@ -2,15 +2,14 @@ import time
 import logging
 import asyncio
 import MetaTrader5 as mt5
-import pandas_ta as ta
 from functools import wraps
 from datetime import datetime, timezone
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from config import USER_ID, ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, CONFLUENCE_WEIGHTS, save_settings
+from config import USER_ID, ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, CONFLUENCE_WEIGHTS, TF_LABELS, save_settings
 from database import get_signal_stats
-from mt5_engine import get_gold_symbol, fetch_candles, calculate_position_size
+from mt5_engine import get_gold_symbol, fetch_candles, calculate_position_size, get_tick
 from trade_engine import (
     list_managed_positions, close_position, close_all_managed,
     modify_position_sltp, pending_intent_count,
@@ -30,8 +29,17 @@ def admin_only(func):
     """Decorator to restrict command access strictly to USER_ID."""
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        try:
+            allowed_id = int(USER_ID)
+        except (TypeError, ValueError):
+            # BUGFIX: int(None) used to raise here and crash EVERY command
+            # whenever TELEGRAM_USER_ID was unset. main() now refuses to start
+            # without it, but keep this guard defensive rather than crashing.
+            if update.effective_message:
+                await update.effective_message.reply_text("⛔ **Bot misconfigured:** TELEGRAM_USER_ID is not set.")
+            return
         user_id = update.effective_user.id if update.effective_user else None
-        if user_id != int(USER_ID):
+        if user_id != allowed_id:
             if update.effective_message:
                 await update.effective_message.reply_text("⛔ **Access Denied:** You are not authorized to use this bot.")
             return
@@ -42,10 +50,7 @@ def admin_only(func):
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ensure_watchdog_running(context.job_queue, chat_id)
-    if not USER_ID:
-        restart_heartbeat_job(context.job_queue, chat_id)
-        save_settings()
-    
+
     await update.message.reply_text(
         "🤵‍♂️ **Trading Butler Online (Full Stack Modular)**\n\n"
         "**🎛️ Core & Dashboards**\n"
@@ -58,7 +63,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/positions` - View Open Managed Positions\n"
         "• `/close <ticket|all>` - Close Position or Flatten All\n"
         "• `/breakeven <ticket>` - Trail SL to Entry Price\n"
-        "• `/calc <bal> <risk%> <sl>` - Position Size Calculator\n\n"
+        "• `/calc <bal> <risk%> <sl>` - Manual Position Size Reference\n\n"
         "**📊 Market Analysis**\n"
         "• `/gold` - Gold Technical Snapshot\n"
         "• `/spread` - Live Bid/Ask & Spread Guard Status\n"
@@ -93,7 +98,9 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **Active Strategy:** `{strat}`\n"
         f"• **Timeframe Preset:** `{tf_mode}`\n"
         f"• **Min Confluence Score:** `{ALERT_STATE.get('min_confluence_score')}/100`\n"
-        f"• **Min RRR:** `1:{ALERT_STATE.get('min_rrr')}`\n\n"
+        f"• **Min RRR:** `1:{ALERT_STATE.get('min_rrr')}`\n"
+        f"• **Sizing:** `{ALERT_STATE.get('fixed_lot_size', 0.01)}` lots/leg | "
+        f"**Dual-Entry ≥** `{ALERT_STATE.get('dual_entry_score_threshold', 50)}`\n\n"
         "Tap a button below for instant quick actions:"
     )
 
@@ -128,7 +135,10 @@ async def enable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for job in current_jobs:
         job.schedule_removal()
 
-    context.job_queue.run_repeating(market_scanner_job, interval=60, first=5, chat_id=chat_id, name="xauusd_scanner")
+    context.job_queue.run_repeating(
+        market_scanner_job, interval=60, first=5, chat_id=chat_id, name="xauusd_scanner",
+        job_kwargs={"misfire_grace_time": 30}
+    )
     ensure_watchdog_running(context.job_queue, chat_id)
     if not USER_ID:
         restart_heartbeat_job(context.job_queue, chat_id)
@@ -156,13 +166,13 @@ async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🤖 **TRADE EXECUTION ENGINE**\n\n"
             f"• **Status:** `{mode}`\n"
             f"• **Magic Number:** `{ALERT_STATE.get('magic_number')}`\n"
-            f"• **Risk / Trade:** `{ALERT_STATE.get('risk_percent')}%`\n"
-            f"• **Max Open Positions:** `{ALERT_STATE.get('max_open_positions')}`\n"
-            f"• **Max Trades / Day:** `{ALERT_STATE.get('max_daily_trades')}`\n"
+            f"• **Sizing:** `{ALERT_STATE.get('fixed_lot_size')}` lots per leg (fixed — not scaled by account size)\n"
+            f"• **Dual-Entry Threshold:** SMC Confluence score `≥ {ALERT_STATE.get('dual_entry_score_threshold')}` "
+            f"→ 2 legs (TP1 full close + TP2/BE runner). Below that, or any other strategy, → 1 leg (TP1-only).\n"
+            f"• **Max Open Positions:** `{ALERT_STATE.get('max_open_positions')}` *(the 2nd leg of one signal doesn't count against this)*\n"
+            f"• **Max Trades / Day:** `{ALERT_STATE.get('max_daily_trades')}` *(counts tickets, so a dual entry uses 2)*\n"
             f"• **Slippage Allowance:** `{ALERT_STATE.get('max_slippage_points')}` points\n"
             f"• **Entry Drift Abort:** `{ALERT_STATE.get('max_entry_drift_pct')}%` of SL\n"
-            f"• **TP1 Partial Close:** `{ALERT_STATE.get('tp1_close_pct')}%` | "
-            f"**SL→BE:** {'ON ✅' if ALERT_STATE.get('move_sl_to_be_on_tp1') else 'OFF ❌'}\n"
             f"• **Flatten on Circuit Breaker:** {'ON ✅' if ALERT_STATE.get('flatten_on_circuit_breaker') else 'OFF ❌'}\n"
             f"• **Queued Intents:** `{pending_intent_count()}`\n\n"
             "**Usage:**\n"
@@ -204,7 +214,8 @@ async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_settings()
         await update.effective_message.reply_text(
             "🟢 **LIVE EXECUTION ENABLED.**\n\n"
-            f"• Risk `{ALERT_STATE.get('risk_percent')}%` per trade\n"
+            f"• Fixed `{ALERT_STATE.get('fixed_lot_size')}` lots per leg\n"
+            f"• Dual-entry (2 legs) above SMC Confluence score `{ALERT_STATE.get('dual_entry_score_threshold')}`\n"
             f"• Max `{ALERT_STATE.get('max_daily_trades')}` fills/day, "
             f"`{ALERT_STATE.get('max_open_positions')}` open at once\n"
             f"• Circuit breaker: `{ALERT_STATE.get('max_daily_losses')}` losses / "
@@ -227,7 +238,7 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         side = "BUY 🟢" if p.type == mt5.POSITION_TYPE_BUY else "SELL 🔴"
         total += p.profit
         lines.append(
-            f"• `#{p.ticket}` {side} `{p.volume}` lots {p.symbol}\n"
+            f"• `#{p.ticket}` {side} `{p.volume}` lots {p.symbol} — *{p.comment or ''}*\n"
             f"   Entry `${p.price_open:.2f}` → Now `${p.price_current:.2f}`\n"
             f"   SL `${p.sl:.2f}` | TP `${p.tp:.2f}` | P&L `${p.profit:.2f}`"
         )
@@ -265,7 +276,9 @@ async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def breakeven_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manually trail a managed position's SL to its entry price."""
+    """Manually trail a managed position's SL to its entry price. The bot does
+    this automatically for a dual-entry signal's runner leg — this is for
+    manual overrides."""
     if not context.args:
         await update.effective_message.reply_text("⚠️ **Usage:** `/breakeven <ticket>`", parse_mode="Markdown")
         return
@@ -355,11 +368,11 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def spread_check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    symbol = get_gold_symbol()
+    symbol = await asyncio.to_thread(get_gold_symbol)
     if not symbol:
         await update.effective_message.reply_text("❌ MT5 Gold symbol not found.")
         return
-    tick = mt5.symbol_info_tick(symbol)
+    tick = await asyncio.to_thread(get_tick, symbol)
     if not tick:
         await update.effective_message.reply_text("❌ Unable to fetch live tick data.")
         return
@@ -378,6 +391,8 @@ async def spread_check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual, standalone reference calculator — independent of the bot's own
+    fixed-lot auto-trade sizing (see /trade)."""
     try:
         args = context.args
         if len(args) < 3:
@@ -389,21 +404,22 @@ async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Stop loss pips must be greater than 0.", parse_mode="Markdown")
             return
 
-        symbol = get_gold_symbol() or "XAUUSD"
+        symbol = await asyncio.to_thread(get_gold_symbol) or "XAUUSD"
         
         # Convert pips to absolute price distance (Assuming XAUUSD 1 pip = 0.1 price move)
         # Adjust the multiplier if your broker formats gold points differently
         sl_dist = sl_pips * 0.1 
         
-        # Route through the exact same calculator used by live signals
-        pos = calculate_position_size(symbol, sl_dist, risk_pct)
+        pos = await asyncio.to_thread(calculate_position_size, symbol, sl_dist, risk_pct)
 
         reply = (
-            f"🧮 **POSITION RISK CALCULATOR ({symbol})**\n\n"
+            f"🧮 **POSITION RISK CALCULATOR ({symbol})** — *manual reference only*\n\n"
             f"• **Account Balance:** `${pos['balance']:,.2f}`\n"
             f"• **Risk Target ({risk_pct}%):** `${pos['risk_usd']:,.2f}`\n"
             f"• **Stop Loss Distance:** `{sl_pips} pips`\n\n"
-            f"🎯 **Recommended Lot Size:** `{pos['lots']}` Lots"
+            f"🎯 **Risk-Based Lot Size:** `{pos['lots']}` Lots\n\n"
+            f"ℹ️ *The bot's own auto-trade execution uses a fixed `{ALERT_STATE.get('fixed_lot_size')}` "
+            f"lots/leg regardless of this calculation — see `/trade`.*"
         )
         await update.message.reply_text(reply, parse_mode="Markdown")
     except ValueError:
@@ -414,11 +430,11 @@ async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /gold command and menu button callbacks."""
-    symbol = get_gold_symbol() or "XAUUSD"
-    
+    symbol = await asyncio.to_thread(get_gold_symbol) or "XAUUSD"
+
     # update.effective_message handles both slash commands and callback buttons safely
     await update.effective_message.reply_chat_action("upload_photo")
-    analysis = analyze_market(symbol)
+    analysis = await asyncio.to_thread(analyze_market, symbol)
 
     if not analysis:
         await update.effective_message.reply_text("❌ Failed to fetch MT5 market data for Gold.")
@@ -439,11 +455,13 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **Macro Bias:** {'🟢 Bullish' if analysis['macro_bullish'] else '🔴 Bearish'}"
     )
 
-    chart_buf = generate_chart_snapshot(
-        df=analysis["df_entry"],
-        title=f"XAUUSD Real-Time Chart ({tf_lbl})",
-        near_zone=analysis.get("near_zone"),
-        macro_fvg=analysis.get("macro_fvg")
+    chart_buf = await asyncio.to_thread(
+        generate_chart_snapshot,
+        analysis["df_entry"],
+        f"XAUUSD Real-Time Chart ({tf_lbl})",
+        60,
+        analysis.get("near_zone"),
+        analysis.get("macro_fvg"),
     )
 
     if chart_buf:
@@ -485,7 +503,6 @@ async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Dynamically updates bot settings in ALERT_STATE."""
     if not context.args or len(context.args) < 2:
-        # Show all current configurations if no arguments are provided
         news_status = "ON 🟢" if ALERT_STATE.get("news_blockade_enabled", True) else "OFF 🔴"
         impacts_str = ",".join(ALERT_STATE.get("news_blockade_impacts", ["high"]))
 
@@ -495,11 +512,17 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• **Sell RSI (`sell_rsi`):** `{ALERT_STATE.get('rsi_sell_threshold', 70)}`\n"
             f"• **Min Score (`score`):** `{ALERT_STATE.get('min_confluence_score', 50)}/100`\n"
             f"• **Min RRR (`rrr`):** `1:{ALERT_STATE.get('min_rrr', 1.3)}`\n"
-            f"• **Risk % (`risk`):** `{ALERT_STATE.get('risk_percent', 1.0)}%`\n"
             f"• **SL ATR Mult (`sl_mult`):** `{ALERT_STATE.get('sl_atr_mult', 1.5)}x`\n"
             f"• **TP1 ATR Mult (`tp1_mult`):** `{ALERT_STATE.get('tp1_atr_mult', 1.0)}x`\n"
             f"• **TP2 ATR Mult (`tp2_mult`):** `{ALERT_STATE.get('tp2_atr_mult', 2.0)}x`\n"
             f"• **Max Spread (`spread`):** `{ALERT_STATE.get('max_allowed_spread_pips', 30)} pips`\n\n"
+
+            "🤖 **Trade Execution (see `/trade` for full detail):**\n"
+            f"• **Fixed Lot/Leg (`lot`):** `{ALERT_STATE.get('fixed_lot_size', 0.01)}`\n"
+            f"• **Dual-Entry Score (`dual_score`):** `{ALERT_STATE.get('dual_entry_score_threshold', 50)}`\n"
+            f"• **Manual Calc Risk % (`risk`):** `{ALERT_STATE.get('risk_percent', 1.0)}%` *(reference only, see `/calc`)*\n"
+            f"• **Magic (`magic`)**, **Slippage (`slippage`)**, **Max Positions (`max_positions`)**, "
+            f"**Max Trades/Day (`max_trades`)**, **Entry Drift (`drift`)**, **Flatten on CB (`flatten_cb`)**\n\n"
 
             "🚨 **Circuit Breaker Settings:**\n"
             f"• **Status (`cb_enabled`):** `{'ON 🟢' if ALERT_STATE.get('circuit_breaker_enabled', True) else 'OFF 🔴'}`\n"
@@ -514,7 +537,8 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             "**Usage:** `/set <key> <value>`\n"
             "• `/set tp1_mult 1.5`\n"
-            "• `/set news_blockade 1` *(1 = ON, 0 = OFF)*\n"
+            "• `/set lot 0.02`\n"
+            "• `/set dual_score 60`\n"
             "• `/set news_impact high,medium`"
         )
         await update.message.reply_text(reply, parse_mode="Markdown")
@@ -573,12 +597,12 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif key in ("drift", "max_drift", "max_entry_drift_pct"):
             setting_name = "max_entry_drift_pct"
             val = float(val_str)
-        elif key in ("tp1_close", "tp1_close_pct", "partial"):
-            setting_name = "tp1_close_pct"
+        elif key in ("lot", "fixed_lot", "fixed_lot_size"):
+            setting_name = "fixed_lot_size"
             val = float(val_str)
-        elif key in ("be_on_tp1", "move_sl_be"):
-            setting_name = "move_sl_to_be_on_tp1"
-            val = bool(int(val_str))
+        elif key in ("dual_score", "dual_entry_score", "dual_threshold", "dual_entry_score_threshold"):
+            setting_name = "dual_entry_score_threshold"
+            val = int(val_str)
         elif key in ("flatten_cb", "flatten_on_circuit_breaker"):
             setting_name = "flatten_on_circuit_breaker"
             val = bool(int(val_str))
@@ -647,13 +671,19 @@ async def set_strategy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"⚙️ **ACTIVE STRATEGY:** `{current.upper()}`\n\n"
             f"**Available Presets:**\n{lines}\n\n"
-            f"**Usage:** `/strategy smc_confluence` or `/strategy ema_cross`",
+            f"**Usage:** `/strategy smc_confluence` or `/strategy ema_cross`\n\n"
+            f"ℹ️ *Dual-entry (2 legs) only applies to `smc_confluence`. Every other strategy always "
+            f"trades a single TP1-only leg.*",
             parse_mode="Markdown"
         )
         return
 
     mode = args[0].lower()
     ALERT_STATE["active_strategy"] = mode
+    # BUGFIX: switching strategy left the previous strategy's dedup state
+    # (last_rsi_signal) in place, which could silently suppress the first
+    # signal on the newly selected strategy.
+    ALERT_STATE["last_rsi_signal"] = None
     save_settings()
 
     strategy_label = STRATEGY_PRESETS[mode]
@@ -695,7 +725,10 @@ async def confluence_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
         weight_lines = "\n".join(f"  • {k.replace('_', ' ').title()}: `{v} pts`" for k, v in CONFLUENCE_WEIGHTS.items())
-        await update.message.reply_text(f"🎯 **CONFLUENCE SCORING**\n\nMinimum score: `{ALERT_STATE['min_confluence_score']}/100`\n\n{weight_lines}\n\n**Usage:** `/confluence <0-100>`", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"🎯 **CONFLUENCE SCORING**\n\nMinimum score to fire: `{ALERT_STATE['min_confluence_score']}/100`\n"
+            f"Dual-entry (2 legs) threshold: `{ALERT_STATE.get('dual_entry_score_threshold', 50)}/100`\n\n"
+            f"{weight_lines}\n\n**Usage:** `/confluence <0-100>`", parse_mode="Markdown")
         return
     try:
         val = int(args[0])
@@ -746,7 +779,7 @@ async def heartbeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     sub = args[0].lower()
     if sub == "test":
-        snapshot = build_status_snapshot()
+        snapshot = await build_status_snapshot()
         await update.message.reply_text(f"💓 **TEST HEARTBEAT**\n\n{snapshot}", parse_mode="Markdown")
     elif sub == "on":
         ALERT_STATE["heartbeat_enabled"] = True
@@ -755,6 +788,7 @@ async def heartbeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Heartbeat **ON**", parse_mode="Markdown")
     elif sub == "off":
         ALERT_STATE["heartbeat_enabled"] = False
+        restart_heartbeat_job(context.job_queue, chat_id)
         save_settings()
         await update.message.reply_text("🔴 Heartbeat **OFF**", parse_mode="Markdown")
     else:
@@ -762,29 +796,31 @@ async def heartbeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    snapshot = build_status_snapshot()
+    snapshot = await build_status_snapshot()
     await update.message.reply_text(f"🩺 **BOT STATUS CHECK**\n\n{snapshot}", parse_mode="Markdown")
 
 @admin_only
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     counts = get_signal_stats()
     pending = counts.get('PENDING', 0)
-    tp1 = counts.get('HIT_TP1', 0)
-    tp2 = counts.get('HIT_TP2', 0)
-    be = counts.get('CLOSED_BE', 0)
+    running = counts.get('HIT_TP1', 0)          # dual-entry: leg1 won, leg2 still running
+    closed_tp1 = counts.get('CLOSED_TP1', 0)    # single-entry: full win at TP1
+    tp2 = counts.get('HIT_TP2', 0)              # dual-entry: leg2 won
+    be = counts.get('CLOSED_BE', 0)             # dual-entry: leg2 stopped at BE
     sl = counts.get('HIT_SL', 0)
 
-    # Any trade reaching TP1, TP2, or closing at Break-Even is a win
-    wins = tp1 + tp2 + be
+    # HIT_TP1 is a still-open runner (dual-entry leg2 pending) — NOT a closed win.
+    wins = closed_tp1 + tp2 + be
     total_closed = wins + sl
     win_rate = round((wins / total_closed * 100), 1) if total_closed > 0 else 0.0
 
     reply = (
         f"📊 **FORWARD-TESTING PERFORMANCE STATS**\n\n"
-        f"• **Total Signals:** `{sum(counts.values())}` | **Pending:** `{pending}`\n"
-        f"• **TP1 Active Runners:** `{tp1}` 🎯\n"
-        f"• **TP2 Hits:** `{tp2}` 🚀\n"
-        f"• **Break-Even Closes:** `{be}` 🔒\n"
+        f"• **Total Signals:** `{sum(counts.values())}` | **Pending Entry:** `{pending}`\n"
+        f"• **Dual-Entry Runners (leg2 in flight):** `{running}` 🎯 *(open — not counted below)*\n"
+        f"• **Single-Entry TP1 Wins:** `{closed_tp1}` 🎯\n"
+        f"• **TP2 Hits (leg2):** `{tp2}` 🚀\n"
+        f"• **Break-Even Closes (leg2):** `{be}` 🔒\n"
         f"• **Stop Loss Hits:** `{sl}` 🛡️\n\n"
         f"📈 **Win Rate:** `{win_rate}%` (`{wins}/{total_closed}` closed trades)"
     )
@@ -792,11 +828,17 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def diagnose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    symbol = get_gold_symbol()
-    analysis = analyze_market(symbol) if symbol else None
+    symbol = await asyncio.to_thread(get_gold_symbol)
+    analysis = await asyncio.to_thread(analyze_market, symbol) if symbol else None
     if not analysis:
         await update.message.reply_text("❌ Diagnostic failed: Unable to fetch MT5 market analysis.")
         return
+
+    # BUGFIX: this used to hardcode "5M EMA / 15M EMA / 1H EMA" regardless of the
+    # actually active timeframe mode.
+    entry_lbl = TF_LABELS.get(ALERT_STATE["entry_tf"], "Entry")
+    trend_lbl = TF_LABELS.get(ALERT_STATE["trend_tf"], "Trend")
+    macro_lbl = TF_LABELS.get(ALERT_STATE["macro_tf"], "Macro")
 
     ob = analysis.get("order_block", {})
     ob_status = "None"
@@ -809,9 +851,9 @@ async def diagnose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔍 **LIVE TRIGGER DIAGNOSTIC**\n\n"
         f"📍 **Price:** `${analysis['close_price']}` | **14-ATR:** `${analysis['atr_val']}`\n"
         f"📈 **RSI:** `{analysis['rsi_val']}` (Buy <= `{ALERT_STATE['rsi_buy_threshold']}`, Sell >= `{ALERT_STATE['rsi_sell_threshold']}`)\n\n"
-        f"• **5M EMA:** {'🟢 Bull' if analysis['entry_bullish'] else '🔴 Bear'}\n"
-        f"• **15M EMA:** {'🟢 Bull' if analysis['trend_bullish'] else '🔴 Bear'}\n"
-        f"• **1H EMA:** {'🟢 Bull' if analysis['macro_bullish'] else '🔴 Bear'}\n\n"
+        f"• **{entry_lbl} EMA:** {'🟢 Bull' if analysis['entry_bullish'] else '🔴 Bear'}\n"
+        f"• **{trend_lbl} EMA:** {'🟢 Bull' if analysis['trend_bullish'] else '🔴 Bear'}\n"
+        f"• **{macro_lbl} EMA:** {'🟢 Bull' if analysis['macro_bullish'] else '🔴 Bear'}\n\n"
         f"💧 **Liquidity Sweep:** Bullish={analysis['sweeps']['bullish_sweep']}, Bearish={analysis['sweeps']['bearish_sweep']}\n"
         f"⚡ **Fair Value Gap:** Bullish={analysis['fvg']['bullish_fvg']}, Bearish={analysis['fvg']['bearish_fvg']}\n"
         f"🧱 **Order Block:** {ob_status}\n"
@@ -839,7 +881,7 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     days = max(1, min(days, 180))
 
-    symbol = get_gold_symbol()
+    symbol = await asyncio.to_thread(get_gold_symbol)
     if not symbol:
         await update.message.reply_text("❌ MT5 Gold symbol not found.")
         return
@@ -905,7 +947,8 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **Avg R / Trade:** `{result['avg_r']}R` | **Net R:** `{result['net_r']}R`\n"
         f"• **Max Drawdown:** `{result['max_drawdown_r']}R`\n\n"
         f"📊 **Top Confluence Factors:**\n{factor_lines}\n\n"
-        f"⚠️ *Simulated on historical bars with a synthetic spread — real fills, slippage, and news gaps will vary.*"
+        f"⚠️ *Simulated on historical bars with a synthetic spread and single fixed-size position — "
+        f"the live bot's dual-entry sizing isn't modeled here. Real fills, slippage, and news gaps will vary.*"
     )
 
     chart_buf = generate_equity_chart(result["equity_curve"], title=f"XAUUSD Backtest Equity — {result['mode'].upper()} ({result['days']}d)")
@@ -961,7 +1004,7 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    symbol = get_gold_symbol()
+    symbol = await asyncio.to_thread(get_gold_symbol)
     if not symbol:
         await update.message.reply_text("❌ MT5 Gold symbol not found.")
         return
@@ -991,7 +1034,6 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 2. Throttled Progress Callback (Prevents Telegram API Rate-Limit Errors)
     def progress_callback(pct):
         now = time.time()
-        # Only issue API edit if pct changed AND at least 1.5s passed (or completed at 100%)
         if pct != last_pct[0] and (now - last_edit_time[0] >= 1.5 or pct == 100):
             last_edit_time[0] = now
             last_pct[0] = pct
@@ -1061,19 +1103,36 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines.append("📌 **Fixed Baselines:** " + " | ".join(baselines))
     lines.append(f"⚙️ **Hard Gates:** Structure: {struct_gate} | Vol/ATR: {vol_gate}\n")
-    lines.append(
-        "\n⚠️ *Backtested on historical bars with synthetic spread. Sweeping multiple dimensions increases overfit risk — validate on out-of-sample data before live deployment.*"
+
+    # BUGFIX: the sweep used to compute valid_sorted/describe() and then never
+    # actually append the results to `lines` — the command ran a full sweep and
+    # reported nothing.
+    lines.append("🏆 **Top Results (by Net R):**")
+    for i, g in enumerate(valid_sorted[:10], 1):
+        lines.append(
+            f"`{i}.` {describe(g)}\n"
+            f"    → Net `{g['net_r']}R` | WR `{g['win_rate']}%` "
+            f"({g['wins']}W/{g['losses']}L) | Avg `{g['avg_r']}R` | DD `{g['max_drawdown_r']}R`"
+        )
+
+    disclaimer = (
+        "\n⚠️ *Backtested on historical bars with synthetic spread. Sweeping multiple dimensions "
+        "increases overfit risk — validate on out-of-sample data before live deployment.*"
     )
 
-    # 3. Line-by-Line Safe Character Truncation
+    # 3. Line-by-Line Safe Character Truncation (reserve room for the disclaimer,
+    # which used to be appended BEFORE truncation and so was often the first
+    # thing cut off).
+    budget = 3800 - len(disclaimer) - 40
     final_lines = []
     current_len = 0
     for line in lines:
-        if current_len + len(line) + 1 > 3800:
+        if current_len + len(line) + 1 > budget:
             final_lines.append("\n... *(results truncated for length)*")
             break
         final_lines.append(line)
         current_len += len(line) + 1
+    final_lines.append(disclaimer)
 
     await update.message.reply_text("\n".join(final_lines), parse_mode="Markdown")
 
@@ -1095,26 +1154,23 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "btn_stats":
         await stats_cmd(update, context)
     elif data == "btn_strat_menu":
-        keyboard = [
-            [InlineKeyboardButton("SMC Confluence", callback_data="set_strat_smc_confluence")],
-            [InlineKeyboardButton("EMA Cross", callback_data="set_strat_ema_cross")],
-            [InlineKeyboardButton("RSI Reversion", callback_data="set_strat_rsi_reversion")],
-            [InlineKeyboardButton("MTF FVG Sweep", callback_data="set_strat_htf_fvg_sweep")],
-            [InlineKeyboardButton("« Back to Menu", callback_data="btn_main_menu")],
-        ]
+        # BUGFIX: this used to be a hardcoded 4-item list that omitted
+        # smc_displacement and could drift from STRATEGY_PRESETS. Build it live.
+        keyboard = [[InlineKeyboardButton(v, callback_data=f"set_strat_{k}")] for k, v in STRATEGY_PRESETS.items()]
+        keyboard.append([InlineKeyboardButton("« Back to Menu", callback_data="btn_main_menu")])
         await query.edit_message_text("⚙️ **Select Active Strategy:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     elif data.startswith("set_strat_"):
         new_strat = data.replace("set_strat_", "")
         ALERT_STATE["active_strategy"] = new_strat
+        ALERT_STATE["last_rsi_signal"] = None
         save_settings()
         await menu_cmd(update, context)
     elif data == "btn_tf_menu":
-        keyboard = [
-            [InlineKeyboardButton("Scalp (1M / 5M / 15M)", callback_data="set_tf_scalp")],
-            [InlineKeyboardButton("Intraday (5M / 15M / 1H)", callback_data="set_tf_intraday")],
-            [InlineKeyboardButton("Swing (15M / 1H / 4H)", callback_data="set_tf_swing")],
-            [InlineKeyboardButton("« Back to Menu", callback_data="btn_main_menu")],
-        ]
+        # BUGFIX: these labels were hardcoded and did not match TIMEFRAME_PRESETS
+        # (e.g. "Scalp (1M/5M/15M)" vs the real 5M/15M/1H preset). Build from the
+        # actual preset labels so they can never drift apart again.
+        keyboard = [[InlineKeyboardButton(v["label"], callback_data=f"set_tf_{k}")] for k, v in TIMEFRAME_PRESETS.items()]
+        keyboard.append([InlineKeyboardButton("« Back to Menu", callback_data="btn_main_menu")])
         await query.edit_message_text("🕒 **Select Timeframe Preset:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     elif data.startswith("set_tf_"):
         mode = data.replace("set_tf_", "")

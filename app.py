@@ -1,6 +1,5 @@
 import logging
 from telegram import BotCommand
-from telegram.error import NetworkError, TimedOut, TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from config import ALERT_STATE, TELEGRAM_TOKEN, USER_ID, save_settings
 from database import init_db
@@ -14,16 +13,8 @@ from bot.jobs import (
 )
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Logs uncaught exceptions while handling routine network drops gracefully."""
-    err = context.error
-    
-    # Catch routine connection resets and timeout glitches
-    if isinstance(err, (NetworkError, TimedOut)) or "RemoteProtocolError" in str(err):
-        logging.warning(f"🌐 Transient network glitch (polling will auto-recover): {err}")
-        return
-
-    # Log genuine software bugs and uncaught exceptions
-    logging.error("Exception occurred while handling an update:", exc_info=err)
+    """Logs uncaught exceptions raised by command handlers."""
+    logging.error("Exception occurred while handling an update:", exc_info=context.error)
 
 async def post_init_setup(application: Application) -> None:
     """Registers bot command auto-completion hints in the Telegram UI."""
@@ -41,7 +32,7 @@ async def post_init_setup(application: Application) -> None:
         BotCommand("spread", "🔍 Check Spread & Guard Status"),
         BotCommand("news", "🗓️ High-Impact USD Calendar"),
         BotCommand("session", "🕒 Market Session Clock"),
-        BotCommand("calc", "🧮 Position Risk Calculator"),
+        BotCommand("calc", "🧮 Manual Position Size Reference"),
         BotCommand("strategy", "⚙️ Switch Active Trading Strategy"),
         BotCommand("timeframe", "🕒 Change Analysis Timeframe Mode"),
         BotCommand("set", "🔧 View/Adjust Dynamic Parameters"),
@@ -60,6 +51,12 @@ def main():
     if not TELEGRAM_TOKEN:
         print("❌ TELEGRAM_TOKEN missing in environment.")
         return
+    # BUGFIX: admin_only did `int(USER_ID)` with no guard, so every single
+    # command crashed if this was unset. Refuse to start instead of letting
+    # that surface at the first /start.
+    if not USER_ID:
+        print("❌ TELEGRAM_USER_ID missing in environment — required for admin authorization and background jobs.")
+        return
 
     init_db()
     if ALERT_STATE.get("auto_trade_enabled") and not ALERT_STATE.get("trade_dry_run", True):
@@ -72,9 +69,9 @@ def main():
         Application.builder()
         .token(TELEGRAM_TOKEN)
         .connect_timeout(30.0)
-        .read_timeout(45.0)
+        .read_timeout(30.0)
         .write_timeout(30.0)
-        .pool_timeout(45.0)
+        .pool_timeout(30.0)
         .build()
     )
     app.post_init = post_init_setup
@@ -122,11 +119,16 @@ def main():
     # Auto-start Background Jobs
     if USER_ID:
         boot_id = int(USER_ID)
+        # BUGFIX: this job used to have no `name=`, so /scanner_off and the
+        # circuit breaker (which both remove jobs by name "xauusd_scanner")
+        # could never actually stop it — and /scanner_on would then add a
+        # SECOND scanner job, causing every tick to run (and fire signals) twice.
         app.job_queue.run_repeating(
-            market_scanner_job, 
-            interval=60, 
-            first=5, 
-            chat_id=boot_id, 
+            market_scanner_job,
+            interval=60,
+            first=5,
+            chat_id=boot_id,
+            name="xauusd_scanner",
             job_kwargs={"misfire_grace_time": 30}
         )
         app.job_queue.run_repeating(

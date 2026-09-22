@@ -3,14 +3,30 @@
 Live MT5 order execution for Trading Butler.
 
 Boundaries:
-  * mt5_engine.py  -> terminal connectivity + sizing maths
+  * mt5_engine.py  -> terminal connectivity + broker helpers
   * trade_engine.py -> order_send / modify / close, position management
   * strategy/       -> decides WHAT to trade (never sends orders itself)
-  * bot/jobs.py     -> drains execution intents off the event loop
+  * bot/jobs.py     -> drains execution intents and manages leg outcomes off the event loop
 
 Every function here is BLOCKING and must be called via asyncio.to_thread()
 from async code. All MT5 access goes through MT5_LOCK (the MT5 module is not
 thread-safe and will hang silently on concurrent calls).
+
+=== Two-leg execution model ===
+Every executed signal gets a "leg 1" position: fixed lot size, broker TP = TP1,
+broker SL = the signal's SL. It always runs to a full close at either TP1 or SL
+— there is no partial close on this leg.
+
+A signal whose strategy is smc_confluence AND whose confluence score is >=
+ALERT_STATE["dual_entry_score_threshold"] ALSO gets a "leg 2" position: same
+fixed lot size, broker TP = TP2, broker SL = the same original SL. The moment
+leg 1 closes profitably at TP1, leg 2's SL is trailed to break-even so it can
+only resolve at break-even or TP2. If leg 1 instead gets stopped at SL, leg 2
+(which shares the same SL) is force-closed immediately rather than left to
+possibly resolve inconsistently.
+
+All strategies other than smc_confluence, and any smc_confluence signal below
+the dual-entry threshold, get leg 1 only (single position, TP1-only, no runner).
 """
 
 import math
@@ -22,7 +38,7 @@ import MetaTrader5 as mt5
 
 from config import ALERT_STATE
 from database import attach_trade_execution, count_live_trades_today
-from mt5_engine import MT5_LOCK, init_mt5, calculate_position_size
+from mt5_engine import MT5_LOCK, init_mt5, get_tick
 
 MAX_SEND_RETRIES = 3
 
@@ -58,16 +74,19 @@ def _rc_text(rc):
 def _magic():
     return int(ALERT_STATE.get("magic_number", 770077))
 
-def _comment():
-    return str(ALERT_STATE.get("trade_comment", "TradingButler"))[:31]
+def _comment(tag=None):
+    return str(tag or ALERT_STATE.get("trade_comment", "TradingButler"))[:31]
 
 def _deviation():
     return int(ALERT_STATE.get("max_slippage_points", 30))
 
+def _fixed_lot():
+    return float(ALERT_STATE.get("fixed_lot_size", 0.01))
+
 
 # ---------------------------------------------------------------- intents
 
-def request_execution(signal_id, symbol, direction, entry, sl_price, tp1_price, tp2_price, score):
+def request_execution(signal_id, symbol, direction, entry, sl_price, tp1_price, tp2_price, score, dual_entry=False):
     """Called by the strategy layer. Queues an intent; never touches MT5 itself."""
     if not ALERT_STATE.get("auto_trade_enabled", False):
         return False
@@ -76,7 +95,8 @@ def request_execution(signal_id, symbol, direction, entry, sl_price, tp1_price, 
             "signal_id": signal_id, "symbol": symbol, "direction": direction,
             "entry": float(entry), "sl": float(sl_price),
             "tp1": float(tp1_price), "tp2": float(tp2_price),
-            "score": score, "queued_at": datetime.now(timezone.utc),
+            "score": score, "dual_entry": bool(dual_entry),
+            "queued_at": datetime.now(timezone.utc),
         })
     return True
 
@@ -98,7 +118,7 @@ def position_by_ticket(ticket):
         positions = mt5.positions_get(ticket=int(ticket))
     return positions[0] if positions else None
 
-def _preflight(symbol):
+def _preflight(symbol, bypass_position_cap=False):
     if not init_mt5():
         return False, "MT5 terminal unreachable."
     with MT5_LOCK:
@@ -115,10 +135,14 @@ def _preflight(symbol):
         return False, f"Symbol `{symbol}` not found on this server."
     if info.trade_mode != mt5.SYMBOL_TRADE_MODE_FULL:
         return False, f"`{symbol}` is not open for full trading (trade_mode={info.trade_mode})."
-    open_n = len(list_managed_positions(symbol))
-    cap = int(ALERT_STATE.get("max_open_positions", 1))
-    if open_n >= cap:
-        return False, f"Already holding {open_n} managed position(s) — cap is {cap}."
+    # bypass_position_cap: the 2nd leg of a dual-entry signal is part of the SAME
+    # trade idea as the 1st leg, not a new one — the cap is meant to stop
+    # unrelated signals stacking up, not to block a signal's own paired leg.
+    if not bypass_position_cap:
+        open_n = len(list_managed_positions(symbol))
+        cap = int(ALERT_STATE.get("max_open_positions", 2))
+        if open_n >= cap:
+            return False, f"Already holding {open_n} managed position(s) — cap is {cap}."
     day_n = count_live_trades_today()
     day_cap = int(ALERT_STATE.get("max_daily_trades", 5))
     if not ALERT_STATE.get("trade_dry_run", True) and day_n >= day_cap:
@@ -148,23 +172,18 @@ def _adjust_levels(info, direction, price, sl, tp):
     point = info.point or 0.01
     digits = info.digits
     min_dist = max(int(getattr(info, "trade_stops_level", 0) or 0), 0) * point
-
     if direction == "BUY":
-        # Only adjust if SL/TP are positive numeric values
-        if sl is not None and sl > 0 and (price - sl) < min_dist:
+        if sl is not None and (price - sl) < min_dist:
             sl = price - min_dist
-        if tp is not None and tp > 0 and (tp - price) < min_dist:
+        if tp is not None and (tp - price) < min_dist:
             tp = price + min_dist
-    else:  # SELL
-        if sl is not None and sl > 0 and (sl - price) < min_dist:
+    else:
+        if sl is not None and (sl - price) < min_dist:
             sl = price + min_dist
-        if tp is not None and tp > 0 and (price - tp) < min_dist:
+        if tp is not None and (price - tp) < min_dist:
             tp = price - min_dist
-
-    return (
-        round(sl, digits) if sl is not None and sl > 0 else (0.0 if sl == 0.0 else None),
-        round(tp, digits) if tp is not None and tp > 0 else (0.0 if tp == 0.0 else None)
-    )
+    return (round(sl, digits) if sl is not None else None,
+            round(tp, digits) if tp is not None else None)
 
 def _snap_volume(info, volume):
     step = info.volume_step or 0.01
@@ -174,9 +193,9 @@ def _snap_volume(info, volume):
 
 # ---------------------------------------------------------------- open
 
-def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None):
+def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypass_position_cap=False):
     dry = ALERT_STATE.get("trade_dry_run", True) if dry_run is None else dry_run
-    ok, reason = _preflight(symbol)
+    ok, reason = _preflight(symbol, bypass_position_cap=bypass_position_cap)
     if not ok:
         return {"ok": False, "dry_run": dry, "ticket": None, "reason": reason}
 
@@ -196,8 +215,7 @@ def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None):
     last_reason = "Order was never sent."
 
     for attempt in range(1, MAX_SEND_RETRIES + 1):
-        with MT5_LOCK:
-            tick = mt5.symbol_info_tick(symbol)
+        tick = get_tick(symbol)
         if tick is None:
             return {"ok": False, "dry_run": dry, "ticket": None, "reason": "No live tick for pricing."}
 
@@ -214,7 +232,7 @@ def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None):
             "tp": float(adj_tp) if adj_tp is not None else 0.0,
             "deviation": _deviation(),
             "magic": _magic(),
-            "comment": (tag or _comment())[:31],
+            "comment": _comment(tag),
             "type_time": mt5.ORDER_TIME_GTC,
         }
 
@@ -240,8 +258,19 @@ def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None):
 
             if result.retcode == mt5.TRADE_RETCODE_DONE:
                 _FILLING_CACHE[symbol] = filling
-                return {"ok": True, "dry_run": False, "ticket": int(result.order),
-                        "position": int(getattr(result, "deal", 0)),
+                ticket = int(result.order)
+                # BUGFIX: result.order is not reliably the POSITION ticket (e.g. on
+                # a netting account adding to an existing position). Resolve the
+                # real position id from the fill's own deal record so every
+                # downstream lookup (position_by_ticket, reconcile_exit, close)
+                # targets the right position.
+                deal_id = int(getattr(result, "deal", 0) or 0)
+                if deal_id:
+                    with MT5_LOCK:
+                        deals = mt5.history_deals_get(ticket=deal_id)
+                    if deals:
+                        ticket = int(deals[0].position_id)
+                return {"ok": True, "dry_run": False, "ticket": ticket,
                         "price": float(result.price or price), "lots": float(result.volume or lots),
                         "sl": adj_sl, "tp": adj_tp, "retcode": result.retcode,
                         "reason": "Filled."}
@@ -277,7 +306,7 @@ def modify_position_sltp(ticket, sl=None, tp=None):
 
     with MT5_LOCK:
         info = mt5.symbol_info(pos.symbol)
-        tick = mt5.symbol_info_tick(pos.symbol)
+    tick = get_tick(pos.symbol)
     if info is None or tick is None:
         return {"ok": False, "reason": "Symbol data unavailable."}
 
@@ -332,8 +361,7 @@ def close_position(ticket, lots=None):
     last_reason = "Close was never sent."
 
     for _ in range(MAX_SEND_RETRIES):
-        with MT5_LOCK:
-            tick = mt5.symbol_info_tick(pos.symbol)
+        tick = get_tick(pos.symbol)
         if tick is None:
             return {"ok": False, "reason": "No live tick for closing price."}
         price = tick.bid if is_buy else tick.ask
@@ -379,39 +407,43 @@ def close_all_managed(symbol=None):
     return out or ["No managed positions open."]
 
 
-# ---------------------------------------------------------------- TP1 management
+# ---------------------------------------------------------------- leg management
 
-def handle_tp1(ticket, entry_price):
-    """Banks part of the position at TP1 and trails SL to break-even."""
+def trail_leg_to_breakeven(ticket, entry_price):
+    """Moves a still-open leg's SL to its entry price (used on the TP2 runner
+    once the TP1 leg has won)."""
     pos = position_by_ticket(ticket)
     if pos is None:
-        return "Position already closed by the broker — nothing to manage."
+        return "Leg already closed by the broker — nothing to trail."
+    res = modify_position_sltp(ticket, sl=float(entry_price), tp=pos.tp or None)
+    return f"SL → BE: {'✅' if res['ok'] else '⚠️'} {res['reason']}"
 
-    lines = []
-    pct = float(ALERT_STATE.get("tp1_close_pct", 50.0) or 0)
-    if pct > 0:
-        target = pos.volume * (pct / 100.0)
-        res = close_position(ticket, target)
-        lines.append(f"Partial ({pct:.0f}%): {'✅' if res['ok'] else '⚠️'} {res['reason']}")
-
-    if ALERT_STATE.get("move_sl_to_be_on_tp1", True):
-        still = position_by_ticket(ticket)
-        if still is not None:
-            res = modify_position_sltp(ticket, sl=float(entry_price), tp=still.tp or None)
-            lines.append(f"SL → BE: {'✅' if res['ok'] else '⚠️'} {res['reason']}")
-        else:
-            lines.append("SL → BE: position fully closed by the partial.")
-
-    return "\n".join(lines)
+def force_close_leg(ticket, reason_label="invalidated"):
+    """Closes a leg immediately at market — used when its sibling leg just hit
+    SL, so the whole trade idea is invalidated and the runner shouldn't be left
+    dangling on its own."""
+    pos = position_by_ticket(ticket)
+    if pos is None:
+        return f"Leg already closed — nothing to do ({reason_label})."
+    res = close_position(ticket)
+    return f"Force-close ({reason_label}): {'✅' if res['ok'] else '⚠️'} {res['reason']}"
 
 
 # ---------------------------------------------------------------- reconciliation
 
-def reconcile_ticket(ticket, db_status):
+def reconcile_exit(ticket, candidates):
     """
-    If a broker-side SL/TP fired between polls, derive the real outcome from deal
-    history instead of waiting for the price-based tracker to guess.
-    Returns a new status string, or None if the position is still open.
+    If `ticket`'s position is closed, classify the outcome by which known price
+    level (candidates: {label: price}) the FINAL exit deal landed closest to.
+
+    BUGFIX (vs. an earlier profit-sum approach): summing profit across every
+    deal on a ticket misclassifies a leg whenever more than one exit deal exists
+    on it (e.g. a broker-side partial fill quirk). Comparing the *last* exit
+    deal's actual price against the known SL/TP/BE levels is robust regardless
+    of how many deals make up the position's history.
+
+    Returns the matching label, or None if the position is still open or no
+    deal history is available yet.
     """
     if position_by_ticket(ticket) is not None:
         return None
@@ -431,13 +463,16 @@ def reconcile_ticket(ticket, db_status):
     if not deals:
         return None
 
-    profit = sum(float(d.profit) + float(d.swap) + float(d.commission)
-                 for d in deals if d.entry == mt5.DEAL_ENTRY_OUT)
-    if profit > 0:
-        return "HIT_TP2"                       # broker TP sits at TP2
-    if db_status == "HIT_TP1" and profit <= 0:
-        return "CLOSED_BE"                     # runner came back through break-even
-    return "HIT_SL"
+    out_deals = [d for d in deals if d.entry == mt5.DEAL_ENTRY_OUT]
+    if not out_deals:
+        return None
+    last_deal = max(out_deals, key=lambda d: d.time)
+    exit_price = float(last_deal.price)
+
+    scored = {k: v for k, v in candidates.items() if v is not None}
+    if not scored:
+        return None
+    return min(scored, key=lambda k: abs(exit_price - scored[k]))
 
 
 # ---------------------------------------------------------------- intent drain
@@ -451,16 +486,17 @@ def execute_pending_intents():
         return []
 
     reports = []
+    fixed_lot = _fixed_lot()
+
     for intent in batch:
-        symbol, direction = intent["symbol"], intent["direction"]
+        symbol, direction, dual = intent["symbol"], intent["direction"], intent["dual_entry"]
         sl_dist = abs(intent["entry"] - intent["sl"])
         if sl_dist <= 0:
             reports.append(f"❌ **Execution skipped** — zero SL distance on {direction} {symbol}.")
             continue
 
         # Abort if the market ran away from the signal price while we were queueing.
-        with MT5_LOCK:
-            tick = mt5.symbol_info_tick(symbol)
+        tick = get_tick(symbol)
         if tick is not None:
             live = tick.ask if direction == "BUY" else tick.bid
             drift_pct = abs(live - intent["entry"]) / sl_dist * 100.0
@@ -473,29 +509,33 @@ def execute_pending_intents():
                 )
                 continue
 
-        risk_pct = float(ALERT_STATE.get("risk_percent", 1.0))
-        sizing = calculate_position_size(symbol, sl_dist, risk_pct)
-        res = open_position(symbol, direction, sizing["lots"], intent["sl"], intent["tp2"])
+        legs = [(1, "TP1", intent["tp1"], False)]
+        if dual:
+            legs.append((2, "TP2", intent["tp2"], True))  # leg 2 bypasses the open-position cap
 
-        if res["ok"] and res.get("dry_run"):
-            attach_trade_execution(intent["signal_id"], None, sizing["lots"], "DRY", res.get("price"))
-            reports.append(
-                f"🧪 **DRY-RUN — order NOT sent**\n"
-                f"• `{direction} {symbol}` `{sizing['lots']}` lots @ ~`${res['price']:.2f}`\n"
-                f"• SL `${res['sl']}` | TP `${res['tp']}` (TP2) | Risk `${sizing['risk_usd']}`\n"
-                f"• *Flip with* `/trade live CONFIRM` *once this looks right.*"
-            )
-        elif res["ok"]:
-            attach_trade_execution(intent["signal_id"], res["ticket"], res["lots"], "LIVE", res.get("price"))
-            reports.append(
-                f"✅ **LIVE ORDER FILLED** — `#{res['ticket']}`\n"
-                f"• `{direction} {symbol}` `{res['lots']}` lots @ `${res['price']:.2f}`\n"
-                f"• SL `${res['sl']}` | TP `${res['tp']}` (TP2)\n"
-                f"• Risk `${sizing['risk_usd']}` of `${sizing['balance']}` "
-                f"({risk_pct}%) | TP1 banks `{ALERT_STATE.get('tp1_close_pct')}%`"
-            )
-        else:
-            attach_trade_execution(intent["signal_id"], None, sizing["lots"], "NONE", None)
-            reports.append(f"❌ **Execution failed** — `{direction} {symbol}`\n• {res['reason']}")
+        leg_lines = []
+        for leg_no, label, tp_price, bypass_cap in legs:
+            res = open_position(symbol, direction, fixed_lot, intent["sl"], tp_price,
+                                 tag=f"TB-{label}", bypass_position_cap=bypass_cap)
+
+            if res["ok"] and res.get("dry_run"):
+                attach_trade_execution(intent["signal_id"], leg_no, None, fixed_lot, "DRY", res.get("price"))
+                leg_lines.append(
+                    f"🧪 Leg {leg_no} ({label}) DRY-RUN — `{fixed_lot}` lots @ ~`${res['price']:.2f}`, "
+                    f"SL `${res['sl']}`, TP `${res['tp']}`"
+                )
+            elif res["ok"]:
+                attach_trade_execution(intent["signal_id"], leg_no, res["ticket"], res["lots"], "LIVE", res.get("price"))
+                leg_lines.append(
+                    f"✅ Leg {leg_no} ({label}) FILLED `#{res['ticket']}` — `{res['lots']}` lots @ `${res['price']:.2f}`, "
+                    f"SL `${res['sl']}`, TP `${res['tp']}`"
+                )
+            else:
+                attach_trade_execution(intent["signal_id"], leg_no, None, fixed_lot, "NONE", None)
+                leg_lines.append(f"❌ Leg {leg_no} ({label}) failed — {res['reason']}")
+
+        mode_label = "🎯🎯 DUAL-ENTRY" if dual else "🎯 SINGLE-ENTRY (TP1-only)"
+        header = f"{mode_label} — `{direction} {symbol}` (score `{intent['score']}`)"
+        reports.append(header + "\n" + "\n".join(f"• {line}" for line in leg_lines))
 
     return reports
