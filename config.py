@@ -31,8 +31,6 @@ TF_LABELS = {
 
 STRATEGY_PRESETS = {
     "smc_confluence": "Smart Money Concepts + Multi-TF Confluence (Default)",
-    "htf_fvg_sweep": "HTF (1H) FVG Tap + LTF (5M) Sweep & Shift Model",
-    "smc_displacement": "SMC Displacement & FVG Expansion Strategy",
     "ema_cross": "Triple EMA Trend Crossover + Volatility Filter",
     "rsi_reversion": "RSI Overbought/Oversold S/R Zone Reversion",
 }

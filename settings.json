@@ -21,7 +21,7 @@
     "heartbeat_enabled": false,
     "heartbeat_interval_hours": 1,
     "auto_trade_enabled": true,
-    "trade_dry_run": false,
+    "trade_dry_run": true,
     "magic_number": 770077,
     "max_slippage_points": 30,
     "max_open_positions": 2,

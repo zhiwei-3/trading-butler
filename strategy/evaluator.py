@@ -1,3 +1,4 @@
+# strategy/evaluator.py
 import pandas_ta as ta
 from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
 from database import log_signal_to_db
@@ -90,122 +91,10 @@ def _eval_rsi_reversion(a):
 
     return signals, watches
 
-def _eval_smc_displacement(a):
-    df = a["df_entry"]
-    close_price, atr_val = a["close_price"], a["atr_val"]
-    structure, fvg, order_block = a["structure"], a["fvg"], a["order_block"]
-    near_zone = a["near_zone"]
-
-    signals, watches = [], []
-
-    last_candle = df.iloc[-1]
-    candle_body = abs(last_candle['close'] - last_candle['open'])
-    has_displacement = candle_body >= (atr_val * 1.0)
-
-    bullish_disp = (
-        has_displacement and 
-        last_candle['close'] > last_candle['open'] and 
-        (structure == "BULLISH_BOS" or fvg.get("bullish_fvg", False)) and
-        (a["trend_bullish"] or a["macro_bullish"])
-    )
-
-    bearish_disp = (
-        has_displacement and 
-        last_candle['close'] < last_candle['open'] and 
-        (structure == "BEARISH_BOS" or fvg.get("bearish_fvg", False)) and
-        ((not a["trend_bullish"]) or (not a["macro_bullish"]))
-    )
-
-    if bullish_disp and ALERT_STATE["last_rsi_signal"] != "BUY":
-        targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
-        if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.3):
-            ALERT_STATE["last_rsi_signal"] = "BUY"
-            sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
-            base_msg = (
-                f"⚡ **SMC DISPLACEMENT BUY ALERT** 🟢\n\n"
-                f"📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
-            )
-            signals.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, base_msg, score=90))
-
-    elif bearish_disp and ALERT_STATE["last_rsi_signal"] != "SELL":
-        targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
-        if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.3):
-            ALERT_STATE["last_rsi_signal"] = "SELL"
-            sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
-            base_msg = (
-                f"⚡ **SMC DISPLACEMENT SELL ALERT** 🔴\n\n"
-                f"📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
-            )
-            signals.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, base_msg, score=85))
-
-    if not (bullish_disp or bearish_disp):
-        ALERT_STATE["last_rsi_signal"] = None
-
-    return signals, watches
-
-def _eval_htf_fvg_ltf_sweep(a):
-    close_price, atr_val = a["close_price"], a["atr_val"]
-    macro_fvg = a.get("macro_fvg", {})
-    fvg, sweeps, structure = a["fvg"], a["sweeps"], a["structure"]
-    order_block, near_zone = a["order_block"], a["near_zone"]
-
-    # BUGFIX: macro_fvg now only reports bullish_fvg/bearish_fvg=True when price
-    # is ACTUALLY sitting inside an unmitigated HTF gap (see
-    # strategy/smc.py::fvg_snapshot_from_gaps), so the old
-    # "if fvg_top > 0 else True" fallback — which made the price-containment
-    # check a no-op whenever fvg_top happened to be 0/missing — is gone. The tap
-    # condition is now just the flag itself.
-    htf_bull_tap = macro_fvg.get("bullish_fvg", False)
-    htf_bear_tap = macro_fvg.get("bearish_fvg", False)
-
-    bullish_setup = (
-        htf_bull_tap and
-        (sweeps.get("bullish_sweep", False) or structure == "BULLISH_BOS") and
-        fvg.get("bullish_fvg", False)
-    )
-
-    bearish_setup = (
-        htf_bear_tap and
-        (sweeps.get("bearish_sweep", False) or structure == "BEARISH_BOS") and
-        fvg.get("bearish_fvg", False)
-    )
-
-    signals, watches = [], []
-
-    if bullish_setup and ALERT_STATE["last_rsi_signal"] != "BUY":
-        targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
-        if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.3):
-            ALERT_STATE["last_rsi_signal"] = "BUY"
-            sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
-            base_msg = (
-                f"🎯 **MTF FVG SWEEP BUY ALERT** 🟢\n\n"
-                f"📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
-            )
-            signals.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, base_msg, score=90))
-
-    elif bearish_setup and ALERT_STATE["last_rsi_signal"] != "SELL":
-        targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
-        if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.3):
-            ALERT_STATE["last_rsi_signal"] = "SELL"
-            sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
-            base_msg = (
-                f"🎯 **MTF FVG SWEEP SELL ALERT** 🔴\n\n"
-                f"📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
-            )
-            signals.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, base_msg, score=90))
-
-    if not (bullish_setup or bearish_setup):
-        ALERT_STATE["last_rsi_signal"] = None
-
-    return signals, watches
-
 def _is_dual_entry(score):
     """
-    Per the current design: dual-entry (2 fixed-lot legs — TP1 full close + a
-    TP2/break-even runner) only applies to the smc_confluence strategy's real,
-    graded 0-100 confluence score. The other four strategies emit a fixed
-    "confidence" number rather than a computed score, so they always get a
-    single TP1-only leg regardless of that number.
+    Dual-entry (2 fixed-lot legs) only applies to smc_confluence strategy's graded
+    confluence score.
     """
     if ALERT_STATE.get("active_strategy", "smc_confluence") != "smc_confluence":
         return False
@@ -261,7 +150,7 @@ def compute_confluence_score(direction, rsi_val, structure, sweeps, fvg, vol_fil
     rsi_pts = CONFLUENCE_WEIGHTS["rsi_zone"] if (rsi_val <= 20 if direction == "BUY" else rsi_val >= 80) else (10 if (rsi_val <= 25 if direction == "BUY" else rsi_val >= 75) else 6)
     breakdown.append(("RSI Zone", rsi_pts, CONFLUENCE_WEIGHTS["rsi_zone"]))
 
-    # 2. EMA Trend Alignment (FIXED: Checks entry_bullish directionally)
+    # 2. EMA Trend Alignment
     ema_match = (direction == "BUY" and entry_bullish) or (direction == "SELL" and not entry_bullish)
     breakdown.append(("EMA Trend Align", CONFLUENCE_WEIGHTS["ema_trend"] if ema_match else 0, CONFLUENCE_WEIGHTS["ema_trend"]))
 
@@ -376,11 +265,6 @@ def analyze_market(symbol):
     swing_highs, swing_lows = find_swing_points(df_entry, ALERT_STATE["fractal_window"], ALERT_STATE["fractal_window"])
     sweeps = detect_liquidity_sweeps(df_entry, swing_highs, swing_lows)
     fvg = detect_fvg(df_entry)
-    # BUGFIX: detect_fvg(df_macro) only ever looked at the last 3 macro bars, so
-    # an HTF gap was "visible" for exactly one bar with no way to detect price
-    # returning to tap an older gap later. macro_fvg_snapshot scans a real
-    # lookback window for still-unmitigated gaps and reports one only when
-    # price is actually sitting inside it right now.
     macro_fvg = macro_fvg_snapshot(df_macro, close_price,
                                     lookback=ALERT_STATE["sr_lookback"])
     order_block = detect_order_block(df_entry)
@@ -416,16 +300,11 @@ def analyze_market(symbol):
 
 def evaluate_signals(a):
     """Dispatches market evaluation to the active strategy module."""
-    # Centralized Volume / ATR Filter Gate (aligns live execution with backtester logic)
     if ALERT_STATE.get("require_volume_atr_filter", False) and not a.get("vol_filter_ok", True):
         return [], []
 
     strat = ALERT_STATE.get("active_strategy", "smc_confluence")
-    if strat == "htf_fvg_sweep":
-        return _eval_htf_fvg_ltf_sweep(a)
-    elif strat == "smc_displacement":
-        return _eval_smc_displacement(a)
-    elif strat == "ema_cross":
+    if strat == "ema_cross":
         return _eval_ema_cross(a)
     elif strat == "rsi_reversion":
         return _eval_rsi_reversion(a)
