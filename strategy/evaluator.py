@@ -14,18 +14,56 @@ from strategy.indicators import (
     detect_divergence, find_sr_zones, nearest_sr_zone
 )
 
+def _eval_setup_forming(a):
+    """Global setup-forming (watchlist) evaluator working across all strategies."""
+    if not ALERT_STATE.get("setup_forming_enabled", True):
+        return []
+
+    rsi_val = a["rsi_val"]
+    buy_th = ALERT_STATE.get("rsi_buy_threshold", 30)
+    sell_th = ALERT_STATE.get("rsi_sell_threshold", 70)
+    margin = ALERT_STATE.get("watch_rsi_margin", 5)
+    trend_bullish, macro_bullish = a["trend_bullish"], a["macro_bullish"]
+
+    in_bullish_approach = (buy_th < rsi_val <= buy_th + margin)
+    in_bearish_approach = (sell_th - margin <= rsi_val < sell_th)
+    in_approach_zone = in_bullish_approach or in_bearish_approach
+
+    watches = []
+
+    if in_approach_zone:
+        valid_bullish_watch = in_bullish_approach and (trend_bullish or macro_bullish)
+        valid_bearish_watch = in_bearish_approach and (not trend_bullish or not macro_bullish)
+
+        if (valid_bullish_watch or valid_bearish_watch) and ALERT_STATE.get("last_watch_signal") is None:
+            ALERT_STATE["last_watch_signal"] = "FORMING"
+            direction_icon = "🟢 BULLISH" if valid_bullish_watch else "🔴 BEARISH"
+            
+            watch_msg = (
+                f"👀 **{direction_icon} SETUP FORMING (EARLY HEADS-UP)** 👀\n\n"
+                f"• **Symbol:** `{a.get('symbol', 'XAUUSD')}` | **Price:** `${a['close_price']}`\n"
+                f"• **Current RSI:** `{rsi_val}` (Approaching Zone: `{buy_th}` / `{sell_th}`)\n"
+                f"• **HTF Alignment:** Verified ✅\n"
+                f"💡 *Monitor charts for imminent breakout or rejection.*"
+            )
+            watches.append(watch_msg)
+    else:
+        # Reset lock when price moves outside the approach zone or triggers full signal
+        ALERT_STATE["last_watch_signal"] = None
+
+    return watches
+
 def _eval_ema_cross(a):
     df = a["df_entry"]
     close_price, atr_val = a["close_price"], a["atr_val"]
     ema20, ema50 = df['EMA_20'].iloc[-1], df['EMA_50'].iloc[-1]
     prev_ema20, prev_ema50 = df['EMA_20'].iloc[-2], df['EMA_50'].iloc[-2]
 
-    signals, watches = [], []
-
+    signals = []
     bullish_cross = (prev_ema20 <= prev_ema50 and ema20 > ema50)
     bearish_cross = (prev_ema20 >= prev_ema50 and ema20 < ema50)
 
-    if bullish_cross and ALERT_STATE["last_rsi_signal"] != "BUY":
+    if bullish_cross and ALERT_STATE.get("last_rsi_signal") != "BUY":
         targets = calculate_targets("BUY", close_price, atr_val, a["order_block"], a["near_zone"])
         if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.0):
             ALERT_STATE["last_rsi_signal"] = "BUY"
@@ -33,7 +71,7 @@ def _eval_ema_cross(a):
             base_msg = f"🏆 **EMA CROSS BUY ALERT** 🟢\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
             signals.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, base_msg, score=70))
 
-    elif bearish_cross and ALERT_STATE["last_rsi_signal"] != "SELL":
+    elif bearish_cross and ALERT_STATE.get("last_rsi_signal") != "SELL":
         targets = calculate_targets("SELL", close_price, atr_val, a["order_block"], a["near_zone"])
         if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.0):
             ALERT_STATE["last_rsi_signal"] = "SELL"
@@ -44,33 +82,20 @@ def _eval_ema_cross(a):
     if not (bullish_cross or bearish_cross):
         ALERT_STATE["last_rsi_signal"] = None
 
-    return signals, watches
+    return signals
 
 def _eval_rsi_reversion(a):
-    """RSI Overbought/Oversold Reversion at S/R Zones."""
     close_price, rsi_val, atr_val = a["close_price"], a["rsi_val"], a["atr_val"]
     near_zone, order_block = a["near_zone"], a["order_block"]
 
     buy_th = ALERT_STATE.get("rsi_buy_threshold", 30)
     sell_th = ALERT_STATE.get("rsi_sell_threshold", 70)
 
-    signals, watches = [], []
+    signals = []
+    bullish_rev = (rsi_val <= buy_th and near_zone and near_zone["type"] in ("support", "mixed") and close_price >= near_zone["price"])
+    bearish_rev = (rsi_val >= sell_th and near_zone and near_zone["type"] in ("resistance", "mixed") and close_price <= near_zone["price"])
 
-    # Oversold + Support Zone Bounce
-    bullish_rev = (
-        rsi_val <= buy_th and 
-        near_zone and near_zone["type"] in ("support", "mixed") and 
-        close_price >= near_zone["price"]
-    )
-
-    # Overbought + Resistance Zone Rejection
-    bearish_rev = (
-        rsi_val >= sell_th and 
-        near_zone and near_zone["type"] in ("resistance", "mixed") and 
-        close_price <= near_zone["price"]
-    )
-
-    if bullish_rev and ALERT_STATE["last_rsi_signal"] != "BUY":
+    if bullish_rev and ALERT_STATE.get("last_rsi_signal") != "BUY":
         targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
         if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.0):
             ALERT_STATE["last_rsi_signal"] = "BUY"
@@ -78,7 +103,7 @@ def _eval_rsi_reversion(a):
             base_msg = f"🔄 **RSI REVERSION BUY ALERT** 🟢\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
             signals.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, base_msg, score=75))
 
-    elif bearish_rev and ALERT_STATE["last_rsi_signal"] != "SELL":
+    elif bearish_rev and ALERT_STATE.get("last_rsi_signal") != "SELL":
         targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
         if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.0):
             ALERT_STATE["last_rsi_signal"] = "SELL"
@@ -89,19 +114,14 @@ def _eval_rsi_reversion(a):
     if not (bullish_rev or bearish_rev):
         ALERT_STATE["last_rsi_signal"] = None
 
-    return signals, watches
+    return signals
 
 def _is_dual_entry(score):
-    """
-    Dual-entry (2 fixed-lot legs) only applies to smc_confluence strategy's graded
-    confluence score.
-    """
     if ALERT_STATE.get("active_strategy", "smc_confluence") != "smc_confluence":
         return False
     return score >= ALERT_STATE.get("dual_entry_score_threshold", 50)
 
 def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, base_msg, score=0):
-    """Logs the signal, queues live execution (if armed), and renders the alert."""
     symbol = a.get("symbol", "XAUUSD")
     dual = _is_dual_entry(score)
 
@@ -146,45 +166,34 @@ def compute_confluence_score(direction, rsi_val, structure, sweeps, fvg, vol_fil
                               candle_pattern, divergence, sr_confluence, entry_bullish, macro_aligned):
     breakdown = []
     
-    # 1. RSI Zone
     rsi_pts = CONFLUENCE_WEIGHTS["rsi_zone"] if (rsi_val <= 20 if direction == "BUY" else rsi_val >= 80) else (10 if (rsi_val <= 25 if direction == "BUY" else rsi_val >= 75) else 6)
     breakdown.append(("RSI Zone", rsi_pts, CONFLUENCE_WEIGHTS["rsi_zone"]))
 
-    # 2. EMA Trend Alignment
     ema_match = (direction == "BUY" and entry_bullish) or (direction == "SELL" and not entry_bullish)
     breakdown.append(("EMA Trend Align", CONFLUENCE_WEIGHTS["ema_trend"] if ema_match else 0, CONFLUENCE_WEIGHTS["ema_trend"]))
 
-    # 3. Macro Trend Alignment
     breakdown.append(("Macro Trend Align", CONFLUENCE_WEIGHTS["macro_trend"] if macro_aligned else 0, CONFLUENCE_WEIGHTS["macro_trend"]))
 
-    # 4. Structure BOS
     bos_match = (direction == "BUY" and structure == "BULLISH_BOS") or (direction == "SELL" and structure == "BEARISH_BOS")
     breakdown.append(("Structure BOS", CONFLUENCE_WEIGHTS["structure_bos"] if bos_match else 0, CONFLUENCE_WEIGHTS["structure_bos"]))
 
-    # 5. Liquidity Sweep
     sweep_match = (direction == "BUY" and sweeps["bullish_sweep"]) or (direction == "SELL" and sweeps["bearish_sweep"])
     breakdown.append(("Liquidity Sweep", CONFLUENCE_WEIGHTS["liquidity_sweep"] if sweep_match else 0, CONFLUENCE_WEIGHTS["liquidity_sweep"]))
 
-    # 6. Fair Value Gap
     fvg_match = (direction == "BUY" and fvg["bullish_fvg"]) or (direction == "SELL" and fvg["bearish_fvg"])
     breakdown.append(("Fair Value Gap", CONFLUENCE_WEIGHTS["fvg"] if fvg_match else 0, CONFLUENCE_WEIGHTS["fvg"]))
 
-    # 7. Volume/ATR Filter
     breakdown.append(("Volume/ATR Activity", CONFLUENCE_WEIGHTS["volume_atr"] if vol_filter_ok else 0, CONFLUENCE_WEIGHTS["volume_atr"]))
 
-    # 8. MACD Bias
     macd_match = (direction == "BUY" and macd_bias == "BULLISH") or (direction == "SELL" and macd_bias == "BEARISH")
     breakdown.append(("MACD Confirmation", CONFLUENCE_WEIGHTS["macd"] if macd_match else 0, CONFLUENCE_WEIGHTS["macd"]))
 
-    # 9. Candlestick Pattern
     pattern_match = (direction == "BUY" and candle_pattern in ("BULLISH_ENGULFING", "HAMMER")) or (direction == "SELL" and candle_pattern in ("BEARISH_ENGULFING", "SHOOTING_STAR"))
     breakdown.append(("Candlestick Pattern", CONFLUENCE_WEIGHTS["candlestick"] if pattern_match else (3 if candle_pattern == "DOJI" else 0), CONFLUENCE_WEIGHTS["candlestick"]))
 
-    # 10. RSI Divergence
     div_match = (direction == "BUY" and divergence.get("bullish")) or (direction == "SELL" and divergence.get("bearish"))
     breakdown.append(("RSI Divergence", CONFLUENCE_WEIGHTS["divergence"] if div_match else 0, CONFLUENCE_WEIGHTS["divergence"]))
 
-    # 11. Support / Resistance Zone
     breakdown.append(("Support/Resistance", CONFLUENCE_WEIGHTS["sr_zone"] if sr_confluence else 0, CONFLUENCE_WEIGHTS["sr_zone"]))
 
     return sum(pts for _, pts, _ in breakdown), breakdown
@@ -217,7 +226,7 @@ def calculate_targets(direction, close_price, atr_val, order_block, near_zone,
 
         tp2_price = max(close_price + atr_val * tp2_mult, tp1_price + atr_val * 0.5)
 
-    else:  # SELL
+    else:
         sl_price, sl_source = close_price + atr_val * sl_mult, "ATR"
         if order_block.get("bearish_ob") and order_block.get("ob_level") is not None:
             ob_sl = order_block["ob_level"] + ob_buffer
@@ -265,8 +274,7 @@ def analyze_market(symbol):
     swing_highs, swing_lows = find_swing_points(df_entry, ALERT_STATE["fractal_window"], ALERT_STATE["fractal_window"])
     sweeps = detect_liquidity_sweeps(df_entry, swing_highs, swing_lows)
     fvg = detect_fvg(df_entry)
-    macro_fvg = macro_fvg_snapshot(df_macro, close_price,
-                                    lookback=ALERT_STATE["sr_lookback"])
+    macro_fvg = macro_fvg_snapshot(df_macro, close_price, lookback=ALERT_STATE["sr_lookback"])
     order_block = detect_order_block(df_entry)
     sr_zones = find_sr_zones(df_macro, lookback=ALERT_STATE["sr_lookback"],
                           cluster_pct=ALERT_STATE["sr_cluster_pct"],
@@ -299,17 +307,22 @@ def analyze_market(symbol):
     }
 
 def evaluate_signals(a):
-    """Dispatches market evaluation to the active strategy module."""
+    """Dispatches market evaluation and setup-forming checks."""
+    # Always evaluate heads-up (watchlist) alerts first, regardless of volume filter or strategy
+    watches = _eval_setup_forming(a)
+
     if ALERT_STATE.get("require_volume_atr_filter", False) and not a.get("vol_filter_ok", True):
-        return [], []
+        return [], watches
 
     strat = ALERT_STATE.get("active_strategy", "smc_confluence")
     if strat == "ema_cross":
-        return _eval_ema_cross(a)
+        signals = _eval_ema_cross(a)
     elif strat == "rsi_reversion":
-        return _eval_rsi_reversion(a)
+        signals = _eval_rsi_reversion(a)
     else:
-        return evaluate_smc_confluence(a)
+        signals, _ = evaluate_smc_confluence(a)
+
+    return signals, watches
 
 def evaluate_smc_confluence(a):
     close_price, rsi_val, atr_val = a["close_price"], a["rsi_val"], a["atr_val"]
@@ -317,7 +330,7 @@ def evaluate_smc_confluence(a):
     buy_th, sell_th = ALERT_STATE["rsi_buy_threshold"], ALERT_STATE["rsi_sell_threshold"]
     min_score = ALERT_STATE["min_confluence_score"]
 
-    signals_found, watch_found = [], []
+    signals_found = []
 
     is_oversold = rsi_val <= buy_th
     is_overbought = rsi_val >= sell_th
@@ -381,34 +394,7 @@ def evaluate_smc_confluence(a):
                 )
                 signals_found.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, msg, score=score))
 
-    # Reset signal deduplication state once price exits extreme zones
     if not (is_oversold or is_overbought):
         ALERT_STATE["last_rsi_signal"] = None
 
-    # 3. Evaluate Setup Forming (Watchlist) Pings
-    in_approach_zone = (
-        (buy_th < rsi_val <= buy_th + ALERT_STATE["watch_rsi_margin"]) or
-        (sell_th - ALERT_STATE["watch_rsi_margin"] <= rsi_val < sell_th)
-    )
-
-    if ALERT_STATE["setup_forming_enabled"] and in_approach_zone:
-        is_bullish_approach = (buy_th < rsi_val <= buy_th + ALERT_STATE["watch_rsi_margin"])
-        valid_bullish_watch = is_bullish_approach and (trend_bullish or macro_bullish)
-        valid_bearish_watch = (not is_bullish_approach) and (not trend_bullish or not macro_bullish)
-
-        if (valid_bullish_watch or valid_bearish_watch) and ALERT_STATE.get("last_watch_signal") is None:
-            ALERT_STATE["last_watch_signal"] = "FORMING"
-            direction_icon = "🟢 BULLISH" if valid_bullish_watch else "🔴 BEARISH"
-            
-            watch_msg = (
-                f"👀 **{direction_icon} SETUP FORMING (EARLY HEADS-UP)** 👀\n\n"
-                f"• **Symbol:** `XAUUSD` | **Price:** `${close_price}`\n"
-                f"• **Current RSI:** `{rsi_val}` (Approaching Zone: `{buy_th}` / `{sell_th}`)\n"
-                f"• **HTF Alignment:** Verified ✅\n"
-                f"💡 *Monitor charts for imminent breakout or rejection.*"
-            )
-            watch_found.append(watch_msg)
-    elif not in_approach_zone:
-        ALERT_STATE["last_watch_signal"] = None
-
-    return signals_found, watch_found
+    return signals_found, []
