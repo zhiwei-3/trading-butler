@@ -148,6 +148,15 @@ PERSISTENT_KEYS = [
     "watch_score_margin",
     "heartbeat_enabled",
     "heartbeat_interval_hours",
+    # --- circuit breaker ---
+    "circuit_breaker_enabled",
+    "max_daily_losses",
+    "max_daily_drawdown_r",
+    # --- news blockade ---
+    "news_blockade_enabled",
+    "news_blockade_impacts",
+    "news_blockade_mins_before",
+    "news_blockade_mins_after",
     # --- live execution ---
     "auto_trade_enabled",
     "trade_dry_run",
