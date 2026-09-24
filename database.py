@@ -92,8 +92,11 @@ def attach_trade_execution(signal_id, leg, ticket, lots, exec_mode, fill_price=N
     if not signal_id:
         return
     now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    cols = "ticket = ?, lots = ?, exec_mode = ?, fill_price = ?" if leg == 1 else \
-           "ticket2 = ?, lots2 = ?, exec_mode2 = ?, fill_price2 = ?"
+    LEG_COLUMNS = {
+      1: ("ticket", "lots", "exec_mode", "fill_price"),
+      2: ("ticket2", "lots2", "exec_mode2", "fill_price2"),
+  }
+    cols = " = ?, ".join(LEG_COLUMNS[leg]) + " = ?"
     try:
         with get_db_connection() as conn:
             conn.execute(

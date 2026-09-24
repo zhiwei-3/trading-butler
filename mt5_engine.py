@@ -62,6 +62,9 @@ def fetch_candles(symbol, timeframe, count=100):
 def get_tick(symbol):
     """Locked wrapper around symbol_info_tick — callers must never call the raw
     MT5 function directly (see the thread-safety note above)."""
+    if not symbol:
+          logging.warning("get_tick called with None/empty symbol")
+          return None
     with MT5_LOCK:
         return mt5.symbol_info_tick(symbol)
 

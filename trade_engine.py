@@ -491,7 +491,7 @@ def execute_pending_intents():
     for intent in batch:
         symbol, direction, dual = intent["symbol"], intent["direction"], intent["dual_entry"]
         sl_dist = abs(intent["entry"] - intent["sl"])
-        if sl_dist <= 0:
+        if sl_dist <= 1e-9:  # Use tolerance for floating point
             reports.append(f"❌ **Execution skipped** — zero SL distance on {direction} {symbol}.")
             continue
 

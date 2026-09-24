@@ -27,20 +27,33 @@ def _fetch_via_curl(url):
             url
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        if result.stdout:
-            return json.loads(result.stdout)
+        raw_text = (result.stdout or "").strip()
+
+        # Validate that response is non-empty and starts with valid JSON characters
+        if raw_text and raw_text.startswith(("{", "[")):
+            return json.loads(raw_text)
+        
+        logging.warning("⚠️ curl fallback returned empty or non-JSON response from calendar API.")
+    except json.JSONDecodeError as e:
+        logging.warning(f"⚠️ Failed to parse calendar JSON from curl output: {e}")
     except Exception as e:
         logging.error(f"curl Fallback Error: {e}")
     return None
 
 
 def _fetch_calendar_sync():
-    """Synchronous HTTP fetcher with curl fallback and 10-minute caching."""
+    """Synchronous HTTP fetcher with curl fallback, retry cooldown, and 10-minute caching."""
     global _NEWS_CACHE, _LAST_FETCH_TIME
     now = datetime.now(timezone.utc)
 
+    # 1. Return fresh cached data if available (10-minute cache)
     if _NEWS_CACHE is not None and _LAST_FETCH_TIME and (now - _LAST_FETCH_TIME) < _CACHE_DURATION:
         return _NEWS_CACHE
+
+    # 2. Cooldown throttle: If previous fetch failed, wait 60s before retrying to prevent log spam
+    _FAILED_COOLDOWN = timedelta(seconds=60)
+    if _NEWS_CACHE is None and _LAST_FETCH_TIME and (now - _LAST_FETCH_TIME) < _FAILED_COOLDOWN:
+        return None
 
     url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
     headers = {
@@ -59,9 +72,11 @@ def _fetch_calendar_sync():
     if not data:
         data = _fetch_via_curl(url)
 
+    # Always update last fetch attempt timestamp to throttle retries on failure
+    _LAST_FETCH_TIME = now
+
     if data:
         _NEWS_CACHE = data
-        _LAST_FETCH_TIME = now
         return _NEWS_CACHE
 
     return _NEWS_CACHE if _NEWS_CACHE is not None else None
