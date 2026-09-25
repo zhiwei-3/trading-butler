@@ -173,24 +173,27 @@ def _clean_val(val):
 
 async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
     """
-    Sends an enriched pre-event warning ping ~30 minutes before high-impact news releases,
+    Sends an enriched pre-event warning ping ~30 minutes before configured news releases,
     including forecast, previous metrics, and XAUUSD strategic insights.
     """
-    events = await fetch_economic_events(impact_level="high", currency="USD")
+    target_impacts = [imp.lower() for imp in ALERT_STATE.get("news_blockade_impacts", ["high"])]
+    all_events = await fetch_economic_events(impact_level="all", currency="USD")
+    if not all_events:
+        return
+
+    events = [ev for ev in all_events if str(ev.get("impact", "")).strip().lower() in target_impacts]
     if not events:
         return
 
     now_utc = datetime.now(timezone.utc)
 
-    # BUGFIX: this dict grew forever across a long-running process. Prune keys
-    # older than the TTL every time we check.
     warned = ALERT_STATE["news_warned_events"]
     cutoff = now_utc - _RESULT_TTL
     for k in [k for k, t in warned.items() if t < cutoff]:
         del warned[k]
 
     for ev in events:
-        event_title = ev.get("title", "USD High Impact Event")
+        event_title = ev.get("title", "USD Economic Event")
         raw_date = ev.get("date", "")
         try:
             clean_date = raw_date.replace("Z", "+00:00")
@@ -201,17 +204,21 @@ async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
         time_diff = (event_dt - now_utc).total_seconds() / 60.0
         warn_key = f"{event_title}|{raw_date}"
 
-        # Dispatch enriched warning message 25-35 minutes prior to release
         if 25 <= time_diff <= 35 and warn_key not in warned:
             warned[warn_key] = now_utc
-            time_str = event_dt.strftime("%H:%M UTC")
+            
+            # Format local time and timezone label
+            dt_local = event_dt.astimezone()
+            tz_label = dt_local.strftime("%Z") or "Local"
+            time_str = f"{dt_local.strftime('%H:%M')} {tz_label} ({event_dt.strftime('%H:%M UTC')})"
 
             forecast = _clean_val(ev.get("forecast"))
             previous = _clean_val(ev.get("previous"))
             insight = generate_xauusd_news_insight(event_title, forecast, previous)
 
+            impact_badge = str(ev.get("impact", "")).upper()
             msg = (
-                f"🚨 **HIGH IMPACT NEWS HEADS-UP** 🚨\n\n"
+                f"🚨 **{impact_badge} IMPACT NEWS HEADS-UP** 🚨\n\n"
                 f"• **Event:** `{event_title}`\n"
                 f"• **Time:** `{time_str}` (~30 mins away)\n"
                 f"• **Forecast:** `{forecast}` | **Previous:** `{previous}`\n\n"
@@ -229,7 +236,12 @@ async def check_news_post_release(context: ContextTypes.DEFAULT_TYPE, chat_id):
     Monitors calendar feed for newly published actual results and broadcasts live outcome analysis.
     """
     global _ANNOUNCED_RESULTS
-    events = await fetch_economic_events(impact_level="high", currency="USD")
+    target_impacts = [imp.lower() for imp in ALERT_STATE.get("news_blockade_impacts", ["high"])]
+    all_events = await fetch_economic_events(impact_level="all", currency="USD")
+    if not all_events:
+        return
+
+    events = [ev for ev in all_events if str(ev.get("impact", "")).strip().lower() in target_impacts]
     if not events:
         return
 
@@ -255,7 +267,6 @@ async def check_news_post_release(context: ContextTypes.DEFAULT_TYPE, chat_id):
         except (ValueError, TypeError):
             continue
 
-        # Only broadcast outcomes for events released within the past 60 minutes
         minutes_since_release = (now_utc - event_dt).total_seconds() / 60.0
         if 0 <= minutes_since_release <= 60:
             _ANNOUNCED_RESULTS[event_key] = now_utc

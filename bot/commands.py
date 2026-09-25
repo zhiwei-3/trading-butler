@@ -315,7 +315,6 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     events = await fetch_economic_events(impact_level=impact, currency="USD")
     
-    # Handle API Network Drop
     if events is None:
         await update.message.reply_text(
             "📡 **Network Error:** Unable to reach economic calendar server. Please try again in a few moments.", 
@@ -323,7 +322,6 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Handle Actual 0 Events Case
     if len(events) == 0:
         await update.message.reply_text(
             f"🟢 **No `{impact.upper()}` impact USD events found for this week.**", 
@@ -342,16 +340,22 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for ev in events:
         raw_date = ev.get("date", "")
         try:
-            dt_utc = datetime.fromisoformat(raw_date).astimezone(timezone.utc)
-            date_key = dt_utc.strftime("%A, %b %d")
-            time_str = dt_utc.strftime("%H:%M UTC")
+            clean_date = raw_date.replace("Z", "+00:00")
+            dt_utc = datetime.fromisoformat(clean_date).astimezone(timezone.utc)
+            # Convert UTC timestamp to local server timezone
+            dt_local = dt_utc.astimezone()
+            date_key = dt_local.strftime("%A, %b %d")
+            time_str = dt_local.strftime("%H:%M")
         except (ValueError, TypeError):
             date_key, time_str = "Upcoming Events", "N/A"
             
         ev["formatted_time"] = time_str
         events_by_date.setdefault(date_key, []).append(ev)
 
-    msg = f"🗓️ **WEEKLY USD ECONOMIC CALENDAR ({impact.upper()} IMPACT)**\n\n"
+    # Detect active local timezone label (e.g., SGT, MYT, EST, etc.)
+    tz_label = datetime.now().astimezone().strftime("%Z") or "LOCAL TIME"
+
+    msg = f"🗓️ **WEEKLY USD ECONOMIC CALENDAR ({impact.upper()} IMPACT | {tz_label})**\n\n"
     for date_header, day_events in events_by_date.items():
         msg += f"📅 **{date_header}**\n"
         for ev in day_events:
@@ -504,7 +508,7 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Dynamically updates bot settings in ALERT_STATE."""
     if not context.args or len(context.args) < 2:
         news_status = "ON 🟢" if ALERT_STATE.get("news_blockade_enabled", True) else "OFF 🔴"
-        impacts_str = ",".join(ALERT_STATE.get("news_blockade_impacts", ["high"]))
+        impacts_str = ", ".join(ALERT_STATE.get("news_blockade_impacts", ["high"]))
 
         reply = (
             "⚙️ **DYNAMIC SETTINGS MANAGER**\n\n"
@@ -539,106 +543,88 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `/set tp1_mult 1.5`\n"
             "• `/set lot 0.02`\n"
             "• `/set dual_score 60`\n"
-            "• `/set news_impact high,medium`"
+            "• `/set news_impact high, medium`"
         )
         await update.message.reply_text(reply, parse_mode="Markdown")
         return
 
-    key = context.args[0].lower()
-    val_str = context.args[1]
+    key = context.args[0].lower().strip()
+    # Join all remaining arguments so comma-separated strings with spaces parse cleanly
+    val_str = " ".join(context.args[1:]).strip()
 
     try:
-        val = float(val_str)
         setting_name = ""
+        val = None
 
         # Map shorthand keys to actual dictionary keys
         if key in ("buy_rsi", "rsi_buy", "rsi_buy_threshold"):
-            setting_name = "rsi_buy_threshold"
+            setting_name, val = "rsi_buy_threshold", float(val_str)
         elif key in ("sell_rsi", "rsi_sell", "rsi_sell_threshold"):
-            setting_name = "rsi_sell_threshold"
+            setting_name, val = "rsi_sell_threshold", float(val_str)
         elif key in ("score", "min_score", "min_confluence_score"):
-            setting_name = "min_confluence_score"
-            val = int(val)  # Force integer for scores
+            setting_name, val = "min_confluence_score", int(float(val_str))
         elif key in ("rrr", "min_rrr"):
-            setting_name = "min_rrr"
+            setting_name, val = "min_rrr", float(val_str)
         elif key in ("risk", "risk_percent", "risk_pct"):
-            setting_name = "risk_percent"
+            setting_name, val = "risk_percent", float(val_str)
         elif key in ("sl_mult", "sl_atr"):
-            setting_name = "sl_atr_mult"
+            setting_name, val = "sl_atr_mult", float(val_str)
         elif key in ("tp1_mult", "tp1_atr"):
-            setting_name = "tp1_atr_mult"
+            setting_name, val = "tp1_atr_mult", float(val_str)
         elif key in ("tp2_mult", "tp2_atr"):
-            setting_name = "tp2_atr_mult"
+            setting_name, val = "tp2_atr_mult", float(val_str)
         elif key in ("spread", "max_spread"):
-            setting_name = "max_allowed_spread_pips"
+            setting_name, val = "max_allowed_spread_pips", float(val_str)
 
         elif key in ("cb_enabled", "circuit_breaker", "cb_toggle"):
-            setting_name = "circuit_breaker_enabled"
-            val = bool(int(val_str))  # 1 = ON, 0 = OFF
+            setting_name, val = "circuit_breaker_enabled", val_str.lower() in ("true", "1", "on", "yes")
         elif key in ("cb_losses", "max_losses", "cb_max_losses"):
-            setting_name = "max_daily_losses"
-            val = int(val_str)
+            setting_name, val = "max_daily_losses", int(val_str)
         elif key in ("cb_drawdown", "max_drawdown", "cb_max_drawdown"):
-            setting_name = "max_daily_drawdown_r"
-            val = float(val_str)
+            setting_name, val = "max_daily_drawdown_r", float(val_str)
 
         elif key in ("magic", "magic_number"):
-            setting_name = "magic_number"
-            val = int(val_str)
+            setting_name, val = "magic_number", int(val_str)
         elif key in ("slippage", "deviation", "max_slippage_points"):
-            setting_name = "max_slippage_points"
-            val = int(val_str)
+            setting_name, val = "max_slippage_points", int(val_str)
         elif key in ("max_positions", "max_open_positions"):
-            setting_name = "max_open_positions"
-            val = int(val_str)
+            setting_name, val = "max_open_positions", int(val_str)
         elif key in ("max_trades", "max_daily_trades"):
-            setting_name = "max_daily_trades"
-            val = int(val_str)
+            setting_name, val = "max_daily_trades", int(val_str)
         elif key in ("drift", "max_drift", "max_entry_drift_pct"):
-            setting_name = "max_entry_drift_pct"
-            val = float(val_str)
+            setting_name, val = "max_entry_drift_pct", float(val_str)
         elif key in ("lot", "fixed_lot", "fixed_lot_size"):
-            setting_name = "fixed_lot_size"
-            val = float(val_str)
+            setting_name, val = "fixed_lot_size", float(val_str)
         elif key in ("dual_score", "dual_entry_score", "dual_threshold", "dual_entry_score_threshold"):
-            setting_name = "dual_entry_score_threshold"
-            val = int(val_str)
+            setting_name, val = "dual_entry_score_threshold", int(val_str)
         elif key in ("flatten_cb", "flatten_on_circuit_breaker"):
-            setting_name = "flatten_on_circuit_breaker"
-            val = bool(int(val_str))
+            setting_name, val = "flatten_on_circuit_breaker", val_str.lower() in ("true", "1", "on", "yes")
 
         elif key in ("news_blockade", "news_toggle"):
-            setting_name = "news_blockade_enabled"
-            val = bool(int(val))  # Use /set news_blockade 1 (ON) or 0 (OFF)
+            setting_name, val = "news_blockade_enabled", val_str.lower() in ("true", "1", "on", "yes")
         elif key in ("news_before", "news_mins_before"):
-            setting_name = "news_blockade_mins_before"
-            val = int(val)
+            setting_name, val = "news_blockade_mins_before", int(val_str)
         elif key in ("news_after", "news_mins_after"):
-            setting_name = "news_blockade_mins_after"
-            val = int(val)
-        elif key in ("news_impact", "news_level"):
-            # Usage: /set news_impact high OR /set news_impact high,medium
+            setting_name, val = "news_blockade_mins_after", int(val_str)
+        elif key in ("news_impact", "news_level", "news_impacts", "news_blockade_impacts"):
             setting_name = "news_blockade_impacts"
-            val = [x.strip().lower() for x in val_str.split(",")]
+            val = [x.strip().lower() for x in val_str.split(",") if x.strip()]
         else:
             await update.message.reply_text(f"❌ Unknown setting key `{key}`.", parse_mode="Markdown")
             return
 
-        # Grab old value for the confirmation message
         old_val = ALERT_STATE.get(setting_name, "N/A")
-        
-        # Apply and save
         ALERT_STATE[setting_name] = val
         save_settings()
-        
-        # Clean up the name (e.g., 'risk_percent' -> 'Risk Percent')
-        # This prevents Markdown errors caused by unescaped underscores
+
         display_name = setting_name.replace("_", " ").title()
-        
+        formatted_val = ", ".join([v.upper() for v in val]) if isinstance(val, list) else val
+        formatted_old = ", ".join([v.upper() for v in old_val]) if isinstance(old_val, list) else old_val
+
         await update.message.reply_text(
             f"✅ **Setting Updated**\n\n"
             f"**{display_name}** modified:\n"
-            f"`{old_val}` ➡️ `{val}`",
+            f"`{formatted_old}` ➡️ `{formatted_val}`",
             parse_mode="Markdown"
         )
     except ValueError:
