@@ -603,35 +603,47 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
     }
 
 MAX_SWEEP_COMBOS = 150  # hard cap so a stacked sweep can't silently run for ages
+MIN_SWEEP_SAMPLE = 5    # combos with fewer closed trades than this are unreliable and get ranked last
 
 def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, score_values=None,
                         strategy_values=None, sl_values=None, rsi_pairs=None,
                         spread_pips=2.0, progress_callback=None):
-    """Sweeps strategy x min_rrr x min_confluence_score, optionally also x sl_atr_mult x
-    (rsi_buy, rsi_sell) pairs. Pass None for any axis to keep it fixed at the current
-    ALERT_STATE / run_backtest default instead of sweeping it."""
-    rrr_values = rrr_values or [1.3, 1.5, 2.0, 2.5, 3.0]
-    score_values = score_values or [20, 25, 30, 35, 40]
+    """Sweeps any subset of strategy x min_rrr x min_confluence_score x sl_atr_mult x
+    (rsi_buy, rsi_sell) pairs. Pass None for ANY axis to keep it fixed at the current
+    ALERT_STATE / run_backtest default instead of sweeping it.
+
+    BUGFIX: previously only strategy_values/sl_values/rsi_pairs honored "None means
+    fixed" — rrr_values/score_values ignored their own None default and ALWAYS
+    swept a hardcoded 5-value grid regardless of what the caller passed. All five
+    axes are now handled the same way: swept only when the caller supplies values.
+    """
+    swept = {
+        "strategies": strategy_values is not None,
+        "sl": sl_values is not None,
+        "rsi": rsi_pairs is not None,
+        "rrr": rrr_values is not None,
+        "score": score_values is not None,
+    }
+
     strategies = strategy_values or [None]
     sl_mults = sl_values or [None]
     rsi_combos = rsi_pairs or [(None, None)]
+    rrr_vals = rrr_values or [None]
+    score_vals = score_values or [None]
 
-    total_combos = len(strategies) * len(rrr_values) * len(score_values) * len(sl_mults) * len(rsi_combos)
+    total_combos = len(strategies) * len(rrr_vals) * len(score_vals) * len(sl_mults) * len(rsi_combos)
     if total_combos > MAX_SWEEP_COMBOS:
         return {"error": f"Sweep would run {total_combos} backtests (cap is {MAX_SWEEP_COMBOS}). "
                           f"Sweep fewer dimensions at once, or narrow the value lists."}
 
-    # BUGFIX: previously each of up to 150 combos called run_backtest() fresh,
-    # which refetched + reprocessed identical MT5 history every single time
-    # (symbol/days/timeframe never vary across a sweep — only strategy/threshold
-    # params do). Fetch and precompute once, reuse for every combo.
+    # Fetch and precompute MT5 history once; every combo below reuses it.
     prepared = _prepare_history(symbol, days, timeframe_mode)
     if "error" in prepared:
         return {"error": prepared["error"]}
 
     combos = [
         (strat, r, s, sl, rsi_pair)
-        for strat in strategies for r in rrr_values for s in score_values
+        for strat in strategies for r in rrr_vals for s in score_vals
         for sl in sl_mults for rsi_pair in rsi_combos
     ]
     results = []
@@ -651,12 +663,14 @@ def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, sc
 
         resolved_strategy = strat or ALERT_STATE.get("active_strategy", "smc_confluence")
         resolved_sl = sl_mult if sl_mult is not None else ALERT_STATE["sl_atr_mult"]
+        resolved_rrr = rrr if rrr is not None else ALERT_STATE["min_rrr"]
+        resolved_score = score if score is not None else ALERT_STATE["min_confluence_score"]
         resolved_rsi = (
             rsi_buy if rsi_buy is not None else ALERT_STATE["rsi_buy_threshold"],
             rsi_sell if rsi_sell is not None else ALERT_STATE["rsi_sell_threshold"],
         )
 
-        row = {"strategy": resolved_strategy, "min_rrr": rrr, "min_confluence_score": score,
+        row = {"strategy": resolved_strategy, "min_rrr": resolved_rrr, "min_confluence_score": resolved_score,
                "sl_atr_mult": resolved_sl, "rsi_pair": resolved_rsi}
 
         if "error" in res:
@@ -677,9 +691,12 @@ def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, sc
 
     return {
         "symbol": symbol, "mode": timeframe_mode, "days": days, "grid": results,
-        "swept_strategies": strategy_values is not None,
-        "swept_sl": sl_values is not None,
-        "swept_rsi": rsi_pairs is not None,
+        "swept_strategies": swept["strategies"],
+        "swept_sl": swept["sl"],
+        "swept_rsi": swept["rsi"],
+        "swept_rrr": swept["rrr"],
+        "swept_score": swept["score"],
+        "min_sample": MIN_SWEEP_SAMPLE,
     }
 
 def generate_equity_chart(equity_curve, title="Backtest Equity Curve"):

@@ -15,7 +15,7 @@ from trade_engine import (
     modify_position_sltp, pending_intent_count,
 )
 from news_engine import fetch_economic_events
-from strategy.backtester import run_backtest, generate_equity_chart, run_backtest_sweep
+from strategy.backtester import run_backtest, generate_equity_chart, run_backtest_sweep, MIN_SWEEP_SAMPLE
 from strategy.evaluator import analyze_market
 from strategy.chart import generate_chart_snapshot
 from bot.jobs import (
@@ -945,25 +945,24 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    AXIS_FLAGS = ("strategies", "sl", "rsi", "score", "rrr")
     args = context.args
     days = 30
     mode = None
-    flags = set()
+    sweep_axes = set()
 
     # 1. Flexible Argument Parser
     if args:
         remaining_args = list(args)
-        
-        # Check if first argument is a number (days)
+
         if remaining_args[0].isdigit():
             days = int(remaining_args.pop(0))
-        
-        # Extract flags and timeframe mode from remaining arguments
+
         unprocessed = []
         for arg in remaining_args:
             arg_lower = arg.lower()
-            if arg_lower in ("strategies", "sl", "rsi"):
-                flags.add(arg_lower)
+            if arg_lower in AXIS_FLAGS:
+                sweep_axes.add(arg_lower)
             elif arg_lower in TIMEFRAME_PRESETS:
                 mode = arg_lower
             else:
@@ -972,9 +971,11 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if unprocessed:
             await update.message.reply_text(
                 f"⚠️ **Unknown argument(s):** `{', '.join(unprocessed)}`\n\n"
-                "**Usage:** `/optimize [days] [scalp|intraday|swing] [strategies] [sl] [rsi]`\n\n"
+                "**Usage:** `/optimize [days] [scalp|intraday|swing] [flags]`\n"
+                f"**Flags (combine up to 3):** `{'`, `'.join(AXIS_FLAGS)}`\n\n"
                 "**Examples:**\n"
-                "• `/optimize scalp`\n"
+                "• `/optimize scalp` *(no flags → sweeps RRR + Score, the legacy default)*\n"
+                "• `/optimize sl` *(sweeps ONLY sl_atr_mult — RRR/Score/RSI/Strategy stay fixed at current live settings)*\n"
                 "• `/optimize 14 intraday strategies`\n"
                 "• `/optimize swing sl rsi`",
                 parse_mode="Markdown"
@@ -983,9 +984,15 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     days = max(1, min(days, 180))
 
-    if len(flags) > 2:
+    # No flags at all -> preserve the historical default: sweep RRR x Score together.
+    used_default_axes = not sweep_axes
+    if used_default_axes:
+        sweep_axes = {"rrr", "score"}
+
+    if len(sweep_axes) > 3:
         await update.message.reply_text(
-            "⚠️ Combine at most 2 of `strategies` / `sl` / `rsi` at once to keep the grid size manageable.",
+            "⚠️ Combine at most 3 axes at once (`strategies`/`sl`/`rsi`/`score`/`rrr`) "
+            "to keep the grid size manageable.",
             parse_mode="Markdown"
         )
         return
@@ -997,17 +1004,22 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     label = mode or ALERT_STATE.get('timeframe_mode', 'scalp')
 
-    # Base grid shrinks as more axes are added to prevent exponential grid explosion
-    if not flags:
-        rrr_values, score_values = [1.3, 1.5, 2.0, 2.5, 3.0], [20, 25, 30, 35, 40]
-    else:
-        rrr_values, score_values = [1.5, 2.0, 3.0], [25, 35]
+    # 2. Value pools per axis. Pools shrink as more axes are combined at once to
+    # avoid a combinatorial explosion — tier 1 (the bare-default rrr+score case,
+    # or any single explicit axis) gets the full, original grid.
+    pool_tier = 1 if used_default_axes else min(len(sweep_axes), 3)
+    RRR_POOLS = {1: [1.3, 1.5, 2.0, 2.5, 3.0], 2: [1.5, 2.0, 2.5, 3.0], 3: [1.5, 2.0, 3.0]}
+    SCORE_POOLS = {1: [20, 25, 30, 35, 40], 2: [25, 30, 35, 40], 3: [25, 35]}
+    SL_POOLS = {1: [1.2, 1.5, 1.7, 2.0, 2.5], 2: [1.2, 1.5, 2.0, 2.5], 3: [1.5, 2.0, 2.5]}
+    RSI_POOL = [(30, 60), (35, 60), (40, 60), (30, 65)]  # small enough it never needs shrinking
 
-    strategy_values = list(STRATEGY_PRESETS.keys()) if "strategies" in flags else None
-    sl_values = [1.2, 1.5, 1.7, 2.0, 2.5] if "sl" in flags else None
-    rsi_pairs = [(30, 60), (35, 60), (40, 60), (30, 65)] if "rsi" in flags else None
+    rrr_values = RRR_POOLS[pool_tier] if "rrr" in sweep_axes else None
+    score_values = SCORE_POOLS[pool_tier] if "score" in sweep_axes else None
+    sl_values = SL_POOLS[pool_tier] if "sl" in sweep_axes else None
+    rsi_pairs = RSI_POOL if "rsi" in sweep_axes else None
+    strategy_values = list(STRATEGY_PRESETS.keys()) if "strategies" in sweep_axes else None
 
-    flag_str = f" [{', '.join(sorted(flags))}]" if flags else ""
+    flag_str = "" if used_default_axes else f" [{', '.join(sorted(sweep_axes))}]"
     progress_msg = await update.message.reply_text(
         f"⏳ Running optimization sweep — `{days}d` on `{label.upper()}`{flag_str}... `0%`",
         parse_mode="Markdown"
@@ -1017,13 +1029,12 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_edit_time = [0.0]
     last_pct = [-1]
 
-    # 2. Throttled Progress Callback (Prevents Telegram API Rate-Limit Errors)
     def progress_callback(pct):
         now = time.time()
         if pct != last_pct[0] and (now - last_edit_time[0] >= 1.5 or pct == 100):
             last_edit_time[0] = now
             last_pct[0] = pct
-            
+
             async def _edit():
                 try:
                     await progress_msg.edit_text(
@@ -1061,42 +1072,57 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ **Sweep failed:** {first_error}", parse_mode="Markdown")
         return
 
-    valid_sorted = sorted(valid, key=lambda g: g["net_r"], reverse=True)
+    # 3. Rank by Net R, but push combos with too few closed trades to the bottom —
+    # a +5R result from one lucky trade is not a "better" setting than +2R from 20.
+    min_sample = result.get("min_sample", MIN_SWEEP_SAMPLE if 'MIN_SWEEP_SAMPLE' in dir() else 5)
+
+    def sample_size(g):
+        return g.get("wins", 0) + g.get("losses", 0)
+
+    reliable = sorted([g for g in valid if sample_size(g) >= min_sample], key=lambda g: g["net_r"], reverse=True)
+    thin = sorted([g for g in valid if sample_size(g) < min_sample], key=lambda g: g["net_r"], reverse=True)
+    valid_sorted = reliable + thin
 
     def describe(g):
-        parts = [f"RRR `1:{g['min_rrr']}`", f"Score `{g['min_confluence_score']}`"]
+        parts = []
         if result.get("swept_strategies") and "strategy" in g:
-            strat_display = g['strategy'].replace('_', ' ').title()
-            parts.insert(0, f"`{strat_display}`")
+            parts.append(f"`{g['strategy'].replace('_', ' ').title()}`")
+        if result.get("swept_rrr"):
+            parts.append(f"RRR `1:{g['min_rrr']}`")
+        if result.get("swept_score"):
+            parts.append(f"Score `{g['min_confluence_score']}`")
         if result.get("swept_sl") and "sl_atr_mult" in g:
             parts.append(f"SL `{g['sl_atr_mult']}x`")
         if result.get("swept_rsi") and "rsi_pair" in g:
             parts.append(f"RSI `{g['rsi_pair'][0]}/{g['rsi_pair'][1]}`")
-        return " ".join(parts)
+        return " ".join(parts) if parts else "(single combination)"
 
     base_strat = ALERT_STATE.get("active_strategy", "smc_confluence").replace("_", " ").title()
     base_rsi = f"{ALERT_STATE.get('rsi_buy_threshold', 30)}/{ALERT_STATE.get('rsi_sell_threshold', 70)}"
     base_sl = f"{ALERT_STATE.get('sl_atr_mult', 1.5)}x"
+    base_rrr = f"1:{ALERT_STATE.get('min_rrr', 1.5)}"
+    base_score = f"{ALERT_STATE.get('min_confluence_score', 35)}/100"
     struct_gate = "ON ✅" if ALERT_STATE.get("require_structure_break") else "OFF ❌"
     vol_gate = "ON ✅" if ALERT_STATE.get("require_volume_atr_filter") else "OFF ❌"
 
     lines = [f"🧪 **OPTIMIZATION SWEEP — {label.upper()}** ({days}d | ⚡ `{elapsed}s`)\n"]
 
     baselines = []
-    if "strategies" not in flags: baselines.append(f"Strategy: `{base_strat}`")
-    if "sl" not in flags: baselines.append(f"SL: `{base_sl}`")
-    if "rsi" not in flags: baselines.append(f"RSI: `{base_rsi}`")
+    if not result.get("swept_strategies"): baselines.append(f"Strategy: `{base_strat}`")
+    if not result.get("swept_rrr"): baselines.append(f"Min RRR: `{base_rrr}`")
+    if not result.get("swept_score"): baselines.append(f"Min Score: `{base_score}`")
+    if not result.get("swept_sl"): baselines.append(f"SL: `{base_sl}`")
+    if not result.get("swept_rsi"): baselines.append(f"RSI: `{base_rsi}`")
 
-    lines.append("📌 **Fixed Baselines:** " + " | ".join(baselines))
-    lines.append(f"⚙️ **Hard Gates:** Structure: {struct_gate} | Vol/ATR: {vol_gate}\n")
+    lines.append("📌 **Fixed Baselines:** " + (" | ".join(baselines) if baselines else "*(none — every axis swept)*"))
+    lines.append(f"⚙️ **Hard Gates:** Structure: {struct_gate} | Vol/ATR: {vol_gate}")
+    lines.append(f"📏 *Combos with < {min_sample} closed trades are shown but ranked last (unreliable sample size).*\n")
 
-    # BUGFIX: the sweep used to compute valid_sorted/describe() and then never
-    # actually append the results to `lines` — the command ran a full sweep and
-    # reported nothing.
-    lines.append("🏆 **Top Results (by Net R):**")
+    lines.append("🏆 **Top Results (by Net R, reliable samples first):**")
     for i, g in enumerate(valid_sorted[:10], 1):
+        thin_flag = " ⚠️*low sample*" if sample_size(g) < min_sample else ""
         lines.append(
-            f"`{i}.` {describe(g)}\n"
+            f"`{i}.` {describe(g)}{thin_flag}\n"
             f"    → Net `{g['net_r']}R` | WR `{g['win_rate']}%` "
             f"({g['wins']}W/{g['losses']}L) | Avg `{g['avg_r']}R` | DD `{g['max_drawdown_r']}R`"
         )
@@ -1106,9 +1132,6 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "increases overfit risk — validate on out-of-sample data before live deployment.*"
     )
 
-    # 3. Line-by-Line Safe Character Truncation (reserve room for the disclaimer,
-    # which used to be appended BEFORE truncation and so was often the first
-    # thing cut off).
     budget = 3800 - len(disclaimer) - 40
     final_lines = []
     current_len = 0
