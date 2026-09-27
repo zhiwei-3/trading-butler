@@ -943,15 +943,98 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(msg, parse_mode="Markdown")
 
+_LAST_SWEEP_RESULTS = {}
+
 @admin_only
 async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     AXIS_FLAGS = ("strategies", "sl", "rsi", "score", "rrr")
+    RANK_FLAGS = ("calmar",)
     args = context.args
+    chat_id = update.effective_chat.id
+
+    # ---------------------------------------------------------- apply subcommand
+    if args and args[0].lower() == "apply":
+        if len(args) < 2 or not args[1].isdigit():
+            await update.effective_message.reply_text(
+                "⚠️ **Usage:** `/optimize apply <rank>` — rank is the `N.` number "
+                "from the last `/optimize` results table in this chat.",
+                parse_mode="Markdown"
+            )
+            return
+
+        cached = _LAST_SWEEP_RESULTS.get(chat_id)
+        if not cached:
+            await update.effective_message.reply_text(
+                "❌ No sweep results cached for this chat yet. Run `/optimize` first.",
+                parse_mode="Markdown"
+            )
+            return
+
+        rank = int(args[1])
+        rows, meta = cached["rows"], cached["meta"]
+        if not (1 <= rank <= len(rows)):
+            await update.effective_message.reply_text(
+                f"❌ Rank must be between `1` and `{len(rows)}` (from the last sweep's table).",
+                parse_mode="Markdown"
+            )
+            return
+
+        row = rows[rank - 1]
+        old = {
+            "active_strategy": ALERT_STATE.get("active_strategy"),
+            "min_rrr": ALERT_STATE.get("min_rrr"),
+            "min_confluence_score": ALERT_STATE.get("min_confluence_score"),
+            "sl_atr_mult": ALERT_STATE.get("sl_atr_mult"),
+            "rsi_buy_threshold": ALERT_STATE.get("rsi_buy_threshold"),
+            "rsi_sell_threshold": ALERT_STATE.get("rsi_sell_threshold"),
+            "timeframe_mode": ALERT_STATE.get("timeframe_mode"),
+        }
+
+        ALERT_STATE["active_strategy"] = row["strategy"]
+        ALERT_STATE["min_rrr"] = row["min_rrr"]
+        ALERT_STATE["min_confluence_score"] = row["min_confluence_score"]
+        ALERT_STATE["sl_atr_mult"] = row["sl_atr_mult"]
+        ALERT_STATE["rsi_buy_threshold"], ALERT_STATE["rsi_sell_threshold"] = row["rsi_pair"]
+
+        # The result was backtested on a specific timeframe preset — carry that
+        # over too, otherwise the applied SL/RRR/score are being validated against
+        # a preset the live bot isn't actually running.
+        tf_note = ""
+        sweep_mode = meta.get("mode")
+        if sweep_mode in TIMEFRAME_PRESETS and sweep_mode != old["timeframe_mode"]:
+            preset = TIMEFRAME_PRESETS[sweep_mode]
+            ALERT_STATE["timeframe_mode"] = sweep_mode
+            ALERT_STATE["entry_tf"] = preset["entry"]
+            ALERT_STATE["trend_tf"] = preset["trend"]
+            ALERT_STATE["macro_tf"] = preset["macro"]
+            tf_note = f"\n• **Timeframe:** `{old['timeframe_mode']}` ➡️ `{sweep_mode}` *(matches the backtest this result came from)*"
+
+        ALERT_STATE["last_rsi_signal"] = None
+        save_settings()
+
+        await update.effective_message.reply_text(
+            f"✅ **Applied Sweep Result #{rank}**\n\n"
+            f"• **Strategy:** `{old['active_strategy']}` ➡️ `{row['strategy']}`\n"
+            f"• **Min RRR:** `1:{old['min_rrr']}` ➡️ `1:{row['min_rrr']}`\n"
+            f"• **Min Score:** `{old['min_confluence_score']}` ➡️ `{row['min_confluence_score']}`\n"
+            f"• **SL ATR Mult:** `{old['sl_atr_mult']}x` ➡️ `{row['sl_atr_mult']}x`\n"
+            f"• **RSI:** `{old['rsi_buy_threshold']}/{old['rsi_sell_threshold']}` ➡️ "
+            f"`{row['rsi_pair'][0]}/{row['rsi_pair'][1]}`"
+            f"{tf_note}\n\n"
+            f"📊 *Backtested: Net `{row['net_r']}R` | WR `{row['win_rate']}%` "
+            f"({row['wins']}W/{row['losses']}L) | DD `{row['max_drawdown_r']}R`*\n\n"
+            "⚠️ *Live-armed execution now uses these parameters immediately — "
+            "watch `/diagnose` or a few live signals before trusting size.*",
+            parse_mode="Markdown"
+        )
+        return
+
+    # ---------------------------------------------------------- normal sweep run
     days = 30
     mode = None
     sweep_axes = set()
+    rank_mode = "net_r"
 
-    # 1. Flexible Argument Parser
     if args:
         remaining_args = list(args)
 
@@ -963,6 +1046,8 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             arg_lower = arg.lower()
             if arg_lower in AXIS_FLAGS:
                 sweep_axes.add(arg_lower)
+            elif arg_lower in RANK_FLAGS:
+                rank_mode = arg_lower
             elif arg_lower in TIMEFRAME_PRESETS:
                 mode = arg_lower
             else:
@@ -972,19 +1057,20 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"⚠️ **Unknown argument(s):** `{', '.join(unprocessed)}`\n\n"
                 "**Usage:** `/optimize [days] [scalp|intraday|swing] [flags]`\n"
-                f"**Flags (combine up to 3):** `{'`, `'.join(AXIS_FLAGS)}`\n\n"
+                f"**Sweep flags (combine up to 3):** `{'`, `'.join(AXIS_FLAGS)}`\n"
+                f"**Ranking flags:** `{'`, `'.join(RANK_FLAGS)}` *(risk-adjusted; default ranks by raw Net R)*\n\n"
                 "**Examples:**\n"
                 "• `/optimize scalp` *(no flags → sweeps RRR + Score, the legacy default)*\n"
                 "• `/optimize sl` *(sweeps ONLY sl_atr_mult — RRR/Score/RSI/Strategy stay fixed at current live settings)*\n"
                 "• `/optimize 14 intraday strategies`\n"
-                "• `/optimize swing sl rsi`",
+                "• `/optimize swing sl rsi calmar` *(rank by Net R ÷ Max Drawdown instead of raw Net R)*\n"
+                "• `/optimize apply 2` *(promote result #2 from the last sweep table into live settings)*",
                 parse_mode="Markdown"
             )
             return
 
     days = max(1, min(days, 180))
 
-    # No flags at all -> preserve the historical default: sweep RRR x Score together.
     used_default_axes = not sweep_axes
     if used_default_axes:
         sweep_axes = {"rrr", "score"}
@@ -1004,14 +1090,11 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     label = mode or ALERT_STATE.get('timeframe_mode', 'scalp')
 
-    # 2. Value pools per axis. Pools shrink as more axes are combined at once to
-    # avoid a combinatorial explosion — tier 1 (the bare-default rrr+score case,
-    # or any single explicit axis) gets the full, original grid.
     pool_tier = 1 if used_default_axes else min(len(sweep_axes), 3)
     RRR_POOLS = {1: [1.3, 1.5, 2.0, 2.5, 3.0], 2: [1.5, 2.0, 2.5, 3.0], 3: [1.5, 2.0, 3.0]}
     SCORE_POOLS = {1: [20, 25, 30, 35, 40], 2: [25, 30, 35, 40], 3: [25, 35]}
     SL_POOLS = {1: [1.2, 1.5, 1.7, 2.0, 2.5], 2: [1.2, 1.5, 2.0, 2.5], 3: [1.5, 2.0, 2.5]}
-    RSI_POOL = [(30, 60), (35, 60), (40, 60), (30, 65)]  # small enough it never needs shrinking
+    RSI_POOL = [(30, 60), (35, 60), (40, 60), (30, 65)]
 
     rrr_values = RRR_POOLS[pool_tier] if "rrr" in sweep_axes else None
     score_values = SCORE_POOLS[pool_tier] if "score" in sweep_axes else None
@@ -1020,8 +1103,9 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     strategy_values = list(STRATEGY_PRESETS.keys()) if "strategies" in sweep_axes else None
 
     flag_str = "" if used_default_axes else f" [{', '.join(sorted(sweep_axes))}]"
+    rank_str = " · calmar" if rank_mode == "calmar" else ""
     progress_msg = await update.message.reply_text(
-        f"⏳ Running optimization sweep — `{days}d` on `{label.upper()}`{flag_str}... `0%`",
+        f"⏳ Running optimization sweep — `{days}d` on `{label.upper()}`{flag_str}{rank_str}... `0%`",
         parse_mode="Markdown"
     )
 
@@ -1038,7 +1122,7 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async def _edit():
                 try:
                     await progress_msg.edit_text(
-                        f"⏳ Running optimization sweep — `{days}d` on `{label.upper()}`{flag_str}... `{pct}%`",
+                        f"⏳ Running optimization sweep — `{days}d` on `{label.upper()}`{flag_str}{rank_str}... `{pct}%`",
                         parse_mode="Markdown"
                     )
                 except Exception:
@@ -1072,16 +1156,29 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ **Sweep failed:** {first_error}", parse_mode="Markdown")
         return
 
-    # 3. Rank by Net R, but push combos with too few closed trades to the bottom —
-    # a +5R result from one lucky trade is not a "better" setting than +2R from 20.
-    min_sample = result.get("min_sample", MIN_SWEEP_SAMPLE if 'MIN_SWEEP_SAMPLE' in dir() else 5)
+    min_sample = result.get("min_sample", MIN_SWEEP_SAMPLE)
 
     def sample_size(g):
         return g.get("wins", 0) + g.get("losses", 0)
 
-    reliable = sorted([g for g in valid if sample_size(g) >= min_sample], key=lambda g: g["net_r"], reverse=True)
-    thin = sorted([g for g in valid if sample_size(g) < min_sample], key=lambda g: g["net_r"], reverse=True)
+    def calmar_score(g):
+        # Net R per unit of drawdown taken to get there — a flat +0.5R with near-zero
+        # drawdown outranks a spikier +3R that round-tripped through a big -2.5R dip.
+        dd = g.get("max_drawdown_r", 0.0)
+        return (g["net_r"] / dd) if dd > 0.01 else g["net_r"]
+
+    sort_key = calmar_score if rank_mode == "calmar" else (lambda g: g["net_r"])
+
+    reliable = sorted([g for g in valid if sample_size(g) >= min_sample], key=sort_key, reverse=True)
+    thin = sorted([g for g in valid if sample_size(g) < min_sample], key=sort_key, reverse=True)
     valid_sorted = reliable + thin
+
+    # Cache exactly what gets displayed below, so `/optimize apply <rank>` maps
+    # 1:1 onto the row numbers the operator is looking at.
+    _LAST_SWEEP_RESULTS[chat_id] = {
+        "rows": valid_sorted[:10],
+        "meta": {"mode": label, "days": days, "rank_mode": rank_mode},
+    }
 
     def describe(g):
         parts = []
@@ -1118,14 +1215,18 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append(f"⚙️ **Hard Gates:** Structure: {struct_gate} | Vol/ATR: {vol_gate}")
     lines.append(f"📏 *Combos with < {min_sample} closed trades are shown but ranked last (unreliable sample size).*\n")
 
-    lines.append("🏆 **Top Results (by Net R, reliable samples first):**")
+    rank_label = "Net R ÷ Max Drawdown (risk-adjusted)" if rank_mode == "calmar" else "Net R"
+    lines.append(f"🏆 **Top Results (by {rank_label}, reliable samples first):**")
     for i, g in enumerate(valid_sorted[:10], 1):
         thin_flag = " ⚠️*low sample*" if sample_size(g) < min_sample else ""
+        calmar_str = f" | Calmar `{round(calmar_score(g), 2)}`" if rank_mode == "calmar" else ""
         lines.append(
             f"`{i}.` {describe(g)}{thin_flag}\n"
             f"    → Net `{g['net_r']}R` | WR `{g['win_rate']}%` "
-            f"({g['wins']}W/{g['losses']}L) | Avg `{g['avg_r']}R` | DD `{g['max_drawdown_r']}R`"
+            f"({g['wins']}W/{g['losses']}L) | Avg `{g['avg_r']}R` | DD `{g['max_drawdown_r']}R`{calmar_str}"
         )
+
+    lines.append("\n💡 *Promote a result with* `/optimize apply <rank>`.")
 
     disclaimer = (
         "\n⚠️ *Backtested on historical bars with synthetic spread. Sweeping multiple dimensions "
