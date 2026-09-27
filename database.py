@@ -67,6 +67,51 @@ def init_db():
                 cursor.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_ticket ON signals(ticket)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_ticket2 ON signals(ticket2)")
+
+        # --- optimization sweep history ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sweep_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                symbol TEXT,
+                timeframe_mode TEXT,
+                days INTEGER,
+                rank_mode TEXT,
+                swept_strategies INTEGER DEFAULT 0,
+                swept_sl INTEGER DEFAULT 0,
+                swept_rsi INTEGER DEFAULT 0,
+                swept_rrr INTEGER DEFAULT 0,
+                swept_score INTEGER DEFAULT 0,
+                min_sample INTEGER,
+                elapsed_seconds REAL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sweep_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL REFERENCES sweep_runs(id),
+                rank INTEGER,
+                strategy TEXT,
+                min_rrr REAL,
+                min_confluence_score INTEGER,
+                sl_atr_mult REAL,
+                rsi_buy REAL,
+                rsi_sell REAL,
+                total_trades INTEGER,
+                wins INTEGER,
+                losses INTEGER,
+                open_trades INTEGER,
+                win_rate REAL,
+                avg_r REAL,
+                net_r REAL,
+                max_drawdown_r REAL,
+                calmar REAL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sweep_results_run ON sweep_results(run_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sweep_runs_chat ON sweep_runs(chat_id)")
+
         conn.commit()
 
 def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score, dual_entry=False):
@@ -212,3 +257,85 @@ def get_daily_performance_stats():
             "today_wins": today_wins,
             "today_losses": today_losses
         }
+
+def log_sweep_run(chat_id, symbol, timeframe_mode, days, rank_mode, swept_flags, min_sample, elapsed_seconds, rows):
+    """
+    Persists a completed /optimize sweep: one sweep_runs header row plus one
+    sweep_results row per graded combo in the FULL sorted grid (not just the
+    top 10 shown in chat), so a later /optimize apply <run_id> <rank> can
+    reach deeper than what was printed, and history survives a bot restart —
+    unlike the old in-memory-only cache.
+    """
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO sweep_runs
+                (chat_id, symbol, timeframe_mode, days, rank_mode,
+                 swept_strategies, swept_sl, swept_rsi, swept_rrr, swept_score,
+                 min_sample, elapsed_seconds)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                chat_id, symbol, timeframe_mode, days, rank_mode,
+                int(swept_flags.get("strategies", False)), int(swept_flags.get("sl", False)),
+                int(swept_flags.get("rsi", False)), int(swept_flags.get("rrr", False)),
+                int(swept_flags.get("score", False)), min_sample, elapsed_seconds,
+            ))
+            run_id = cursor.lastrowid
+
+            for i, row in enumerate(rows, start=1):
+                rsi_pair = row.get("rsi_pair", (None, None))
+                cursor.execute("""
+                    INSERT INTO sweep_results
+                    (run_id, rank, strategy, min_rrr, min_confluence_score, sl_atr_mult,
+                     rsi_buy, rsi_sell, total_trades, wins, losses, open_trades,
+                     win_rate, avg_r, net_r, max_drawdown_r, calmar)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    run_id, i, row.get("strategy"), row.get("min_rrr"), row.get("min_confluence_score"),
+                    row.get("sl_atr_mult"), rsi_pair[0], rsi_pair[1],
+                    row.get("total_trades", 0), row.get("wins", 0), row.get("losses", 0), row.get("open", 0),
+                    row.get("win_rate"), row.get("avg_r"), row.get("net_r"), row.get("max_drawdown_r"),
+                    row.get("calmar"),
+                ))
+            conn.commit()
+            return run_id
+    except Exception as e:
+        logging.error(f"⚠️ Failed to log sweep run to DB: {e}")
+        return None
+
+def get_sweep_run(run_id):
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT * FROM sweep_runs WHERE id = ?", (run_id,)).fetchone()
+        return dict(row) if row else None
+
+def get_latest_sweep_run(chat_id):
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM sweep_runs WHERE chat_id = ? ORDER BY id DESC LIMIT 1", (chat_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+def get_sweep_results(run_id, limit=None):
+    query = "SELECT * FROM sweep_results WHERE run_id = ? ORDER BY rank ASC"
+    params = [run_id]
+    if limit:
+        query += " LIMIT ?"
+        params.append(limit)
+    with get_db_connection() as conn:
+        return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+def count_sweep_runs(chat_id):
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM sweep_runs WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+def get_sweep_history(chat_id, limit=10, offset=0):
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM sweep_runs WHERE chat_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+            (chat_id, limit, offset)
+        ).fetchall()
+        return [dict(r) for r in rows]
