@@ -1,5 +1,6 @@
 import logging
 from telegram import BotCommand
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from config import ALERT_STATE, TELEGRAM_TOKEN, USER_ID, save_settings
 from database import init_db
@@ -14,6 +15,10 @@ from bot.jobs import (
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Logs uncaught exceptions raised by command handlers."""
+    # Suppress verbose tracebacks for transient network hiccups during polling
+    if isinstance(context.error, (NetworkError, TimedOut)):
+        logging.warning(f"⚠️ Network connection dropped (auto-retrying): {context.error}")
+        return
     logging.error("Exception occurred while handling an update:", exc_info=context.error)
 
 async def post_init_setup(application: Application) -> None:

@@ -25,6 +25,23 @@ from bot.jobs import (
     restart_heartbeat_job,
 )
 
+# Shared by /optimize view and /optimize history. "column" feeds the DB query
+# (history) or the dict key (view, sorted in Python); "reverse"/"sql_dir" both
+# encode the same direction in each engine's own vocabulary. dd sorts ascending
+# (lower drawdown is better) — everything else sorts descending.
+SORT_FIELDS = {
+    "netr":     {"column": "net_r",          "sql_dir": "DESC", "reverse": True,  "label": "Net R"},
+    "trades":   {"column": "total_trades",   "sql_dir": "DESC", "reverse": True,  "label": "# Trades"},
+    "avgr":     {"column": "avg_r",          "sql_dir": "DESC", "reverse": True,  "label": "Avg R"},
+    "dd":       {"column": "max_drawdown_r", "sql_dir": "ASC",  "reverse": False, "label": "Max Drawdown"},
+    "winrate":  {"column": "win_rate",       "sql_dir": "DESC", "reverse": True,  "label": "Win Rate"},
+    "strategy": {"column": "strategy",       "sql_dir": "ASC",  "reverse": False, "label": "Strategy"},
+}
+
+def _resolve_sort_key(token):
+    """Returns the canonical SORT_FIELDS key for a token, or None if it's not a sort keyword."""
+    return token if token in SORT_FIELDS else None
+
 def _format_sweep_rows(rows, min_sample, rank_mode, show_axes):
     """Shared renderer for a sweep's top-10 rows — used by both the just-finished
     /optimize output and /optimize view <run_id> so the two never drift out of
@@ -1099,12 +1116,24 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args and args[0].lower() == "view":
         if len(args) < 2 or not args[1].isdigit():
             await update.effective_message.reply_text(
-                "⚠️ **Usage:** `/optimize view <run_id>` — see `/optimize history` for run ids.",
+                "⚠️ **Usage:** `/optimize view <run_id> [sort]`\n\n"
+                f"**Sort keys:** `{'`, `'.join(SORT_FIELDS)}` (default: however the sweep itself ranked)\n"
+                "See `/optimize history` for run ids.",
                 parse_mode="Markdown"
             )
             return
 
         run_id = int(args[1])
+        sort_key = None
+        if len(args) >= 3:
+            sort_key = _resolve_sort_key(args[2].lower())
+            if sort_key is None:
+                await update.effective_message.reply_text(
+                    f"❌ Unknown sort key `{args[2]}`. Valid: `{'`, `'.join(SORT_FIELDS)}`.",
+                    parse_mode="Markdown"
+                )
+                return
+
         run = get_sweep_run(run_id)
         if not run or run["chat_id"] != chat_id:
             await update.effective_message.reply_text(
@@ -1119,14 +1148,24 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        if sort_key:
+            spec = SORT_FIELDS[sort_key]
+            rows = sorted(
+                rows,
+                key=lambda r: (r.get(spec["column"]) if r.get(spec["column"]) is not None else float("-inf")),
+                reverse=spec["reverse"],
+            )
+            rank_label = spec["label"]
+        else:
+            rank_label = "Net R ÷ Max Drawdown (risk-adjusted)" if run["rank_mode"] == "calmar" \
+                else "Avg R per Trade" if run["rank_mode"] == "avgr" else "Net R"
+
         axes = {
             "strategies": bool(run["swept_strategies"]), "sl": bool(run["swept_sl"]),
             "rsi": bool(run["swept_rsi"]), "rrr": bool(run["swept_rrr"]), "score": bool(run["swept_score"]),
         }
         if not any(axes.values()):
             axes = {"rrr": True, "score": True}  # legacy bare-default sweep
-
-        rank_label = "Net R ÷ Max Drawdown (risk-adjusted)" if run["rank_mode"] == "calmar" else "Net R"
 
         lines = [
             f"🧪 **SWEEP `#{run_id}`** — `{run['timeframe_mode'].upper()}` "
@@ -1136,6 +1175,8 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         lines.extend(_format_sweep_rows(rows, run["min_sample"], run["rank_mode"], axes))
         lines.append(f"\n💡 `/optimize apply {run_id} <rank>` to promote one of these.")
+        if not sort_key:
+            lines.append(f"*(add a sort key to reorder: `{'`, `'.join(SORT_FIELDS)}` — e.g.* `/optimize view {run_id} avgr`*)*")
 
         budget = 3900
         final_lines, current_len = [], 0
@@ -1153,8 +1194,15 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args and args[0].lower() == "history":
         PAGE_SIZE = 10
         sub_args = [a.lower() for a in args[1:]]
-        sort_best = "best" in sub_args
-        filtered = [a for a in sub_args if a != "best"]
+
+        sort_key = None
+        filtered = []
+        for a in sub_args:
+            resolved = _resolve_sort_key(a) if sort_key is None else None
+            if resolved:
+                sort_key = resolved
+            else:
+                filtered.append(a)
 
         show_all = bool(filtered) and filtered[0] == "all"
         page = 1
@@ -1170,8 +1218,13 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         limit = total if show_all else PAGE_SIZE
         offset = 0 if show_all else (page - 1) * PAGE_SIZE
-        fetch_fn = get_sweep_history_ranked if sort_best else get_sweep_history
-        runs = fetch_fn(chat_id, limit=limit, offset=offset)
+
+        if sort_key:
+            spec = SORT_FIELDS[sort_key]
+            runs = get_sweep_history_ranked(chat_id, sort_column=spec["column"], sort_dir=spec["sql_dir"],
+                                             limit=limit, offset=offset)
+        else:
+            runs = get_sweep_history(chat_id, limit=limit, offset=offset)
 
         if not runs:
             last_page = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -1182,7 +1235,7 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        sort_label = " — sorted by best Net R" if sort_best else ""
+        sort_label = f" — sorted by {SORT_FIELDS[sort_key]['label']}" if sort_key else ""
         header = f"🗂️ **SWEEP HISTORY**{sort_label} — `{total}` total"
         if not show_all:
             last_page = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -1195,13 +1248,24 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ("rsi", run["swept_rsi"]), ("rrr", run["swept_rrr"]), ("score", run["swept_score"]),
             ) if flag]
             axes_str = "+".join(axes) if axes else "rrr+score"
-            if sort_best:
-                top_str = f"Net `{run['top_net_r']}R` | Avg `{run['top_avg_r']}R` | DD `{run['top_dd']}R`"
+
+            if sort_key:
+                top_strategy = run.get("top_strategy") or "?"
+                strat_label = top_strategy.replace("_", " ").title()
+                top_str = (
+                    f"`{strat_label}` — Net `{run['top_net_r']}R` | Trades `{run['top_trades']}` | "
+                    f"Avg `{run['top_avg_r']}R` | WR `{run['top_win_rate']}%` | DD `{run['top_dd']}R`"
+                )
                 thin_flag = " ⚠️*low sample*" if (run["top_wins"] + run["top_losses"]) < run["min_sample"] else ""
             else:
                 top = get_sweep_results(run["id"], limit=1)
-                top_str = f"Net `{top[0]['net_r']}R`" if top else "n/a"
+                if top:
+                    strat_label = (top[0].get("strategy") or "?").replace("_", " ").title()
+                    top_str = f"`{strat_label}` — Net `{top[0]['net_r']}R`"
+                else:
+                    top_str = "n/a"
                 thin_flag = ""
+
             lines.append(
                 f"`#{run['id']}` {run['created_at']} — `{run['timeframe_mode']}` {run['days']}d "
                 f"[{axes_str}] rank=`{run['rank_mode']}`{thin_flag} — top: {top_str}\n"
@@ -1209,7 +1273,7 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         if not show_all:
-            nav_prefix = "history best" if sort_best else "history"
+            nav_prefix = f"history {sort_key}" if sort_key else "history"
             nav = []
             if page > 1:
                 nav.append(f"`/optimize {nav_prefix} {page - 1}` ◀️ newer")
@@ -1218,8 +1282,8 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if nav:
                 lines.append("\n" + " · ".join(nav))
             lines.append(f"*(or* `/optimize {nav_prefix} all` *to list every sweep in one message)*")
-            if not sort_best:
-                lines.append("*(add* `best` *to sort by top Net R instead of recency, e.g.* `/optimize history best`*)*")
+            if not sort_key:
+                lines.append(f"*(add a sort key to reorder: `{'`, `'.join(SORT_FIELDS)}` — e.g.* `/optimize history netr`*)*")
 
         budget = 3900
         final_lines, current_len = [], 0

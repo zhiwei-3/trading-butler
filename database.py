@@ -340,19 +340,20 @@ def get_sweep_history(chat_id, limit=10, offset=0):
         ).fetchall()
         return [dict(r) for r in rows]
 
-def get_sweep_history_ranked(chat_id, limit=10, offset=0):
-    """Lists past sweep runs sorted by their #1 saved result's Net R, descending —
-    for `/optimize history best`. Surfaces the best-performing sweep this chat has
-    ever run, instead of only the most recent one."""
+def get_sweep_history_ranked(chat_id, sort_column="net_r", sort_dir="DESC", limit=10, offset=0):
+    """Lists past sweep runs sorted by a stat from each run's #1 saved result.
+    sort_column/sort_dir come from a fixed whitelist in bot/commands.py (never
+    from raw user input), so this stays injection-safe despite the f-string."""
     with get_db_connection() as conn:
-        rows = conn.execute("""
-            SELECT sr.*, res.net_r AS top_net_r, res.avg_r AS top_avg_r,
+        query = f"""
+            SELECT sr.*, res.strategy AS top_strategy, res.net_r AS top_net_r, res.avg_r AS top_avg_r,
                    res.win_rate AS top_win_rate, res.wins AS top_wins, res.losses AS top_losses,
-                   res.max_drawdown_r AS top_dd, res.calmar AS top_calmar
+                   res.total_trades AS top_trades, res.max_drawdown_r AS top_dd, res.calmar AS top_calmar
             FROM sweep_runs sr
             JOIN sweep_results res ON res.run_id = sr.id AND res.rank = 1
             WHERE sr.chat_id = ?
-            ORDER BY res.net_r DESC
+            ORDER BY res.{sort_column} {sort_dir}
             LIMIT ? OFFSET ?
-        """, (chat_id, limit, offset)).fetchall()
+        """
+        rows = conn.execute(query, (chat_id, limit, offset)).fetchall()
         return [dict(r) for r in rows]
