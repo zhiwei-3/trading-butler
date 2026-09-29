@@ -1,4 +1,5 @@
 import io
+import math
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
@@ -603,19 +604,22 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
     }
 
 MAX_SWEEP_COMBOS = 150  # hard cap so a stacked sweep can't silently run for ages
-MIN_SWEEP_SAMPLE = 5    # combos with fewer closed trades than this are unreliable and get ranked last
+MIN_SWEEP_SAMPLE = 5    # absolute floor — the real threshold below scales with the
+                         # sweep's day count so short windows don't accept a
+                         # 2-trade combo as "reliable" just because 5 is a small number
 
 def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, score_values=None,
                         strategy_values=None, sl_values=None, rsi_pairs=None,
                         spread_pips=2.0, progress_callback=None):
-    """Sweeps any subset of strategy x min_rrr x min_confluence_score x sl_atr_mult x
-    (rsi_buy, rsi_sell) pairs. Pass None for ANY axis to keep it fixed at the current
-    ALERT_STATE / run_backtest default instead of sweeping it.
+    """
+    ... (existing docstring) ...
 
-    BUGFIX: previously only strategy_values/sl_values/rsi_pairs honored "None means
-    fixed" — rrr_values/score_values ignored their own None default and ALWAYS
-    swept a hardcoded 5-value grid regardless of what the caller passed. All five
-    axes are now handled the same way: swept only when the caller supplies values.
+    Reliability bar: a combo needs at least max(MIN_SWEEP_SAMPLE, ceil(days * 0.5))
+    closed trades to be considered reliable. A 90-day sweep therefore needs 45+
+    closed trades before its Net R / Calmar / Avg R is trusted for ranking or
+    saved to history; a 10-day sweep only needs 5. This scales the bar with how
+    much data actually backed the result, instead of one fixed number regardless
+    of window length.
     """
     swept = {
         "strategies": strategy_values is not None,
@@ -636,7 +640,6 @@ def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, sc
         return {"error": f"Sweep would run {total_combos} backtests (cap is {MAX_SWEEP_COMBOS}). "
                           f"Sweep fewer dimensions at once, or narrow the value lists."}
 
-    # Fetch and precompute MT5 history once; every combo below reuses it.
     prepared = _prepare_history(symbol, days, timeframe_mode)
     if "error" in prepared:
         return {"error": prepared["error"]}
@@ -689,6 +692,8 @@ def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, sc
         except Exception:
             pass
 
+    effective_min_sample = max(MIN_SWEEP_SAMPLE, math.ceil(days * 0.5))
+
     return {
         "symbol": symbol, "mode": timeframe_mode, "days": days, "grid": results,
         "swept_strategies": swept["strategies"],
@@ -696,7 +701,7 @@ def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, sc
         "swept_rsi": swept["rsi"],
         "swept_rrr": swept["rrr"],
         "swept_score": swept["score"],
-        "min_sample": MIN_SWEEP_SAMPLE,
+        "min_sample": effective_min_sample,
     }
 
 def generate_equity_chart(equity_curve, title="Backtest Equity Curve"):

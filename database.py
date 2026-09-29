@@ -339,3 +339,20 @@ def get_sweep_history(chat_id, limit=10, offset=0):
             (chat_id, limit, offset)
         ).fetchall()
         return [dict(r) for r in rows]
+
+def get_sweep_history_ranked(chat_id, limit=10, offset=0):
+    """Lists past sweep runs sorted by their #1 saved result's Net R, descending —
+    for `/optimize history best`. Surfaces the best-performing sweep this chat has
+    ever run, instead of only the most recent one."""
+    with get_db_connection() as conn:
+        rows = conn.execute("""
+            SELECT sr.*, res.net_r AS top_net_r, res.avg_r AS top_avg_r,
+                   res.win_rate AS top_win_rate, res.wins AS top_wins, res.losses AS top_losses,
+                   res.max_drawdown_r AS top_dd, res.calmar AS top_calmar
+            FROM sweep_runs sr
+            JOIN sweep_results res ON res.run_id = sr.id AND res.rank = 1
+            WHERE sr.chat_id = ?
+            ORDER BY res.net_r DESC
+            LIMIT ? OFFSET ?
+        """, (chat_id, limit, offset)).fetchall()
+        return [dict(r) for r in rows]

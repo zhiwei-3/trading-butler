@@ -8,11 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from config import USER_ID, ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, CONFLUENCE_WEIGHTS, TF_LABELS, save_settings
-from database import (
-    get_signal_stats,
-    log_sweep_run, get_sweep_run, get_latest_sweep_run,
-    get_sweep_results, get_sweep_history, count_sweep_runs,
-)
+from database import *
 from mt5_engine import get_gold_symbol, fetch_candles, calculate_position_size, get_tick
 from trade_engine import (
     list_managed_positions, close_position, close_all_managed,
@@ -985,7 +981,7 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     AXIS_FLAGS = ("strategies", "sl", "rsi", "score", "rrr")
-    RANK_FLAGS = ("calmar",)
+    RANK_FLAGS = ("calmar", "avgr")
     args = context.args
     chat_id = update.effective_chat.id
 
@@ -1024,24 +1020,36 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         lines = [
             f"🧪 **SWEEP `#{run_id}`** — `{run['timeframe_mode'].upper()}` "
-            f"({run['days']}d | ⚡ `{run['elapsed_seconds']}s` | {run['created_at']})\n",
-            f"🏆 **Top {len(rows)} Results (by {rank_label}):**",
+            f"({run['days']}d | ⚡ `{run['elapsed_seconds']}s` | {run['created_at']}) "
+            f"— `{len(rows)}` saved result(s)\n",
+            f"🏆 **Results (by {rank_label}):**",
         ]
         lines.extend(_format_sweep_rows(rows, run["min_sample"], run["rank_mode"], axes))
         lines.append(f"\n💡 `/optimize apply {run_id} <rank>` to promote one of these.")
 
-        await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
+        budget = 3900
+        final_lines, current_len = [], 0
+        for line in lines:
+            if current_len + len(line) + 1 > budget:
+                final_lines.append(f"\n... *(truncated — {len(rows)} results saved; ranks beyond this are still usable with* `/optimize apply {run_id} <rank>` *)*")
+                break
+            final_lines.append(line)
+            current_len += len(line) + 1
+
+        await update.effective_message.reply_text("\n".join(final_lines), parse_mode="Markdown")
         return
 
     # ---------------------------------------------------------- history subcommand
     if args and args[0].lower() == "history":
         PAGE_SIZE = 10
-        sub_args = args[1:]
+        sub_args = [a.lower() for a in args[1:]]
+        sort_best = "best" in sub_args
+        filtered = [a for a in sub_args if a != "best"]
 
-        show_all = bool(sub_args) and sub_args[0].lower() == "all"
+        show_all = bool(filtered) and filtered[0] == "all"
         page = 1
-        if not show_all and sub_args and sub_args[0].isdigit():
-            page = max(1, int(sub_args[0]))
+        if not show_all and filtered and filtered[0].isdigit():
+            page = max(1, int(filtered[0]))
 
         total = count_sweep_runs(chat_id)
         if total == 0:
@@ -1052,7 +1060,8 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         limit = total if show_all else PAGE_SIZE
         offset = 0 if show_all else (page - 1) * PAGE_SIZE
-        runs = get_sweep_history(chat_id, limit=limit, offset=offset)
+        fetch_fn = get_sweep_history_ranked if sort_best else get_sweep_history
+        runs = fetch_fn(chat_id, limit=limit, offset=offset)
 
         if not runs:
             last_page = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -1063,7 +1072,8 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        header = f"🗂️ **SWEEP HISTORY** — `{total}` total"
+        sort_label = " — sorted by best Net R" if sort_best else ""
+        header = f"🗂️ **SWEEP HISTORY**{sort_label} — `{total}` total"
         if not show_all:
             last_page = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
             header += f" (page `{page}`/`{last_page}`)"
@@ -1075,25 +1085,32 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ("rsi", run["swept_rsi"]), ("rrr", run["swept_rrr"]), ("score", run["swept_score"]),
             ) if flag]
             axes_str = "+".join(axes) if axes else "rrr+score"
-            top = get_sweep_results(run["id"], limit=1)
-            top_str = f"Net `{top[0]['net_r']}R`" if top else "n/a"
+            if sort_best:
+                top_str = f"Net `{run['top_net_r']}R` | Avg `{run['top_avg_r']}R` | DD `{run['top_dd']}R`"
+                thin_flag = " ⚠️*low sample*" if (run["top_wins"] + run["top_losses"]) < run["min_sample"] else ""
+            else:
+                top = get_sweep_results(run["id"], limit=1)
+                top_str = f"Net `{top[0]['net_r']}R`" if top else "n/a"
+                thin_flag = ""
             lines.append(
                 f"`#{run['id']}` {run['created_at']} — `{run['timeframe_mode']}` {run['days']}d "
-                f"[{axes_str}] rank=`{run['rank_mode']}` — top: {top_str}\n"
-                f"    → `/optimize apply {run['id']} 1`"
+                f"[{axes_str}] rank=`{run['rank_mode']}`{thin_flag} — top: {top_str}\n"
+                f"    → `/optimize view {run['id']}` · `/optimize apply {run['id']} 1`"
             )
 
         if not show_all:
+            nav_prefix = "history best" if sort_best else "history"
             nav = []
             if page > 1:
-                nav.append(f"`/optimize history {page - 1}` ◀️ newer")
+                nav.append(f"`/optimize {nav_prefix} {page - 1}` ◀️ newer")
             if offset + len(runs) < total:
-                nav.append(f"▶️ older `/optimize history {page + 1}`")
+                nav.append(f"▶️ older `/optimize {nav_prefix} {page + 1}`")
             if nav:
                 lines.append("\n" + " · ".join(nav))
-            lines.append("*(or* `/optimize history all` *to list every sweep in one message)*")
+            lines.append(f"*(or* `/optimize {nav_prefix} all` *to list every sweep in one message)*")
+            if not sort_best:
+                lines.append("*(add* `best` *to sort by top Net R instead of recency, e.g.* `/optimize history best`*)*")
 
-        # Guard against Telegram's ~4096-char message cap on a long "all" listing.
         budget = 3900
         final_lines, current_len = [], 0
         for line in lines:
@@ -1324,16 +1341,35 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dd = g.get("max_drawdown_r", 0.0)
         return (g["net_r"] / dd) if dd > 0.01 else g["net_r"]
 
-    sort_key = calmar_score if rank_mode == "calmar" else (lambda g: g["net_r"])
+    if rank_mode == "calmar":
+        sort_key = calmar_score
+    elif rank_mode == "avgr":
+        sort_key = lambda g: g["avg_r"]
+    else:
+        sort_key = lambda g: g["net_r"]
 
     reliable = sorted([g for g in valid if sample_size(g) >= min_sample], key=sort_key, reverse=True)
     thin = sorted([g for g in valid if sample_size(g) < min_sample], key=sort_key, reverse=True)
     valid_sorted = reliable + thin
 
-    # Persist only the top 10 — this is what /optimize apply and /optimize view
-    # actually need, and keeps sweep_results from growing unbounded (a 3-axis
-    # sweep can grade 100+ combos per run; no need to store all of them forever).
-    top_rows = valid_sorted[:10]
+    # Save every combo that clears the reliability bar for THIS sweep's window —
+    # not a fixed top-10. A 90d sweep might have 40 combos clear a 45-trade bar;
+    # a thin 10d sweep might have zero clear a 5-trade bar. If literally nothing
+    # is reliable, fall back to saving a small flagged sample rather than leaving
+    # history/apply completely empty for that run.
+    reliable_rows = [g for g in valid_sorted if sample_size(g) >= min_sample]
+    if reliable_rows:
+        saved_rows = reliable_rows
+        reliability_note = (
+            f"`{len(saved_rows)}` combo(s) met the reliability bar "
+            f"(≥ `{min_sample}` closed trades — 50% of the `{days}`-day window) and were saved."
+        )
+    else:
+        saved_rows = valid_sorted[:3]
+        reliability_note = (
+            f"⚠️ *No combo reached the `{min_sample}`-trade reliability bar for this `{days}`-day "
+            f"window — saving the top `{len(saved_rows)}` anyway, flagged as low-sample.*"
+        )
     run_id = log_sweep_run(
         chat_id=chat_id, symbol=symbol, timeframe_mode=label, days=days, rank_mode=rank_mode,
         swept_flags={
@@ -1344,7 +1380,7 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "score": result.get("swept_score", False),
         },
         min_sample=min_sample, elapsed_seconds=elapsed,
-        rows=[{**g, "calmar": round(calmar_score(g), 4)} for g in top_rows],
+        rows=[{**g, "calmar": round(calmar_score(g), 4)} for g in saved_rows],
     )
 
     axes_shown = {
@@ -1377,16 +1413,17 @@ async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines.append("📌 **Fixed Baselines:** " + (" | ".join(baselines) if baselines else "*(none — every axis swept)*"))
     lines.append(f"⚙️ **Hard Gates:** Structure: {struct_gate} | Vol/ATR: {vol_gate}")
-    lines.append(f"📏 *Combos with < {min_sample} closed trades are shown but ranked last (unreliable sample size).*\n")
+    lines.append(f"📏 *Combos with < {min_sample} closed trades are shown but ranked last (unreliable sample size).*")
+    lines.append(reliability_note + "\n")
 
-    rank_label = "Net R ÷ Max Drawdown (risk-adjusted)" if rank_mode == "calmar" else "Net R"
-    lines.append(f"🏆 **Top {len(top_rows)} Results (by {rank_label}, reliable samples first):**")
+    rank_label = ("Net R ÷ Max Drawdown (risk-adjusted)" if rank_mode == "calmar"
+                  else "Avg R per Trade" if rank_mode == "avgr" else "Net R")
+    display_rows = saved_rows[:10]
+    lines.append(f"🏆 **Top {len(display_rows)} Results (by {rank_label}, reliable samples first):**")
 
-    # top_rows are still the raw grid dicts (rsi_pair tuple, not rsi_buy/rsi_sell) —
-    # normalize to the same shape _format_sweep_rows expects from the DB.
     normalized = [{**g, "rsi_buy": g.get("rsi_pair", (None, None))[0],
                    "rsi_sell": g.get("rsi_pair", (None, None))[1],
-                   "calmar": round(calmar_score(g), 4)} for g in top_rows]
+                   "calmar": round(calmar_score(g), 4)} for g in display_rows]
     lines.extend(_format_sweep_rows(normalized, min_sample, rank_mode, axes_shown))
 
     if run_id:

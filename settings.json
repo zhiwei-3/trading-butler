@@ -18,7 +18,7 @@
     "setup_forming_enabled": true,
     "watch_rsi_margin": 5.0,
     "watch_score_margin": 5,
-    "heartbeat_enabled": false,
+    "heartbeat_enabled": true,
     "heartbeat_interval_hours": 1,
     "circuit_breaker_enabled": true,
     "max_daily_losses": 3,
