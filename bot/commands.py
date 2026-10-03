@@ -3,7 +3,7 @@ import logging
 import asyncio
 import MetaTrader5 as mt5
 from functools import wraps
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
@@ -119,7 +119,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**📊 Market Analysis**\n"
         "• `/gold` - Gold Technical Snapshot\n"
         "• `/spread` - Live Bid/Ask & Spread Guard Status\n"
-        "• `/news <impact>` - USD Economic Calendar\n"
+        "• `/news [day] [impact]` - USD Calendar (e.g. `/news today`, `/news tue high`)\n"
         "• `/session` - Market Session Clock\n"
         "• `/diagnose` - Live Signal Diagnostic Check\n\n"
         "**⚙️ Strategy & Parameters**\n"
@@ -352,75 +352,167 @@ async def breakeven_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{icon} **`#{ticket}` SL → break-even** (`${pos.price_open:.2f}`) — {res['reason']}",
         parse_mode="Markdown")
 
+# ---------------------------------------------------------------- /news helpers
+
+_NEWS_IMPACTS = ("high", "medium", "low", "holiday", "all")
+_NEWS_RELATIVE_DAYS = {"yesterday": -1, "today": 0, "tomorrow": 1}
+_NEWS_WEEKDAYS = {
+    "monday": 0, "mon": 0,
+    "tuesday": 1, "tue": 1, "tues": 1,
+    "wednesday": 2, "wed": 2,
+    "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
+    "friday": 4, "fri": 4,
+    "saturday": 5, "sat": 5,
+    "sunday": 6, "sun": 6,
+}
+_NEWS_IMPACT_EMOJI = {"high": "🔴", "medium": "🟠", "low": "🟡", "holiday": "⚪"}
+
+def _news_resolve_day(token):
+    """Maps 'today'/'tomorrow'/'yesterday'/'tuesday'/'tue' to a LOCAL calendar date
+    inside the current Mon–Sun week (weekday names always mean *this* week, since
+    the calendar feed only covers the current week). Returns None if unrecognised."""
+    today = datetime.now().astimezone().date()
+    if token in _NEWS_RELATIVE_DAYS:
+        return today + timedelta(days=_NEWS_RELATIVE_DAYS[token])
+    if token in _NEWS_WEEKDAYS:
+        monday = today - timedelta(days=today.weekday())
+        return monday + timedelta(days=_NEWS_WEEKDAYS[token])
+    return None
+
+def _news_md_escape(text):
+    """Keeps event titles from breaking Telegram's legacy Markdown parser."""
+    for ch in ("_", "*", "`", "["):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+def _news_usage_text():
+    return (
+        "⚠️ **Usage:** `/news [day] [impact]`\n\n"
+        "**Day:** `today`, `yesterday`, `tomorrow`, or a weekday "
+        "(`monday`…`sunday`, or `mon`…`sun`)\n"
+        "**Impact:** `high`, `medium`, `low`, `holiday`, `all`\n\n"
+        "**Examples:**\n"
+        "• `/news` — whole week, HIGH impact\n"
+        "• `/news today` — every impact level today\n"
+        "• `/news tuesday` — every impact level on Tuesday\n"
+        "• `/news friday high` — only HIGH impact on Friday\n"
+        "• `/news medium` — whole week, MEDIUM impact"
+    )
+
 @admin_only
 async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    impact = args[0].strip().lower() if args else "high"
-    
-    valid_impacts = ["high", "medium", "low", "holiday", "all"]
-    if impact not in valid_impacts:
-        await update.message.reply_text(
-            "⚠️ **Usage:** `/news <high|medium|low|holiday|all>`", 
-            parse_mode="Markdown"
-        )
-        return
+    tokens = [a.strip().lower() for a in (context.args or []) if a.strip()]
+
+    target_date = None
+    day_token = None
+    impact = None
+
+    for tok in tokens:
+        if tok in _NEWS_IMPACTS and impact is None:
+            impact = tok
+        elif target_date is None and _news_resolve_day(tok) is not None:
+            target_date = _news_resolve_day(tok)
+            day_token = tok
+        else:
+            await update.message.reply_text(_news_usage_text(), parse_mode="Markdown")
+            return
+
+    day_mode = target_date is not None
+    # Day view defaults to EVERY impact level; legacy week view defaults to HIGH.
+    if impact is None:
+        impact = "all" if day_mode else "high"
 
     events = await fetch_economic_events(impact_level=impact, currency="USD")
-    
+
     if events is None:
         await update.message.reply_text(
-            "📡 **Network Error:** Unable to reach economic calendar server. Please try again in a few moments.", 
+            "📡 **Network Error:** Unable to reach economic calendar server. Please try again in a few moments.",
             parse_mode="Markdown"
         )
         return
 
-    if len(events) == 0:
-        await update.message.reply_text(
-            f"🟢 **No `{impact.upper()}` impact USD events found for this week.**", 
-            parse_mode="Markdown"
-        )
-        return
-
-    impact_emojis = {
-        "high": "🔴",
-        "medium": "🟠",
-        "low": "🟡",
-        "holiday": "⚪"
-    }
-    
-    events_by_date = {}
+    # Parse every event into local time once, drop unparseable ones.
+    parsed = []
     for ev in events:
         raw_date = ev.get("date", "")
         try:
-            clean_date = raw_date.replace("Z", "+00:00")
-            dt_utc = datetime.fromisoformat(clean_date).astimezone(timezone.utc)
-            # Convert UTC timestamp to local server timezone
-            dt_local = dt_utc.astimezone()
-            date_key = dt_local.strftime("%A, %b %d")
-            time_str = dt_local.strftime("%H:%M")
+            dt_utc = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).astimezone(timezone.utc)
+            parsed.append((dt_utc.astimezone(), ev))
         except (ValueError, TypeError):
-            date_key, time_str = "Upcoming Events", "N/A"
-            
-        ev["formatted_time"] = time_str
-        events_by_date.setdefault(date_key, []).append(ev)
+            continue
+    parsed.sort(key=lambda x: x[0])
 
-    # Detect active local timezone label (e.g., SGT, MYT, EST, etc.)
+    if day_mode:
+        parsed = [(dt, ev) for dt, ev in parsed if dt.date() == target_date]
+
     tz_label = datetime.now().astimezone().strftime("%Z") or "LOCAL TIME"
+    today_local = datetime.now().astimezone().date()
 
-    msg = f"🗓️ **WEEKLY USD ECONOMIC CALENDAR ({impact.upper()} IMPACT | {tz_label})**\n\n"
-    for date_header, day_events in events_by_date.items():
-        msg += f"📅 **{date_header}**\n"
-        for ev in day_events:
-            title = ev.get("title", "N/A")
-            time_str = ev.get("formatted_time", "N/A")
+    if not parsed:
+        if day_mode:
+            pretty = target_date.strftime("%A, %b %d")
+            note = ""
+            if target_date < today_local - timedelta(days=0) and day_token != "today":
+                note = "\n\n*The calendar feed only covers the current week.*"
+            await update.message.reply_text(
+                f"🟢 **No `{impact.upper()}` impact USD events on {pretty}.**{note}",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                f"🟢 **No `{impact.upper()}` impact USD events found for this week.**",
+                parse_mode="Markdown"
+            )
+        return
+
+    # Group by local date
+    events_by_date = {}
+    for dt_local, ev in parsed:
+        events_by_date.setdefault(dt_local.date(), []).append((dt_local, ev))
+
+    if day_mode:
+        rel = {0: " (Today)", 1: " (Tomorrow)", -1: " (Yesterday)"}.get((target_date - today_local).days, "")
+        header = (
+            f"🗓️ **USD ECONOMIC CALENDAR — {target_date.strftime('%A, %b %d')}{rel}**\n"
+            f"*{impact.upper()} impact | {tz_label} | {len(parsed)} event(s)*\n\n"
+        )
+    else:
+        header = f"🗓️ **WEEKLY USD ECONOMIC CALENDAR ({impact.upper()} IMPACT | {tz_label})**\n\n"
+
+    lines = [header]
+    for date_key in sorted(events_by_date):
+        if not day_mode:
+            lines.append(f"📅 **{date_key.strftime('%A, %b %d')}**\n")
+        for dt_local, ev in events_by_date[date_key]:
+            title = _news_md_escape(ev.get("title", "N/A"))
             ev_imp = str(ev.get("impact", "")).strip().lower()
-            badge = impact_emojis.get(ev_imp, "⚪")
-            forecast, prev = ev.get("forecast", ""), ev.get("previous", "")
-            extra = f" (FC: {forecast} | Prev: {prev})" if forecast or prev else ""
-            msg += f"  {badge} `{time_str}` — {title}{extra}\n"
-        msg += "\n"
+            badge = _NEWS_IMPACT_EMOJI.get(ev_imp, "⚪")
+            forecast = str(ev.get("forecast", "") or "").strip()
+            prev = str(ev.get("previous", "") or "").strip()
+            actual = str(ev.get("actual", "") or "").strip()
 
-    await update.message.reply_text(msg, parse_mode="Markdown")
+            details = []
+            if actual:
+                details.append(f"Act: {actual}")
+            if forecast:
+                details.append(f"FC: {forecast}")
+            if prev:
+                details.append(f"Prev: {prev}")
+            extra = f" ({' | '.join(details)})" if details else ""
+
+            lines.append(f"  {badge} `{dt_local.strftime('%H:%M')}` — {title}{extra}\n")
+        lines.append("\n")
+
+    # Telegram caps messages at 4096 chars — truncate cleanly instead of failing.
+    budget, out, used = 3900, [], 0
+    for line in lines:
+        if used + len(line) > budget:
+            out.append("... *(truncated — narrow with a day or impact filter)*")
+            break
+        out.append(line)
+        used += len(line)
+
+    await update.message.reply_text("".join(out), parse_mode="Markdown")
 
 @admin_only
 async def spread_check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

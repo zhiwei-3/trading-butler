@@ -35,7 +35,7 @@ async def post_init_setup(application: Application) -> None:
         BotCommand("gold", "📊 Real-Time Chart & Analysis"),
         BotCommand("diagnose", "🔍 Live Signal Diagnostic Check"),
         BotCommand("spread", "🔍 Check Spread & Guard Status"),
-        BotCommand("news", "🗓️ High-Impact USD Calendar"),
+        BotCommand("news", "🗓️ USD Calendar (day + impact)"),
         BotCommand("session", "🕒 Market Session Clock"),
         BotCommand("calc", "🧮 Manual Position Size Reference"),
         BotCommand("strategy", "⚙️ Switch Active Trading Strategy"),
