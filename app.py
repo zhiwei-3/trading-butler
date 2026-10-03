@@ -5,7 +5,15 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 from config import ALERT_STATE, TELEGRAM_TOKEN, USER_ID, save_settings
 from database import init_db
 from mt5_engine import init_mt5
-from bot.commands import *
+from bot.commands import (
+    start_cmd, menu_cmd, handle_callback_query,
+    enable_scanner, disable_scanner,
+    news_calendar_cmd, spread_check_cmd, calc_risk, gold_snapshot, market_session,
+    set_cmd, set_timeframe, set_strategy_cmd, filters_cmd, confluence_cmd, watchlist_cmd,
+    trade_cmd, positions_cmd, close_cmd, breakeven_cmd,
+    status_cmd, stats_cmd, heartbeat_cmd, diagnose_cmd,
+    backtest_cmd, optimize_cmd,
+)
 from bot.jobs import (
     market_scanner_job, 
     signal_outcome_tracker_job, 
