@@ -509,14 +509,38 @@ def execute_pending_intents():
                 )
                 continue
 
+        # One trade idea at a time: if the bot already holds ANY position on this
+        # symbol, skip. A dual-entry signal's two legs are opened below, after this
+        # check, so they never count against each other.
+        open_now = list_managed_positions(symbol)
+        if open_now:
+            tickets = ", ".join(f"#{p.ticket}" for p in open_now)
+            attach_trade_execution(intent["signal_id"], 1, None, fixed_lot, "NONE", None)
+            if dual:
+                attach_trade_execution(intent["signal_id"], 2, None, fixed_lot, "NONE", None)
+            reports.append(
+                f"⏭️ **Execution skipped** — {direction} {symbol} signal ignored, "
+                f"already holding position(s) {tickets}."
+            )
+            continue
+
         legs = [(1, "TP1", intent["tp1"], False)]
         if dual:
             legs.append((2, "TP2", intent["tp2"], True))  # leg 2 bypasses the open-position cap
 
         leg_lines = []
+        leg1_ok = False
         for leg_no, label, tp_price, bypass_cap in legs:
+            if leg_no == 2 and not leg1_ok:
+                attach_trade_execution(intent["signal_id"], 2, None, fixed_lot, "NONE", None)
+                leg_lines.append("⏭️ Leg 2 (TP2) skipped — leg 1 did not open.")
+                continue
+
             res = open_position(symbol, direction, fixed_lot, intent["sl"], tp_price,
                                  tag=f"TB-{label}", bypass_position_cap=bypass_cap)
+
+            if leg_no == 1:
+                leg1_ok = res["ok"]
 
             if res["ok"] and res.get("dry_run"):
                 attach_trade_execution(intent["signal_id"], leg_no, None, fixed_lot, "DRY", res.get("price"))
