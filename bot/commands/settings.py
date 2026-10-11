@@ -81,6 +81,19 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif key in ("spread", "max_spread"):
             setting_name, val = "max_allowed_spread_pips", float(val_str)
 
+        elif key in ("ifvg_tol", "ifvg_eq_tol"):
+            setting_name, val = "ifvg_eq_tolerance_atr", float(val_str)
+        elif key in ("ifvg_bars", "ifvg_max_bars"):
+            setting_name, val = "ifvg_max_setup_bars", int(val_str)
+        elif key in ("ifvg_body", "ifvg_min_body"):
+            setting_name, val = "ifvg_min_body_atr", float(val_str)
+        elif key in ("ifvg_buffer", "ifvg_sl_buffer"):
+            setting_name, val = "ifvg_sl_buffer_atr", float(val_str)
+        elif key in ("ifvg_max_sl",):
+            setting_name, val = "ifvg_max_sl_atr", float(val_str)
+        elif key in ("ifvg_rr", "ifvg_fallback_rr"):
+            setting_name, val = "ifvg_fallback_rr", float(val_str)
+
         elif key in ("cb_enabled", "circuit_breaker", "cb_toggle"):
             setting_name, val = "circuit_breaker_enabled", val_str.lower() in ("true", "1", "on", "yes")
         elif key in ("cb_losses", "max_losses", "cb_max_losses"):

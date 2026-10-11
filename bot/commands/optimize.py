@@ -1,3 +1,5 @@
+# bot/commands/optimize.py
+
 import time
 import logging
 import asyncio
@@ -126,7 +128,7 @@ async def _optimize_view(update: Update, args, chat_id):
         "rsi": bool(run["swept_rsi"]), "rrr": bool(run["swept_rrr"]), "score": bool(run["swept_score"]),
     }
     if not any(axes.values()):
-        axes = {"rrr": True, "score": True}  # legacy bare-default sweep
+        axes = {"rrr": True, "score": True}
 
     lines = [
         f"🧪 **SWEEP `#{run_id}`** — `{run['timeframe_mode'].upper()}` "
@@ -254,7 +256,7 @@ async def _optimize_history(update: Update, args, chat_id):
             final_lines.append(f"\n... *(truncated — {total} total sweeps; use* `/optimize history <page>` *to page through)*")
             break
         final_lines.append(line)
-        current_len += len(line) + 1
+        current_len += line + 1
 
     await update.effective_message.reply_text("\n".join(final_lines), parse_mode="Markdown")
 
@@ -406,10 +408,27 @@ async def _optimize_run(update: Update, args, chat_id):
     label = mode or ALERT_STATE.get('timeframe_mode', 'scalp')
 
     pool_tier = 1 if used_default_axes else min(len(sweep_axes), 3)
-    RRR_POOLS = {1: [1.3, 1.5, 2.0, 2.5, 3.0], 2: [1.5, 2.0, 2.5, 3.0], 3: [1.5, 2.0, 3.0]}
-    SCORE_POOLS = {1: [20, 25, 30, 35, 40], 2: [25, 30, 35, 40], 3: [25, 35]}
-    SL_POOLS = {1: [1.2, 1.5, 1.7, 2.0, 2.5], 2: [1.2, 1.5, 2.0, 2.5], 3: [1.5, 2.0, 2.5]}
-    RSI_POOL = [(30, 60), (35, 60), (40, 60), (30, 65)]
+
+    # Expanded Parameter Pools (Grid combinations strictly capped < 150)
+    RRR_POOLS = {
+        1: [1.0, 1.2, 1.3, 1.5, 1.8, 2.0, 2.5, 3.0],
+        2: [1.0, 1.3, 1.5, 1.8, 2.0, 2.5, 3.0],
+        3: [1.2, 1.5, 1.8, 2.0, 2.5],
+    }
+    SCORE_POOLS = {
+        1: [15, 20, 25, 30, 35, 40, 45, 50],
+        2: [20, 25, 30, 35, 40, 45, 50],
+        3: [20, 25, 30, 35, 40],
+    }
+    SL_POOLS = {
+        1: [1.0, 1.2, 1.5, 1.7, 2.0, 2.2, 2.5, 3.0],
+        2: [1.0, 1.3, 1.5, 1.8, 2.0, 2.5, 3.0],
+        3: [1.2, 1.5, 1.8, 2.0, 2.5],
+    }
+    RSI_POOL = [
+        (25, 65), (30, 60), (30, 65), (30, 70),
+        (35, 60), (35, 65), (40, 60), (40, 65),
+    ]
 
     rrr_values = RRR_POOLS[pool_tier] if "rrr" in sweep_axes else None
     score_values = SCORE_POOLS[pool_tier] if "score" in sweep_axes else None
@@ -491,9 +510,6 @@ async def _optimize_run(update: Update, args, chat_id):
     thin = sorted([g for g in valid if sample_size(g) < min_sample], key=sort_key, reverse=True)
     valid_sorted = reliable + thin
 
-    # Save every combo that clears the reliability bar for THIS sweep's window —
-    # not a fixed top-10. If literally nothing is reliable, fall back to saving a
-    # small flagged sample rather than leaving history/apply empty for that run.
     reliable_rows = [g for g in valid_sorted if sample_size(g) >= min_sample]
     if reliable_rows:
         saved_rows = reliable_rows

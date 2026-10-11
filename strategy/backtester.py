@@ -1,3 +1,5 @@
+# strategy/backtester.py
+
 import io
 import math
 import numpy as np
@@ -16,7 +18,7 @@ from strategy.smc import (
 from strategy.indicators import (
     detect_candlestick_pattern, detect_divergence, find_sr_zones, nearest_sr_zone
 )
-from strategy.evaluator import compute_confluence_score, calculate_targets
+from strategy.evaluator import compute_confluence_score, calculate_targets, find_ifvg_trade
 
 MIN_WARMUP_BARS = 210
 MAX_BARS_FORWARD = 200
@@ -109,9 +111,6 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
                    sl_mult=None, tp1_mult=None, tp2_mult=None):
     buy_th, sell_th = state["rsi_buy_threshold"], state["rsi_sell_threshold"]
     structure = full.get("structure", "NEUTRAL")
-    # BUGFIX: this used to ignore ALERT_STATE["sr_max_distance_pct"] entirely
-    # (used the function default instead), so tightening/loosening that setting
-    # had zero effect on the backtest even though it's honored live.
     near_zone = nearest_sr_zone(full.get("sr_zones", []), close_price,
                                  max_distance_pct=ALERT_STATE["sr_max_distance_pct"])
     fvg = full.get("fvg", {})
@@ -119,12 +118,7 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
     order_block = full.get("order_block", {})
     macro_fvg = full.get("macro_fvg", {})
 
-    # Helper to generate basic factor breakdown for statistics tracking
     def make_breakdown(is_bullish):
-        # BUGFIX: this always checked close_price >= near_zone["price"] regardless
-        # of direction, so every SELL's "Support/Resistance" factor stat was scored
-        # backwards. Point values are now pulled from CONFLUENCE_WEIGHTS instead of
-        # a separate hardcoded (15/15/20/15) scale that didn't match it.
         sr_ok = bool(
             near_zone and (
                 (is_bullish and near_zone["type"] in ("support", "mixed") and close_price >= near_zone["price"]) or
@@ -138,8 +132,18 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
             ("Support/Resistance", CONFLUENCE_WEIGHTS["sr_zone"] if sr_ok else 0, CONFLUENCE_WEIGHTS["sr_zone"]),
         ]
 
+    # 0. IFVG LIQUIDITY SWEEP STRATEGY
+    if strategy_name == "ifvg_sweep":
+        found = find_ifvg_trade(full.get("entry_slice"), close_price, atr_val, min_rrr,
+                                state.get("last_ifvg_key"))
+        if not found:
+            return None
+        state["last_ifvg_key"] = found["setup"]["key"]
+        return {"direction": found["direction"], "entry": close_price, "score": 80,
+                "breakdown": [], **found["targets"]}
+
     # 1. TRIPLE EMA CROSSOVER STRATEGY
-    if strategy_name == "ema_cross":
+    elif strategy_name == "ema_cross":
         prev_bearish = state.get("prev_ema_bearish", False)
         prev_bullish = state.get("prev_ema_bullish", False)
 
@@ -160,7 +164,7 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
         state["last_signal"] = None
         return None
 
-    # 2. RSI REVERSION STRATEGY (Fixed S/R Zone Distance Alignment)
+    # 2. RSI REVERSION STRATEGY
     elif strategy_name == "rsi_reversion":
         bullish_rev = (rsi_val <= buy_th and near_zone and near_zone["type"] in ("support", "mixed") and close_price >= near_zone["price"])
         bearish_rev = (rsi_val >= sell_th and near_zone and near_zone["type"] in ("resistance", "mixed") and close_price <= near_zone["price"])
@@ -219,24 +223,6 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
     return None
 
 def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forward=MAX_BARS_FORWARD):
-    """
-    Simulates a trade sequentially through historical OHLC data.
-
-    BUGFIX: the spread adjustment was inverted. A BUY exits at the bid, so the
-    spread should make TP HARDER to reach and SL EASIER to reach (you're always
-    a spread's-width behind mid-price on exit). The original code did the exact
-    opposite (`high + spread_price` for TP, unadjusted low for SL), which meant
-    raising spread_pips made backtest results LOOK BETTER instead of worse. Same
-    sign error existed on the SELL side.
-
-    ⚠️ SINGLE-PATH LIMITATION:
-    Due to the lack of intra-bar tick data, this simulation checks SL and TP hits
-    on a bar-by-bar basis. If TP1 is hit, the Stop Loss is moved to Break-Even
-    starting from the *following* bar. It cannot detect a TP1 hit and a Break-Even
-    reversal occurring within the exact same candle, which may slightly overstate
-    the survival rate of runners in high-volatility environments.
-    """
-
     direction = trade["direction"]
     sl, tp1, tp2 = trade["sl_price"], trade["tp1_price"], trade["tp2_price"]
     end_idx = min(entry_idx + max_bars_forward, len(df_entry) - 1)
@@ -285,15 +271,6 @@ def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forwa
     return ("HIT_TP1" if hit_tp1 else "OPEN"), times[end_idx]
 
 def _prepare_history(symbol, days, timeframe_mode):
-    """
-    Fetches and precomputes everything a single run_backtest() call needs.
-
-    BUGFIX: run_backtest_sweep() used to call run_backtest() once per grid
-    combination — up to MAX_SWEEP_COMBOS (150) times — and every one of those
-    refetched and reprocessed the identical MT5 history, since only the
-    strategy/threshold parameters vary across a sweep, never the symbol/days/
-    timeframe. Splitting fetch+precompute out lets the sweep do it exactly once.
-    """
     mode = timeframe_mode or ALERT_STATE["timeframe_mode"]
     if mode not in TIMEFRAME_PRESETS:
         return {"error": f"Unknown timeframe mode '{mode}'"}
@@ -351,6 +328,7 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         "require_volume_atr_filter": ALERT_STATE["require_volume_atr_filter"],
         "fractal_window": ALERT_STATE["fractal_window"],
         "last_signal": None,
+        "last_ifvg_key": None,
         "prev_ema_bearish": False,
         "prev_ema_bullish": False,
     }
@@ -390,11 +368,6 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
     trades = []
     factor_stats = {}
     equity = [0.0]
-    # BUGFIX: nothing previously stopped a new signal from firing while a
-    # simulated trade was still "open" — live trading holds one position at a
-    # time, but the backtest let trades overlap freely, producing an equity
-    # curve for a strategy the bot doesn't actually run. Gate new entries until
-    # the last simulated trade's close time has passed.
     blocked_until = time_arr[0] if len(time_arr) else np.datetime64('1970-01-01T00:00:00')
 
     total_iters = max(1, len(df_entry) - test_start_idx)
@@ -453,25 +426,22 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
 
         if macro_cursor != cached_sr_macro_cursor:
             macro_slice = df_macro.iloc[max(0, macro_cursor - (HTF_WINDOW - 1)):macro_cursor + 1].reset_index(drop=True)
-            # BUGFIX: previously called with function defaults only, ignoring
-            # ALERT_STATE["sr_lookback"/"sr_cluster_pct"/"sr_min_touches"] —
-            # tuning those in /set had no effect on backtest S/R zones.
             cached_sr_zones = find_sr_zones(
                 macro_slice,
                 lookback=ALERT_STATE["sr_lookback"],
                 cluster_pct=ALERT_STATE["sr_cluster_pct"],
                 min_touches=ALERT_STATE["sr_min_touches"],
             )
-            # Gaps depend only on the macro window, not on the current close
-            # price — cache those, and resolve "is price tapping one right now"
-            # freshly on every entry bar below.
             cached_macro_gaps = find_unmitigated_fvgs(macro_slice)
             cached_sr_macro_cursor = macro_cursor
 
-        full = _full_analysis_with_memory(entry_slice, state)
-        full["sr_zones"] = cached_sr_zones
-        full["macro_fvg"] = fvg_snapshot_from_gaps(cached_macro_gaps, float(close_price))
-        full["vol_filter_ok"] = vol_filter_ok
+        if active_strat == "ifvg_sweep":
+            full = {"entry_slice": entry_slice, "vol_filter_ok": vol_filter_ok}
+        else:
+            full = _full_analysis_with_memory(entry_slice, state)
+            full["sr_zones"] = cached_sr_zones
+            full["macro_fvg"] = fvg_snapshot_from_gaps(cached_macro_gaps, float(close_price))
+            full["vol_filter_ok"] = vol_filter_ok
 
         trade = _decide_trade(
             round(float(close_price), 2), round(float(rsi_val), 2), round(float(atr_val), 2),
@@ -548,24 +518,12 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         "equity_curve": equity, "trades": trades, "factor_summary": factor_summary,
     }
 
-MAX_SWEEP_COMBOS = 150  # hard cap so a stacked sweep can't silently run for ages
-MIN_SWEEP_SAMPLE = 5    # absolute floor — the real threshold below scales with the
-                         # sweep's day count so short windows don't accept a
-                         # 2-trade combo as "reliable" just because 5 is a small number
+MAX_SWEEP_COMBOS = 150
+MIN_SWEEP_SAMPLE = 5
 
 def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, score_values=None,
                         strategy_values=None, sl_values=None, rsi_pairs=None,
                         spread_pips=2.0, progress_callback=None):
-    """
-    ... (existing docstring) ...
-
-    Reliability bar: a combo needs at least max(MIN_SWEEP_SAMPLE, ceil(days * 0.5))
-    closed trades to be considered reliable. A 90-day sweep therefore needs 45+
-    closed trades before its Net R / Calmar / Avg R is trusted for ranking or
-    saved to history; a 10-day sweep only needs 5. This scales the bar with how
-    much data actually backed the result, instead of one fixed number regardless
-    of window length.
-    """
     swept = {
         "strategies": strategy_values is not None,
         "sl": sl_values is not None,
