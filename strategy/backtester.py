@@ -138,63 +138,8 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
             ("Support/Resistance", CONFLUENCE_WEIGHTS["sr_zone"] if sr_ok else 0, CONFLUENCE_WEIGHTS["sr_zone"]),
         ]
 
-    # 1. HTF FVG TAP + LTF SWEEP & SHIFT STRATEGY
-    if strategy_name == "htf_fvg_sweep":
-        # BUGFIX: macro_fvg now only reports bullish_fvg/bearish_fvg=True when
-        # price is actually sitting inside an unmitigated HTF gap (see
-        # strategy/smc.py::fvg_snapshot_from_gaps), so the old
-        # "if fvg_top > 0 else True" fallback — which made the price-containment
-        # check a no-op whenever fvg_top happened to be 0/missing — is gone.
-        bullish_setup = macro_fvg.get("bullish_fvg", False) and (sweeps.get("bullish_sweep", False) or structure == "BULLISH_BOS") and fvg.get("bullish_fvg", False)
-        bearish_setup = macro_fvg.get("bearish_fvg", False) and (sweeps.get("bearish_sweep", False) or structure == "BEARISH_BOS") and fvg.get("bearish_fvg", False)
-
-        if bullish_setup and state.get("last_signal") != "BUY":
-            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone,
-                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
-            if targets["rrr"] >= min_rrr:
-                state["last_signal"] = "BUY"
-                return {"direction": "BUY", "entry": close_price, "score": 90, "breakdown": make_breakdown(True), **targets}
-
-        elif bearish_setup and state.get("last_signal") != "SELL":
-            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone,
-                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
-            if targets["rrr"] >= min_rrr:
-                state["last_signal"] = "SELL"
-                return {"direction": "SELL", "entry": close_price, "score": 90, "breakdown": make_breakdown(False), **targets}
-
-        if not (bullish_setup or bearish_setup):
-            state["last_signal"] = None
-        return None
-
-    # 2. SMC DISPLACEMENT STRATEGY
-    elif strategy_name == "smc_displacement":
-        open_price = float(full.get("open_price", close_price))
-        candle_body = abs(close_price - open_price)
-        has_displacement = candle_body >= (atr_val * 1.0)
-
-        bullish_disp = has_displacement and close_price > open_price and (structure == "BULLISH_BOS" or fvg.get("bullish_fvg", False)) and (trend_bullish or macro_bullish)
-        bearish_disp = has_displacement and close_price < open_price and (structure == "BEARISH_BOS" or fvg.get("bearish_fvg", False)) and ((not trend_bullish) or (not macro_bullish))
-
-        if bullish_disp and state.get("last_signal") != "BUY":
-            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone,
-                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
-            if targets["rrr"] >= min_rrr:
-                state["last_signal"] = "BUY"
-                return {"direction": "BUY", "entry": close_price, "score": 85, "breakdown": make_breakdown(True), **targets}
-
-        elif bearish_disp and state.get("last_signal") != "SELL":
-            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone,
-                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
-            if targets["rrr"] >= min_rrr:
-                state["last_signal"] = "SELL"
-                return {"direction": "SELL", "entry": close_price, "score": 85, "breakdown": make_breakdown(False), **targets}
-
-        if not (bullish_disp or bearish_disp):
-            state["last_signal"] = None
-        return None
-
-    # 3. TRIPLE EMA CROSSOVER STRATEGY
-    elif strategy_name == "ema_cross":
+    # 1. TRIPLE EMA CROSSOVER STRATEGY
+    if strategy_name == "ema_cross":
         prev_bearish = state.get("prev_ema_bearish", False)
         prev_bullish = state.get("prev_ema_bullish", False)
 
@@ -215,7 +160,7 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
         state["last_signal"] = None
         return None
 
-    # 4. RSI REVERSION STRATEGY (Fixed S/R Zone Distance Alignment)
+    # 2. RSI REVERSION STRATEGY (Fixed S/R Zone Distance Alignment)
     elif strategy_name == "rsi_reversion":
         bullish_rev = (rsi_val <= buy_th and near_zone and near_zone["type"] in ("support", "mixed") and close_price >= near_zone["price"])
         bearish_rev = (rsi_val >= sell_th and near_zone and near_zone["type"] in ("resistance", "mixed") and close_price <= near_zone["price"])
@@ -238,7 +183,7 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
             state["last_signal"] = None
         return None
 
-    # 5. DEFAULT: SMC MULTI-TF CONFLUENCE STRATEGY
+    # 3. DEFAULT: SMC MULTI-TF CONFLUENCE STRATEGY
     buy_structure_ok = (not state["require_structure_break"]) or (structure == "BULLISH_BOS")
     sell_structure_ok = (not state["require_structure_break"]) or (structure == "BEARISH_BOS")
 
