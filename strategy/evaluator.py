@@ -259,7 +259,7 @@ def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, b
     full_msg = base_msg + "\n" + pos_info + exec_note
     chart_buf = generate_signal_chart(
         a["df_entry"], symbol, direction, close_price, sl_price, tp1_price, tp2_price,
-        fvg=zone or a.get("fvg"), near_zone=a.get("near_zone")
+        fvg=zone or a.get("fvg"), near_zone=a.get("near_zone"), dual=dual
     )
     return (full_msg, chart_buf)
 

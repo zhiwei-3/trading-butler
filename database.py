@@ -1,3 +1,5 @@
+# database.py
+
 import logging
 import sqlite3
 from datetime import datetime, timezone
@@ -40,25 +42,16 @@ def init_db():
             ("symbol", "TEXT"),
             ("score", "INTEGER"),
             ("updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"),
-            # --- live execution linkage ---
-            # Two-leg model: "leg 1" always targets TP1 (full close there — this is
-            # the only leg a single-entry / low-score signal ever gets). "leg 2"
-            # only exists for dual-entry (high-score smc_confluence) signals: it
-            # targets TP2 and has its SL trailed to break-even the moment leg 1
-            # closes at TP1.
             ("dual_entry", "INTEGER DEFAULT 0"),
-            ("ticket", "INTEGER"),          # leg 1 (TP1) ticket
-            ("lots", "REAL"),               # leg 1 lots
-            ("exec_mode", "TEXT DEFAULT 'NONE'"),      # NONE | DRY | LIVE
+            ("ticket", "INTEGER"),
+            ("lots", "REAL"),
+            ("exec_mode", "TEXT DEFAULT 'NONE'"),
             ("fill_price", "REAL"),
-            ("ticket2", "INTEGER"),         # leg 2 (TP2 runner) ticket — NULL for single-entry
+            ("ticket2", "INTEGER"),
             ("lots2", "REAL"),
             ("exec_mode2", "TEXT DEFAULT 'NONE'"),
             ("fill_price2", "REAL"),
-            ("be_moved2", "INTEGER DEFAULT 0"),        # leg 2 SL has been trailed to break-even
-            # Superseded by the two-leg columns above (kept only so old rows/DBs
-            # don't break); the old single-ticket partial-close model no longer
-            # writes to these.
+            ("be_moved2", "INTEGER DEFAULT 0"),
             ("tp1_partial_done", "INTEGER DEFAULT 0"),
             ("be_moved", "INTEGER DEFAULT 0"),
         ]
@@ -131,16 +124,14 @@ def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_pr
         return None
 
 def attach_trade_execution(signal_id, leg, ticket, lots, exec_mode, fill_price=None):
-    """Links a live/dry MT5 fill back onto its originating signal row.
-    leg=1 -> the TP1 leg (every signal has this one). leg=2 -> the TP2 runner
-    leg (only present on dual-entry signals)."""
+    """Links a live/dry MT5 fill back onto its originating signal row."""
     if not signal_id:
         return
     now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     LEG_COLUMNS = {
-      1: ("ticket", "lots", "exec_mode", "fill_price"),
-      2: ("ticket2", "lots2", "exec_mode2", "fill_price2"),
-  }
+        1: ("ticket", "lots", "exec_mode", "fill_price"),
+        2: ("ticket2", "lots2", "exec_mode2", "fill_price2"),
+    }
     cols = " = ?, ".join(LEG_COLUMNS[leg]) + " = ?"
     try:
         with get_db_connection() as conn:
@@ -167,9 +158,7 @@ def mark_leg2_be_moved(signal_id):
         logging.error(f"⚠️ Failed to mark be_moved2 for signal {signal_id}: {e}")
 
 def count_live_trades_today():
-    """Live fills (tickets) opened since 00:00 UTC — feeds the daily execution cap.
-    A dual-entry signal contributes up to 2 to this count (one per leg), since each
-    leg is its own real order sent to the broker."""
+    """Live fills (tickets) opened since 00:00 UTC."""
     today_start = datetime.now(timezone.utc).strftime('%Y-%m-%d 00:00:00')
     try:
         with get_db_connection() as conn:
@@ -199,23 +188,7 @@ def get_signal_stats():
     return counts
 
 def get_daily_performance_stats():
-    """
-    Calculates today's CLOSED trade performance (UTC day) from the database.
-
-    Status vocabulary under the two-leg model:
-      PENDING     - nothing has closed yet
-      HIT_TP1     - (dual-entry only) leg 1 closed at TP1, leg 2 still running to
-                    TP2/BE. NOT a closed outcome — stays excluded from this query,
-                    same reasoning as before: counting it here would double-count
-                    once leg 2's real outcome also lands, or mask a real drawdown.
-      CLOSED_TP1  - (single-entry only) the ONE leg closed fully at TP1. This IS
-                    a terminal, closed outcome — included below.
-      HIT_TP2     - (dual-entry only) leg 2 hit TP2. Terminal win.
-      CLOSED_BE   - (dual-entry only) leg 2 got stopped at break-even after its
-                    SL was trailed. Terminal, ~0R.
-      HIT_SL      - either leg (or both) got stopped at the original SL. Terminal
-                    loss.
-    """
+    """Calculates today's CLOSED trade performance (UTC day) from the database."""
     today_start = datetime.now(timezone.utc).strftime('%Y-%m-%d 00:00:00')
 
     with get_db_connection() as conn:
@@ -258,14 +231,43 @@ def get_daily_performance_stats():
             "today_losses": today_losses
         }
 
+def get_recent_trades_for_chart(limit=15):
+    """Fetches recent signals (both open and closed) to overlay on snapshot charts."""
+    with get_db_connection() as conn:
+        rows = conn.execute("""
+            SELECT 
+                timestamp as time,
+                timestamp as entry_time,
+                direction,
+                entry_price as entry,
+                entry_price,
+                sl_price as sl,
+                sl_price,
+                tp1_price as tp1,
+                tp1_price,
+                tp2_price as tp2,
+                tp2_price,
+                status as outcome,
+                status,
+                updated_at as closed_at
+            FROM signals
+            ORDER BY id DESC LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+def get_signal_chart_data(signal_id):
+    """Fetches a specific signal record for generating post-trade outcome charts."""
+    with get_db_connection() as conn:
+        row = conn.execute("""
+            SELECT 
+                symbol, direction, entry_price, sl_price, tp1_price, tp2_price,
+                status, timestamp as entry_time, dual_entry
+            FROM signals WHERE id = ?
+        """, (signal_id,)).fetchone()
+        return dict(row) if row else None
+
 def log_sweep_run(chat_id, symbol, timeframe_mode, days, rank_mode, swept_flags, min_sample, elapsed_seconds, rows):
-    """
-    Persists a completed /optimize sweep: one sweep_runs header row plus one
-    sweep_results row per graded combo in the FULL sorted grid (not just the
-    top 10 shown in chat), so a later /optimize apply <run_id> <rank> can
-    reach deeper than what was printed, and history survives a bot restart —
-    unlike the old in-memory-only cache.
-    """
+    """Persists a completed /optimize sweep run and its detailed results."""
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -341,9 +343,6 @@ def get_sweep_history(chat_id, limit=10, offset=0):
         return [dict(r) for r in rows]
 
 def get_sweep_history_ranked(chat_id, sort_column="net_r", sort_dir="DESC", limit=10, offset=0):
-    """Lists past sweep runs sorted by a stat from each run's #1 saved result.
-    sort_column/sort_dir come from a fixed whitelist in bot/commands.py (never
-    from raw user input), so this stays injection-safe despite the f-string."""
     with get_db_connection() as conn:
         query = f"""
             SELECT sr.*, res.strategy AS top_strategy, res.net_r AS top_net_r, res.avg_r AS top_avg_r,

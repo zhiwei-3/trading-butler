@@ -1,9 +1,12 @@
+# bot/commands/market.py
+
 import asyncio
 from datetime import datetime, timezone, timedelta
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TF_LABELS
+from database import get_recent_trades_for_chart
 from mt5_engine import get_gold_symbol, get_tick
 from news_engine import fetch_economic_events
 from strategy.evaluator import analyze_market
@@ -28,9 +31,6 @@ _NEWS_IMPACT_EMOJI = {"high": "🔴", "medium": "🟠", "low": "🟡", "holiday"
 
 
 def _news_resolve_day(token):
-    """Maps 'today'/'tomorrow'/'yesterday'/'tuesday'/'tue' to a LOCAL calendar date
-    inside the current Mon–Sun week (weekday names always mean *this* week, since
-    the calendar feed only covers the current week). Returns None if unrecognised."""
     today = datetime.now().astimezone().date()
     if token in _NEWS_RELATIVE_DAYS:
         return today + timedelta(days=_NEWS_RELATIVE_DAYS[token])
@@ -41,7 +41,6 @@ def _news_resolve_day(token):
 
 
 def _news_md_escape(text):
-    """Keeps event titles from breaking Telegram's legacy Markdown parser."""
     for ch in ("_", "*", "`", "["):
         text = text.replace(ch, "\\" + ch)
     return text
@@ -81,7 +80,6 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     day_mode = target_date is not None
-    # Day view defaults to EVERY impact level; legacy week view defaults to HIGH.
     if impact is None:
         impact = "all" if day_mode else "high"
 
@@ -94,7 +92,6 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Parse every event into local time once, drop unparseable ones.
     parsed = []
     for ev in events:
         raw_date = ev.get("date", "")
@@ -128,7 +125,6 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # Group by local date
     events_by_date = {}
     for dt_local, ev in parsed:
         events_by_date.setdefault(dt_local.date(), []).append((dt_local, ev))
@@ -166,7 +162,6 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"  {badge} `{dt_local.strftime('%H:%M')}` — {title}{extra}\n")
         lines.append("\n")
 
-    # Telegram caps messages at 4096 chars — truncate cleanly instead of failing.
     budget, out, used = 3900, [], 0
     for line in lines:
         if used + len(line) > budget:
@@ -209,7 +204,6 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /gold command and menu button callbacks."""
     symbol = await asyncio.to_thread(get_gold_symbol) or "XAUUSD"
 
-    # update.effective_message handles both slash commands and callback buttons safely
     await update.effective_message.reply_chat_action("upload_photo")
     analysis = await asyncio.to_thread(analyze_market, symbol)
 
@@ -232,13 +226,17 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **Macro Bias:** {'🟢 Bullish' if analysis['macro_bullish'] else '🔴 Bearish'}"
     )
 
+    # Fetch recent trade history from database for chart overlay
+    trades_db = await asyncio.to_thread(get_recent_trades_for_chart, limit=15)
+
     chart_buf = await asyncio.to_thread(
         generate_chart_snapshot,
-        analysis["df_entry"],
-        f"XAUUSD Real-Time Chart ({tf_lbl})",
-        60,
-        analysis.get("near_zone"),
-        analysis.get("macro_fvg"),
+        df=analysis["df_entry"],
+        title=f"XAUUSD Real-Time Chart ({tf_lbl})",
+        bars=100,
+        near_zone=analysis.get("near_zone"),
+        macro_fvg=analysis.get("macro_fvg"),
+        trades=trades_db,
     )
 
     if chart_buf:
@@ -256,13 +254,11 @@ async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_utc = datetime.now(timezone.utc)
     ch = now_utc.hour
 
-    # Session UTC Hours (Approximate standard market hours)
     sydney = (22 <= ch or ch < 7)
     tokyo = (0 <= ch < 9)
     london = (8 <= ch < 17)
     ny = (13 <= ch < 22)
 
-    # Volatility / Overlap flags
     london_ny_overlap = london and ny
     asian_session = tokyo or sydney
 
