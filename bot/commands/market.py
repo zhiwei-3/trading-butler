@@ -227,7 +227,7 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # Fetch recent trade history from database for chart overlay
-    trades_db = await asyncio.to_thread(get_recent_trades_for_chart, limit=15)
+    trades_db = await asyncio.to_thread(get_recent_trades_for_chart, 40, symbol)
 
     chart_buf = await asyncio.to_thread(
         generate_chart_snapshot,

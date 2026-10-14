@@ -231,28 +231,37 @@ def get_daily_performance_stats():
             "today_losses": today_losses
         }
 
-def get_recent_trades_for_chart(limit=15):
-    """Fetches recent signals (both open and closed) to overlay on snapshot charts."""
+def get_recent_trades_for_chart(limit=30, symbol=None):
+    """Recent signals (open and closed) for overlaying on charts. Times are true UTC."""
+    query = """
+        SELECT
+            id,
+            symbol,
+            direction,
+            dual_entry,
+            timestamp as time,
+            timestamp as entry_time,
+            entry_price as entry,
+            entry_price,
+            sl_price as sl,
+            sl_price,
+            tp1_price as tp1,
+            tp1_price,
+            tp2_price as tp2,
+            tp2_price,
+            status as outcome,
+            status,
+            updated_at as closed_at
+        FROM signals
+    """
+    params = []
+    if symbol:
+        query += " WHERE symbol = ?"
+        params.append(symbol)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
     with get_db_connection() as conn:
-        rows = conn.execute("""
-            SELECT 
-                timestamp as time,
-                timestamp as entry_time,
-                direction,
-                entry_price as entry,
-                entry_price,
-                sl_price as sl,
-                sl_price,
-                tp1_price as tp1,
-                tp1_price,
-                tp2_price as tp2,
-                tp2_price,
-                status as outcome,
-                status,
-                updated_at as closed_at
-            FROM signals
-            ORDER BY id DESC LIMIT ?
-        """, (limit,)).fetchall()
+        rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
 def get_signal_chart_data(signal_id):

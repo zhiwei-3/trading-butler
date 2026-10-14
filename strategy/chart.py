@@ -7,6 +7,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
+from matplotlib.lines import Line2D
+
+from mt5_engine import get_broker_utc_offset_seconds
 
 # ------------------------------------------------------------------ theme
 BG, GRID, FG = "#121212", "#262626", "#e0e0e0"
@@ -15,6 +18,7 @@ C_ENTRY, C_SL = "#2962ff", "#ff1744"
 C_TP1, C_TP2 = "#00e676", "#00b0ff"
 C_BE, C_SR, C_FVG = "#17a2b8", "#aa00ff", "#ffd600"
 C_SUP, C_RES = "#00c853", "#ff3d00"  # Support (Green) / Resistance (Red)
+C_PAST = "#8ab4f8"                   # past (historical) trade entries
 
 TERMINAL = ("HIT_SL", "CLOSED_TP1", "HIT_TP2", "CLOSED_BE", "CLOSED_RUNNER_SL")
 STATUS_STYLE = {
@@ -26,41 +30,70 @@ STATUS_STYLE = {
     "HIT_SL":            ("#DC3545", "STOP LOSS HIT"),
 }
 
+# status -> (price field on the trade dict, marker kind) for historical exit markers
+_EXIT_RULES = {
+    "HIT_SL":           ("sl", "sl"),
+    "CLOSED_RUNNER_SL": ("sl", "sl"),
+    "CLOSED_TP1":       ("tp1", "tp"),
+    "HIT_TP1":          ("tp1", "tp"),   # leg 1 won, runner still open
+    "HIT_TP2":          ("tp2", "tp"),
+    "CLOSED_BE":        ("entry", "be"),
+}
 
-# ------------------------------------------------------------------ helpers
-def _find_closest_candle_idx(df_times, target_time):
-    """
-    Maps a trade timestamp to the exact candle bar it occurred in.
-    Uses floor-binning (candle_start <= trade_time < candle_end) and auto-detects
-    broker server UTC offsets.
-    """
-    if target_time is None or len(df_times) == 0:
+_EPOCH = pd.Timestamp("1970-01-01", tz="UTC")
+_ONE_SEC = pd.Timedelta(seconds=1)
+
+
+# ------------------------------------------------------------------ time helpers
+def _utc_epoch(value):
+    """Any timestamp-ish value -> UTC epoch seconds. Naive values are treated as UTC
+    (that's how the DB stores them). Returns None if unparseable."""
+    if value is None:
         return None
     try:
-        target_dt = pd.to_datetime(target_time, utc=True)
-        candle_times = pd.to_datetime(df_times, utc=True)
-        
-        target_ts = target_dt.timestamp()
-        candle_ts = candle_times.astype("int64") // 10**9
-
-        # Auto-detect broker GMT offset (e.g. +2 or +3 hours EET vs UTC DB)
-        raw_diff = candle_ts.values[-1] - target_ts
-        hour_offset = round(raw_diff / 3600.0)
-        if 1 <= abs(hour_offset) <= 12:
-            target_ts += hour_offset * 3600.0
-
-        # Floor-binning: Find candle i where candle_ts[i] <= target_ts < candle_ts[i+1]
-        idx = int(np.searchsorted(candle_ts.values, target_ts, side="right")) - 1
-
-        if 0 <= idx < len(candle_ts):
-            return idx
-
-        # Fallback to nearest if outside visible range
-        return int(np.abs(candle_ts.values - target_ts).argmin())
+        t = pd.Timestamp(value)
+        if pd.isna(t):
+            return None
+        t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+        return int((t - _EPOCH) // _ONE_SEC)
     except Exception:
         return None
 
 
+def _series_epoch(times):
+    """Candle 'time' column -> int64 epoch seconds. Resolution-agnostic (ns/us/ms/s)."""
+    idx = pd.DatetimeIndex(pd.to_datetime(times, utc=True))
+    return np.asarray((idx - _EPOCH) // _ONE_SEC, dtype="int64")
+
+
+def _resolve_offset(server_offset_s):
+    if server_offset_s is not None:
+        return int(server_offset_s)
+    try:
+        return int(get_broker_utc_offset_seconds())
+    except Exception:
+        return 0
+
+
+def _candle_index(candle_ts, utc_value, offset_s):
+    """
+    Maps a true-UTC timestamp (from the DB) to the candle it occurred in, using
+    floor-binning against BROKER-SERVER candle times. Returns None when the time
+    lies outside the visible window — never clamps to an edge bar.
+    """
+    if candle_ts is None or len(candle_ts) == 0:
+        return None
+    t = _utc_epoch(utc_value)
+    if t is None:
+        return None
+    t += int(offset_s)
+    bar = int(np.median(np.diff(candle_ts))) if len(candle_ts) > 1 else 60
+    if t < candle_ts[0] or t >= candle_ts[-1] + max(bar, 1):
+        return None
+    return max(int(np.searchsorted(candle_ts, t, side="right")) - 1, 0)
+
+
+# ------------------------------------------------------------------ helpers
 def _new_fig(figsize=(10, 5.5)):
     fig, ax = plt.subplots(figsize=figsize, facecolor=BG)
     ax.set_facecolor(BG)
@@ -82,7 +115,7 @@ def _draw_candles(ax, df, width=0.62):
                                facecolor=col, edgecolor=col, linewidth=0.5, zorder=4))
 
 
-def _set_time_ticks(ax, df, n=6):
+def _set_time_ticks(ax, df, n=6, offset_s=None):
     if "time" not in df.columns or len(df) < 2:
         ax.set_xticks([])
         return
@@ -92,6 +125,8 @@ def _set_time_ticks(ax, df, n=6):
     fmt = "%d %b %H:%M" if multi_day else "%H:%M"
     ax.set_xticks(idx)
     ax.set_xticklabels([times.iloc[i].strftime(fmt) for i in idx], color=FG, fontsize=8)
+    if offset_s is not None:
+        ax.set_xlabel(f"Broker server time (UTC{offset_s / 3600:+g})", color="#888888", fontsize=7.5)
 
 
 def _fit_ylim(ax, df, levels, pad=0.08):
@@ -145,8 +180,10 @@ def _finish(fig):
     return buf
 
 
-def _first_touch(highs, lows, level, start):
-    for i in range(max(start, 0), len(highs)):
+def _first_touch(highs, lows, level, start, stop=None):
+    """First candle in [start, stop] whose range contains `level`."""
+    end = len(highs) if stop is None else min(stop + 1, len(highs))
+    for i in range(max(start, 0), end):
         if lows[i] <= level <= highs[i]:
             return i
     return None
@@ -162,18 +199,109 @@ def _get_zone_style(near_zone):
     return C_SR, "S/R"
 
 
+# ------------------------------------------------------------------ past-trade overlay (shared)
+def _trade_price(t, name):
+    for key in (name, f"{name}_price"):
+        v = t.get(key)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _overlay_trades(ax, dfp, candle_ts, trades, offset_s, exclude_id=None):
+    """
+    Draws historical trades that fall inside the visible window: entry triangle at
+    the actual entry price, exit marker at the actual exit level (TP star / BE
+    diamond / SL cross), joined by a dotted line. Trades outside the window are
+    skipped (never clamped to the chart edge). Returns True if anything was drawn.
+    """
+    if not trades or candle_ts is None or len(candle_ts) == 0:
+        return False
+
+    highs, lows = dfp["high"].to_numpy(float), dfp["low"].to_numpy(float)
+    drawn = False
+
+    for t in trades:
+        if exclude_id is not None and t.get("id") == exclude_id:
+            continue
+
+        direction = str(t.get("direction", "BUY")).upper()
+        status = str(t.get("outcome") or t.get("status") or "")
+        entry_p = _trade_price(t, "entry")
+
+        xi = _candle_index(candle_ts, t.get("entry_time") or t.get("time") or t.get("timestamp"), offset_s)
+
+        xc, exit_p, kind = None, None, None
+        rule = _EXIT_RULES.get(status)
+        if rule:
+            kind = rule[1]
+            exit_p = _trade_price(t, rule[0])
+            xc = _candle_index(candle_ts, t.get("closed_at") or t.get("updated_at"), offset_s)
+
+        if xi is None and xc is None:
+            continue
+        if xi is not None and xc is not None and xc < xi:
+            xc = xi
+
+        if xi is not None:
+            y = entry_p if entry_p is not None else (lows[xi] if direction == "BUY" else highs[xi])
+            ax.plot([xi], [y], marker="^" if direction == "BUY" else "v", color=C_PAST,
+                    markersize=8, markeredgecolor="white", markeredgewidth=0.7, alpha=0.95, zorder=7)
+            drawn = True
+
+        if xc is not None and exit_p is not None and kind:
+            color = {"tp": C_TP1, "be": C_BE, "sl": C_SL}[kind]
+            marker = {"tp": "*", "be": "D", "sl": "X"}[kind]
+            ax.plot([xc], [exit_p], marker=marker, color=color, markersize=11 if kind == "tp" else 7.5,
+                    markeredgecolor="white", markeredgewidth=0.7, zorder=7)
+            if xi is not None and entry_p is not None:
+                ax.plot([xi, xc], [entry_p, exit_p], color=color, linestyle=":", linewidth=1.0,
+                        alpha=0.75, zorder=6)
+            drawn = True
+
+    return drawn
+
+
+def _trade_legend_handles():
+    def h(marker, color, label, size=8):
+        return Line2D([0], [0], marker=marker, color="none", markerfacecolor=color,
+                      markeredgecolor="white", markersize=size, label=label)
+    return [
+        h("^", C_PAST, "Past entry"),
+        h("*", C_TP1, "Past TP", 11),
+        h("D", C_BE, "Past BE", 6),
+        h("X", C_SL, "Past SL", 7),
+    ]
+
+
+def _apply_legend(ax, with_trades=False):
+    handles, _ = ax.get_legend_handles_labels()
+    if with_trades:
+        handles = handles + _trade_legend_handles()
+    if handles:
+        ax.legend(handles=handles, facecolor="#1e1e1e", edgecolor="#333333", labelcolor="white",
+                  loc="upper left", fontsize=7.5)
+
+
 # ------------------------------------------------------------------ market snapshot
-def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=100, near_zone=None, macro_fvg=None, trades=None):
+def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=100, near_zone=None,
+                            macro_fvg=None, trades=None, server_offset_s=None):
     """
     Real-time candlestick snapshot with EMAs, current price, nearest S/R, HTF FVG,
-    and overlays for all trade entries and exits within the candle window.
+    and overlays for all past trade entries/exits inside the candle window.
     """
     if df is None or len(df) < min(bars, 20):
         return None
 
+    offset_s = _resolve_offset(server_offset_s)
     dfp = df.tail(bars).reset_index(drop=True)
     n = len(dfp)
     pad = max(8, int(n * 0.14))
+    candle_ts = _series_epoch(dfp["time"]) if "time" in dfp.columns else None
+
     fig, ax = _new_fig()
     _draw_candles(ax, dfp)
 
@@ -198,59 +326,33 @@ def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=100, near_z
         if top >= lo and bot <= hi:
             ax.axhspan(max(bot, lo), min(top, hi), color=C_FVG, alpha=0.13, label="HTF FVG", zorder=1)
 
-    # Plot trade entries and exits anchored to candle wicks
-    if trades and "time" in dfp.columns:
-        lows = dfp["low"].to_numpy(float)
-        highs = dfp["high"].to_numpy(float)
-        price_range = max((highs.max() - lows.min()), 1.0)
-        offset = price_range * 0.02
-
-        for t in trades:
-            # 1. Entry Marker
-            entry_time = t.get("time") or t.get("entry_time") or t.get("timestamp")
-            xi = _find_closest_candle_idx(dfp["time"], entry_time)
-            if xi is not None:
-                direction = t.get("direction", "BUY")
-                y_pos = lows[xi] - offset if direction == "BUY" else highs[xi] + offset
-                ax.plot([xi], [y_pos], marker="^" if direction == "BUY" else "v", color=C_ENTRY,
-                        markersize=11, markeredgecolor="white", markeredgewidth=1.0, zorder=8)
-
-            # 2. Exit Marker
-            outcome = t.get("outcome") or t.get("status", "")
-            if outcome in TERMINAL:
-                c_time = t.get("closed_at") or t.get("updated_at")
-                if c_time is not None:
-                    xc = _find_closest_candle_idx(dfp["time"], c_time)
-                    if xc is not None:
-                        color_m = C_TP1 if "TP" in outcome else (C_BE if "BE" in outcome else C_SL)
-                        marker_m = "*" if "TP" in outcome else ("D" if "BE" in outcome else "X")
-                        y_pos = highs[xc] + offset if "TP" in outcome else lows[xc] - offset
-                        ax.plot([xc], [y_pos], marker=marker_m, color=color_m, markersize=12,
-                                markeredgecolor="white", markeredgewidth=1.0, zorder=8)
+    drawn = _overlay_trades(ax, dfp, candle_ts, trades, offset_s)
 
     ax.set_xlim(-1, n + pad)
     ax.set_ylim(lo, hi)
-    _set_time_ticks(ax, dfp)
+    _set_time_ticks(ax, dfp, offset_s=offset_s)
     _place_labels(ax, labels)
     ax.set_title(title, color="white", fontsize=12, fontweight="bold")
-    if ax.get_legend_handles_labels()[0]:
-        ax.legend(facecolor="#1e1e1e", edgecolor="#333333", labelcolor="white", loc="upper left", fontsize=8)
+    _apply_legend(ax, with_trades=drawn)
     return _finish(fig)
 
 
 # ------------------------------------------------------------------ live signal alert
 def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2,
-                          fvg=None, near_zone=None, bars=50, dual=True):
-    """Candlestick alert chart with projected entry, SL, TP1, TP2 lines and shaded risk/reward zones."""
-    if df is None or len(df) < bars:
+                          fvg=None, near_zone=None, bars=80, dual=True,
+                          trades=None, exclude_id=None, server_offset_s=None):
+    """Alert chart with projected entry/SL/TP lines, shaded risk/reward zones and past trade history."""
+    if df is None or len(df) < min(bars, 50):
         return None
 
+    offset_s = _resolve_offset(server_offset_s)
     dfp = df.tail(bars).reset_index(drop=True)
     n = len(dfp)
     pad = max(12, int(n * 0.45))
     x0 = n - 1
     x1 = _label_x_start(n, pad) - 0.5
     sl_dist = abs(entry - sl)
+    candle_ts = _series_epoch(dfp["time"]) if "time" in dfp.columns else None
 
     fig, ax = _new_fig()
     _draw_candles(ax, dfp)
@@ -275,7 +377,7 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2,
         _hline(ax, tp2, x0, x1, C_TP2, ":")
 
     ax.plot([x0], [entry], marker="^" if signal_type == "BUY" else "v", color=C_ENTRY,
-            markersize=9, markeredgecolor="white", markeredgewidth=0.8, zorder=8)
+            markersize=10, markeredgecolor="white", markeredgewidth=0.9, zorder=9)
 
     if fvg and fvg.get("fvg_top") is not None and fvg.get("fvg_bottom") is not None:
         top, bot = fvg["fvg_top"], fvg["fvg_bottom"]
@@ -296,21 +398,28 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2,
         ax.hlines(near_zone["price"], -1, x1, colors=c_zone, linestyles="-.", linewidth=1.1, alpha=0.85, zorder=2)
         labels.append((near_zone["price"], f"{z_lbl} ${near_zone['price']:.2f}", c_zone))
 
+    drawn = _overlay_trades(ax, dfp, candle_ts, trades, offset_s, exclude_id=exclude_id)
+
     ax.set_xlim(-1, n + pad)
     ax.set_ylim(lo, hi)
-    _set_time_ticks(ax, dfp)
+    _set_time_ticks(ax, dfp, offset_s=offset_s)
     _place_labels(ax, labels)
     ax.set_title(f"Trading Butler Alert — {symbol} ({signal_type})" + ("  •  DUAL ENTRY" if dual else ""),
                  color="white", fontsize=12, fontweight="bold")
+    _apply_legend(ax, with_trades=drawn)
     return _finish(fig)
 
 
 # ------------------------------------------------------------------ post-trade outcome
 def generate_outcome_chart(df, entry_p, sl_p, tp1_p, tp2_p, outcome_status, symbol="XAUUSD",
-                           direction=None, entry_time=None, dual=True, pre_bars=25):
+                           direction=None, entry_time=None, exit_time=None, dual=True,
+                           pre_bars=25, post_bars=8, trades=None, exclude_id=None,
+                           server_offset_s=None):
     """
-    Post-trade execution chart. Plots the exact entry point and ALL exit events
-    (Leg 1 TP1, Leg 2 TP2, Break-Even, SL, and Runner SL) on their respective candles.
+    Post-trade chart. Entry and exit markers are placed on the real entry/exit
+    candles (entry_time / exit_time are true-UTC values straight from the DB),
+    the chart is trimmed to [entry - pre_bars, exit + post_bars], and other past
+    trades inside that window are overlaid.
     """
     if df is None or len(df) == 0:
         return None
@@ -318,71 +427,88 @@ def generate_outcome_chart(df, entry_p, sl_p, tp1_p, tp2_p, outcome_status, symb
     if direction is None:
         direction = "BUY" if tp1_p > entry_p else "SELL"
 
-    entry_idx = _find_closest_candle_idx(df["time"], entry_time) if "time" in df.columns else None
+    offset_s = _resolve_offset(server_offset_s)
+    has_time = "time" in df.columns
+    full_ts = _series_epoch(df["time"]) if has_time else None
+    last = len(df) - 1
 
-    start = max(0, entry_idx - pre_bars) if entry_idx is not None else 0
-    dfp = df.iloc[start:].reset_index(drop=True)
-    n = len(dfp)
-    entry_x = (entry_idx - start) if entry_idx is not None else None
-    x0 = entry_x if entry_x is not None else 0
+    entry_idx = _candle_index(full_ts, entry_time, offset_s) if has_time and entry_time is not None else None
+    exit_idx = _candle_index(full_ts, exit_time, offset_s) if has_time and exit_time is not None else None
+    if exit_idx is not None:
+        exit_idx = max(exit_idx, entry_idx if entry_idx is not None else 0)
 
-    highs, lows = dfp["high"].to_numpy(float), dfp["low"].to_numpy(float)
-    sl_dist = abs(entry_p - sl_p)
+    highs_f, lows_f = df["high"].to_numpy(float), df["low"].to_numpy(float)
+    scan_from = min((entry_idx + 1) if entry_idx is not None else max(0, last - 100), last)
 
-    scan_from = (entry_x + 1) if entry_x is not None else 0
-    markers = []  # List of (candle_idx, price, kind, label_str)
+    def touch(level, start, stop=None):
+        return _first_touch(highs_f, lows_f, level, start, stop)
 
-    if outcome_status == "HIT_SL":
-        i = _first_touch(highs, lows, sl_p, scan_from)
+    # ---- exit markers, in FULL-frame candle coordinates: (idx, price, kind)
+    markers = []
+    if outcome_status in ("HIT_SL", "CLOSED_RUNNER_SL"):
+        i = exit_idx if exit_idx is not None else touch(sl_p, scan_from)
         if i is not None:
-            markers.append((i, sl_p, "sl", "SL Hit"))
-
-    elif outcome_status in ("CLOSED_TP1", "HIT_TP1", "HIT_TP2", "CLOSED_BE", "CLOSED_RUNNER_SL"):
-        i1 = _first_touch(highs, lows, tp1_p, scan_from)
+            markers.append((i, sl_p, "sl"))
+    elif outcome_status in ("CLOSED_TP1", "HIT_TP1"):
+        i = exit_idx if exit_idx is not None else touch(tp1_p, scan_from)
+        if i is not None:
+            markers.append((i, tp1_p, "tp"))
+    elif outcome_status == "HIT_TP2":
+        i2 = exit_idx if exit_idx is not None else touch(tp2_p, scan_from)
+        if i2 is not None:
+            i1 = touch(tp1_p, scan_from, i2)
+            if i1 is not None:
+                markers.append((i1, tp1_p, "tp"))
+            markers.append((i2, tp2_p, "tp"))
+    elif outcome_status == "CLOSED_BE":
+        ib = exit_idx
+        i1 = touch(tp1_p, scan_from, ib)
+        if ib is None and i1 is not None:
+            ib = touch(entry_p, i1 + 1)
         if i1 is not None:
-            markers.append((i1, tp1_p, "tp", "Leg 1 TP1 Hit"))
+            markers.append((i1, tp1_p, "tp"))
+        if ib is not None:
+            markers.append((ib, entry_p, "be"))
 
-            if outcome_status == "HIT_TP2":
-                i2 = _first_touch(highs, lows, tp2_p, i1)
-                if i2 is not None:
-                    markers.append((i2, tp2_p, "tp", "Leg 2 TP2 Hit"))
+    terminal = outcome_status in TERMINAL
 
-            elif outcome_status == "CLOSED_BE":
-                ib = _first_touch(highs, lows, entry_p, i1 + 1)
-                if ib is not None:
-                    markers.append((ib, entry_p, "be", "Leg 2 BE Exit"))
+    # ---- trim to the trade's lifespan
+    start = max(0, entry_idx - pre_bars) if entry_idx is not None else max(0, last - 100)
+    end = last
+    if terminal and markers:
+        end = min(last, max(m[0] for m in markers) + post_bars)
+    dfp = df.iloc[start:end + 1].reset_index(drop=True)
+    n = len(dfp)
+    candle_ts = full_ts[start:end + 1] if has_time else None
 
-            elif outcome_status == "CLOSED_RUNNER_SL":
-                isl = _first_touch(highs, lows, sl_p, i1 + 1)
-                if isl is not None:
-                    markers.append((isl, sl_p, "sl", "Leg 2 SL Hit"))
-
-    x_end = n - 1
-    if outcome_status in TERMINAL and markers:
-        x_end = max(m[0] for m in markers)
+    entry_x = (entry_idx - start) if entry_idx is not None else None
+    markers = [(i - start, p, k) for i, p, k in markers]
+    x0 = entry_x if entry_x is not None else 0
+    x_end = max(m[0] for m in markers) if (terminal and markers) else n - 1
     x_end = max(x_end, x0)
 
     runner_be = dual and outcome_status in ("HIT_TP1", "CLOSED_BE")
     post_tp1 = outcome_status in ("HIT_TP1", "HIT_TP2", "CLOSED_BE", "CLOSED_RUNNER_SL")
-    show_tp2 = dual
+    show_tp2 = bool(dual and tp2_p)
+    sl_dist = abs(entry_p - sl_p)
 
     pad = max(10, int(n * 0.32))
     fig, ax = _new_fig()
     _draw_candles(ax, dfp)
 
-    levels = [entry_p, sl_p, tp1_p] + ([tp2_p] if show_tp2 and tp2_p else [])
+    levels = [entry_p, sl_p, tp1_p] + ([tp2_p] if show_tp2 else [])
     _fit_ylim(ax, dfp, levels)
 
     ax.fill_between([x0, x_end], [entry_p, entry_p], [sl_p, sl_p], color=C_SL, alpha=0.10, linewidth=0, zorder=1)
     ax.fill_between([x0, x_end], [entry_p, entry_p], [tp1_p, tp1_p], color=C_TP1, alpha=0.10, linewidth=0, zorder=1)
-    if show_tp2 and tp2_p:
+    if show_tp2:
         ax.fill_between([x0, x_end], [tp1_p, tp1_p], [tp2_p, tp2_p], color=C_TP2, alpha=0.06, linewidth=0, zorder=1)
 
     ext_to = _label_x_start(n, pad) - 0.5
     _hline(ax, entry_p, x0, x_end, C_BE if runner_be else C_ENTRY, "-", 1.6)
     _hline(ax, sl_p, x0, x_end, C_SL, "--", 1.2, alpha=0.35 if post_tp1 else 1.0)
     _hline(ax, tp1_p, x0, x_end, C_TP1, "--", 1.2)
-    if show_tp2 and tp2_p:
+    if show_tp2:
         _hline(ax, tp2_p, x0, x_end, C_TP2, ":", 1.2)
 
     if ext_to > x_end:
@@ -391,12 +517,14 @@ def generate_outcome_chart(df, entry_p, sl_p, tp1_p, tp2_p, outcome_status, symb
 
     if entry_x is not None:
         ax.plot([entry_x], [entry_p], marker="^" if direction == "BUY" else "v", color=C_ENTRY,
-                markersize=10, markeredgecolor="white", markeredgewidth=0.8, zorder=8)
+                markersize=11, markeredgecolor="white", markeredgewidth=0.9, zorder=9)
 
-    for idx, price, kind, label_str in markers:
-        style = {"sl": ("X", C_SL), "tp": ("*", C_TP1), "be": ("D", C_BE)}[kind]
-        ax.plot([idx], [price], marker=style[0], color=style[1], markersize=12 if kind == "tp" else 9,
-                markeredgecolor="white", markeredgewidth=0.8, zorder=8)
+    for idx, price, kind in markers:
+        mk, col = {"sl": ("X", C_SL), "tp": ("*", C_TP1), "be": ("D", C_BE)}[kind]
+        ax.plot([idx], [price], marker=mk, color=col, markersize=13 if kind == "tp" else 9,
+                markeredgecolor="white", markeredgewidth=0.9, zorder=9)
+
+    drawn = _overlay_trades(ax, dfp, candle_ts, trades, offset_s, exclude_id=exclude_id)
 
     entry_label = f"{'Entry / BE' if runner_be else 'Entry'} ${entry_p:.2f}"
     sl_label = f"SL{' (orig)' if post_tp1 else ''} ${sl_p:.2f}{_r_text(sl_p, entry_p, sl_dist, direction)}"
@@ -405,17 +533,18 @@ def generate_outcome_chart(df, entry_p, sl_p, tp1_p, tp2_p, outcome_status, symb
         (sl_p, sl_label, C_SL),
         (tp1_p, f"TP1 ${tp1_p:.2f}{_r_text(tp1_p, entry_p, sl_dist, direction)}", C_TP1),
     ]
-    if show_tp2 and tp2_p:
+    if show_tp2:
         labels.append((tp2_p, f"TP2 ${tp2_p:.2f}{_r_text(tp2_p, entry_p, sl_dist, direction)}", C_TP2))
 
     ax.set_xlim(-1, n + pad)
-    _set_time_ticks(ax, dfp)
+    _set_time_ticks(ax, dfp, offset_s=offset_s)
     _place_labels(ax, labels)
 
     if entry_x is None:
-        ax.text(0.01, 0.97, "entry bar is older than this chart window — lines shown full-width",
+        ax.text(0.01, 0.97, "entry bar is outside this chart window — levels shown full-width",
                 transform=ax.transAxes, color="#888888", fontsize=7.5, va="top")
 
     color, text = STATUS_STYLE.get(outcome_status, ("#FFFFFF", outcome_status))
     ax.set_title(f"[{symbol}] {direction} — {text}", color=color, fontsize=12, fontweight="bold")
+    _apply_legend(ax, with_trades=drawn)
     return _finish(fig)

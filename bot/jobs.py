@@ -1,3 +1,5 @@
+# bot/jobs.py
+
 import logging
 import asyncio
 import MetaTrader5 as mt5
@@ -6,7 +8,12 @@ from telegram.ext import ContextTypes
 from telegram.error import NetworkError, TelegramError, TimedOut
 
 from config import ALERT_STATE, USER_ID, BOT_START_TIME, save_settings
-from database import get_db_connection, get_daily_performance_stats, mark_leg2_be_moved
+from database import (
+    get_db_connection,
+    get_daily_performance_stats,
+    mark_leg2_be_moved,
+    get_recent_trades_for_chart,
+)
 from trade_engine import (
     execute_pending_intents, trail_leg_to_breakeven, force_close_leg, reconcile_exit,
     close_all_managed, list_managed_positions,
@@ -29,9 +36,6 @@ def format_uptime(delta: timedelta) -> str:
 
 async def build_status_snapshot() -> str:
     uptime = format_uptime(datetime.now(timezone.utc) - BOT_START_TIME)
-    # BUGFIX: these are blocking MT5 calls — running them directly on the event
-    # loop stalls the whole bot (including the /close all kill switch) while
-    # they wait on the terminal. Offload them.
     mt5_ok = await asyncio.to_thread(check_mt5_alive)
     ALERT_STATE["mt5_connected"] = mt5_ok
     last_hb = ALERT_STATE["last_heartbeat_at"]
@@ -134,9 +138,6 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
 
     # 4. News Blackout Guard Gate
     is_blocked, reason = await check_news_blockade()
-    # BUGFIX: ALERT_STATE["news_lockout"] was declared but never actually set
-    # anywhere, so /status always reported "Clear" regardless of real blockade
-    # state.
     ALERT_STATE["news_lockout"] = is_blocked
     if is_blocked:
         logging.info(f"📰 Market scanner paused due to news blockade: {reason}")
@@ -153,7 +154,7 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
     # 6. Market Technical Evaluation
     analysis = await asyncio.to_thread(analyze_market, symbol)
     if analysis:
-        signals_found, watch_found = evaluate_signals(analysis)
+        signals_found, watch_found = await asyncio.to_thread(evaluate_signals, analysis)
         
         for item in signals_found:
             if isinstance(item, tuple):
@@ -186,7 +187,7 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown"
                 )
             except (TimedOut, NetworkError, TelegramError) as e:
-                    logging.warning(f"⚠️ Telegram dispatch timed out: {e}")
+                logging.warning(f"⚠️ Telegram dispatch timed out: {e}")
 
     # 7. Live Execution Drain (blocking MT5 order_send, kept off the event loop)
     try:
@@ -222,12 +223,12 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     current_price = round(df['close'].iloc[-1], 2)
     chat_id = context.job.chat_id if (context.job and context.job.chat_id) else int(USER_ID)
 
-    updates_to_send = []   # (sig, new_status, msg, extra_note)
+    updates_to_send = []   # (sig, new_status, msg, extra_note, now_str)
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, status, direction, entry_price, sl_price, tp1_price, tp2_price, dual_entry, "
+            "SELECT id, timestamp, status, direction, entry_price, sl_price, tp1_price, tp2_price, dual_entry, "
             "ticket, exec_mode, ticket2, exec_mode2, be_moved2 "
             "FROM signals WHERE status IN ('PENDING', 'HIT_TP1')"
         )
@@ -329,26 +330,35 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
                     "UPDATE signals SET status = ?, updated_at = ? WHERE id = ?",
                     (new_status, now_str, sig_id)
                 )
-                updates_to_send.append((sig, new_status, msg, extra_note))
+                updates_to_send.append((sig, new_status, msg, extra_note, now_str))
 
         conn.commit()
 
-    if updates_to_send:
-        await evaluate_circuit_breaker(context)
-
-    for sig, new_status, msg, extra_note in updates_to_send:
+    if not updates_to_send:
+        return
+    await evaluate_circuit_breaker(context)
+    # Chart on the ENTRY timeframe with a deep window (not a hardcoded 60 x M5),
+    # fetched once and shared by every update in this tick.
+    entry_tf = ALERT_STATE.get("entry_tf", mt5.TIMEFRAME_M5)
+    df_chart = await asyncio.to_thread(fetch_candles, symbol, entry_tf, 300)
+    trades_hist = await asyncio.to_thread(get_recent_trades_for_chart, 40, symbol)
+    for sig, new_status, msg, extra_note, closed_at in updates_to_send:
         entry, sl, tp1, tp2 = sig["entry_price"], sig["sl_price"], sig["tp1_price"], sig["tp2_price"]
         if not (chat_id and msg):
             continue
         full_msg = msg + (f"\n\n🤖 {extra_note}" if extra_note else "")
         try:
-            df_chart = await asyncio.to_thread(fetch_candles, symbol, mt5.TIMEFRAME_M5, 60)
             chart_buf = None
             if df_chart is not None and not df_chart.empty:
                 chart_buf = await asyncio.to_thread(
                     generate_outcome_chart,
                     df=df_chart, entry_p=entry, sl_p=sl, tp1_p=tp1, tp2_p=tp2,
-                    outcome_status=new_status, symbol=symbol
+                    outcome_status=new_status, symbol=symbol,
+                    direction=sig["direction"],
+                    entry_time=sig["timestamp"],      # true UTC, ISO
+                    exit_time=closed_at,              # true UTC, 'YYYY-MM-DD HH:MM:SS'
+                    dual=bool(sig["dual_entry"]),
+                    trades=trades_hist, exclude_id=sig["id"],
                 )
             if chart_buf:
                 await context.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=full_msg, parse_mode="Markdown")

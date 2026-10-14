@@ -1,7 +1,7 @@
 # strategy/evaluator.py
 import pandas_ta as ta
 from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
-from database import log_signal_to_db
+from database import log_signal_to_db, get_recent_trades_for_chart
 from mt5_engine import fetch_candles
 from trade_engine import request_execution
 from strategy.chart import generate_signal_chart
@@ -257,9 +257,16 @@ def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, b
     )
 
     full_msg = base_msg + "\n" + pos_info + exec_note
+
+    try:
+        trades_hist = get_recent_trades_for_chart(limit=30, symbol=symbol)
+    except Exception:
+        trades_hist = []
+
     chart_buf = generate_signal_chart(
         a["df_entry"], symbol, direction, close_price, sl_price, tp1_price, tp2_price,
-        fvg=zone or a.get("fvg"), near_zone=a.get("near_zone"), dual=dual
+        fvg=zone or a.get("fvg"), near_zone=a.get("near_zone"), dual=dual,
+        trades=trades_hist, exclude_id=signal_id
     )
     return (full_msg, chart_buf)
 
