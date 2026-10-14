@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.lines import Line2D
 
+from config import ALERT_STATE, TF_LABELS
 from mt5_engine import get_broker_utc_offset_seconds
 
 # ------------------------------------------------------------------ theme
@@ -189,14 +190,58 @@ def _first_touch(highs, lows, level, start, stop=None):
     return None
 
 
-def _get_zone_style(near_zone):
-    """Returns dynamic color and label text for support/resistance zones."""
+def _entry_tf_label(tf_label=None):
+    return tf_label or TF_LABELS.get(ALERT_STATE.get("entry_tf"), "?")
+
+
+def _stamp(ax, tf, n):
+    """Small corner note so every chart states its timeframe and bar count."""
+    ax.text(0.008, 0.015, f"{tf} candles • {n} bars", transform=ax.transAxes, ha="left", va="bottom",
+            color="#9e9e9e", fontsize=7.5, zorder=8,
+            bbox=dict(boxstyle="round,pad=0.2", fc=BG, ec="none", alpha=0.7))
+
+
+def _zone_bounds(near_zone):
+    """(bottom, top) of an S/R zone. Falls back to a thin band if low/high are missing."""
+    if not near_zone:
+        return None
+    low, high, price = near_zone.get("low"), near_zone.get("high"), near_zone.get("price")
+    if low is None or high is None:
+        if price is None:
+            return None
+        half = float(price) * 0.00075
+        low, high = float(price) - half, float(price) + half
+    low, high = float(low), float(high)
+    return min(low, high), max(low, high)
+
+
+def _get_zone_style(near_zone, ref_price=None):
+    """Support = green, Resistance = red. 'mixed' zones take the colour of the side price is on."""
     z_type = str(near_zone.get("type", "")).lower()
     if "support" in z_type:
         return C_SUP, "Sup"
-    elif "resistance" in z_type:
+    if "resistance" in z_type:
         return C_RES, "Res"
+    if z_type == "mixed" and ref_price is not None and near_zone.get("price") is not None:
+        return (C_SUP, "Sup") if ref_price >= near_zone["price"] else (C_RES, "Res")
     return C_SR, "S/R"
+
+
+def _draw_zone_box(ax, near_zone, x0, x1, ref_price, labels):
+    """Shaded green (support) / red (resistance) box with edge lines. Call AFTER the y-limits are set."""
+    bounds = _zone_bounds(near_zone)
+    if bounds is None:
+        return False
+    bot, top = bounds
+    lo, hi = ax.get_ylim()
+    if top < lo or bot > hi:
+        return False
+    color, tag = _get_zone_style(near_zone, ref_price)
+    ax.fill_between([x0, x1], [bot, bot], [top, top], color=color, alpha=0.18, linewidth=0, zorder=1)
+    ax.hlines([bot, top], x0, x1, colors=color, linestyles="-", linewidth=0.9, alpha=0.8, zorder=2)
+    mid = near_zone.get("price") or (bot + top) / 2
+    labels.append((mid, f"{tag} ${bot:.2f}–${top:.2f}", color))
+    return True
 
 
 # ------------------------------------------------------------------ past-trade overlay (shared)
@@ -288,9 +333,9 @@ def _apply_legend(ax, with_trades=False):
 
 # ------------------------------------------------------------------ market snapshot
 def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=100, near_zone=None,
-                            macro_fvg=None, trades=None, server_offset_s=None):
+                            macro_fvg=None, trades=None, server_offset_s=None, tf_label=None):
     """
-    Real-time candlestick snapshot with EMAs, current price, nearest S/R, HTF FVG,
+    Real-time candlestick snapshot with EMAs, current price, nearest S/R box, HTF FVG,
     and overlays for all past trade entries/exits inside the candle window.
     """
     if df is None or len(df) < min(bars, 20):
@@ -316,10 +361,8 @@ def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=100, near_z
     labels = [(close, f"${close:.2f}", "#ffffff")]
     ax.axhline(close, color="#ffffff", linestyle="--", linewidth=0.9, alpha=0.6, zorder=2)
 
-    if near_zone and near_zone.get("price") and lo <= near_zone["price"] <= hi:
-        c_zone, z_lbl = _get_zone_style(near_zone)
-        ax.axhline(near_zone["price"], color=c_zone, linestyle="-.", alpha=0.85, linewidth=1.2, zorder=2)
-        labels.append((near_zone["price"], f"{z_lbl} ${near_zone['price']:.2f}", c_zone))
+    x_end = _label_x_start(n, pad) - 0.5
+    _draw_zone_box(ax, near_zone, -1, x_end, close, labels)
 
     if macro_fvg and macro_fvg.get("fvg_top") is not None and macro_fvg.get("fvg_bottom") is not None:
         top, bot = macro_fvg["fvg_top"], macro_fvg["fvg_bottom"]
@@ -332,6 +375,7 @@ def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=100, near_z
     ax.set_ylim(lo, hi)
     _set_time_ticks(ax, dfp, offset_s=offset_s)
     _place_labels(ax, labels)
+    _stamp(ax, _entry_tf_label(tf_label), n)
     ax.set_title(title, color="white", fontsize=12, fontweight="bold")
     _apply_legend(ax, with_trades=drawn)
     return _finish(fig)
@@ -340,8 +384,8 @@ def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=100, near_z
 # ------------------------------------------------------------------ live signal alert
 def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2,
                           fvg=None, near_zone=None, bars=80, dual=True,
-                          trades=None, exclude_id=None, server_offset_s=None):
-    """Alert chart with projected entry/SL/TP lines, shaded risk/reward zones and past trade history."""
+                          trades=None, exclude_id=None, server_offset_s=None, tf_label=None):
+    """Alert chart with projected entry/SL/TP lines, shaded risk/reward zones, S/R box and past trade history."""
     if df is None or len(df) < min(bars, 50):
         return None
 
@@ -393,10 +437,7 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2,
     if dual:
         labels.append((tp2, f"TP2 ${tp2:.2f}{_r_text(tp2, entry, sl_dist, signal_type)}", C_TP2))
 
-    if near_zone and near_zone.get("price") and lo <= near_zone["price"] <= hi:
-        c_zone, z_lbl = _get_zone_style(near_zone)
-        ax.hlines(near_zone["price"], -1, x1, colors=c_zone, linestyles="-.", linewidth=1.1, alpha=0.85, zorder=2)
-        labels.append((near_zone["price"], f"{z_lbl} ${near_zone['price']:.2f}", c_zone))
+    _draw_zone_box(ax, near_zone, -1, x1, entry, labels)
 
     drawn = _overlay_trades(ax, dfp, candle_ts, trades, offset_s, exclude_id=exclude_id)
 
@@ -404,7 +445,9 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2,
     ax.set_ylim(lo, hi)
     _set_time_ticks(ax, dfp, offset_s=offset_s)
     _place_labels(ax, labels)
-    ax.set_title(f"Trading Butler Alert — {symbol} ({signal_type})" + ("  •  DUAL ENTRY" if dual else ""),
+    tf = _entry_tf_label(tf_label)
+    _stamp(ax, tf, n)
+    ax.set_title(f"Trading Butler Alert — {symbol} ({signal_type}) · {tf}" + ("  •  DUAL ENTRY" if dual else ""),
                  color="white", fontsize=12, fontweight="bold")
     _apply_legend(ax, with_trades=drawn)
     return _finish(fig)
@@ -414,12 +457,12 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2,
 def generate_outcome_chart(df, entry_p, sl_p, tp1_p, tp2_p, outcome_status, symbol="XAUUSD",
                            direction=None, entry_time=None, exit_time=None, dual=True,
                            pre_bars=25, post_bars=8, trades=None, exclude_id=None,
-                           server_offset_s=None):
+                           server_offset_s=None, near_zone=None, tf_label=None, min_bars=60):
     """
     Post-trade chart. Entry and exit markers are placed on the real entry/exit
-    candles (entry_time / exit_time are true-UTC values straight from the DB),
-    the chart is trimmed to [entry - pre_bars, exit + post_bars], and other past
-    trades inside that window are overlaid.
+    candles, the chart is trimmed to [entry - pre_bars, exit + post_bars] (never
+    fewer than `min_bars` candles), and the S/R zone the signal fired at is drawn
+    as a green (support) / red (resistance) box.
     """
     if df is None or len(df) == 0:
         return None
@@ -472,16 +515,18 @@ def generate_outcome_chart(df, entry_p, sl_p, tp1_p, tp2_p, outcome_status, symb
 
     terminal = outcome_status in TERMINAL
 
-    # ---- trim to the trade's lifespan
+    # ---- trim to the trade's lifespan, but never below min_bars candles
     start = max(0, entry_idx - pre_bars) if entry_idx is not None else max(0, last - 100)
     end = last
     if terminal and markers:
         end = min(last, max(m[0] for m in markers) + post_bars)
+    if (end - start + 1) < min_bars:
+        start = max(0, end - min_bars + 1)
     dfp = df.iloc[start:end + 1].reset_index(drop=True)
     n = len(dfp)
     candle_ts = full_ts[start:end + 1] if has_time else None
 
-    entry_x = (entry_idx - start) if entry_idx is not None else None
+    entry_x = (entry_idx - start) if (entry_idx is not None and entry_idx >= start) else None
     markers = [(i - start, p, k) for i, p, k in markers]
     x0 = entry_x if entry_x is not None else 0
     x_end = max(m[0] for m in markers) if (terminal and markers) else n - 1
@@ -536,15 +581,20 @@ def generate_outcome_chart(df, entry_p, sl_p, tp1_p, tp2_p, outcome_status, symb
     if show_tp2:
         labels.append((tp2_p, f"TP2 ${tp2_p:.2f}{_r_text(tp2_p, entry_p, sl_dist, direction)}", C_TP2))
 
+    _draw_zone_box(ax, near_zone, -1, ext_to, entry_p, labels)
+
     ax.set_xlim(-1, n + pad)
     _set_time_ticks(ax, dfp, offset_s=offset_s)
     _place_labels(ax, labels)
+
+    tf = _entry_tf_label(tf_label)
+    _stamp(ax, tf, n)
 
     if entry_x is None:
         ax.text(0.01, 0.97, "entry bar is outside this chart window — levels shown full-width",
                 transform=ax.transAxes, color="#888888", fontsize=7.5, va="top")
 
     color, text = STATUS_STYLE.get(outcome_status, ("#FFFFFF", outcome_status))
-    ax.set_title(f"[{symbol}] {direction} — {text}", color=color, fontsize=12, fontweight="bold")
+    ax.set_title(f"[{symbol} · {tf}] {direction} — {text}", color=color, fontsize=12, fontweight="bold")
     _apply_legend(ax, with_trades=drawn)
     return _finish(fig)

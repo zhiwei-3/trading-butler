@@ -229,10 +229,11 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Fetch recent trade history from database for chart overlay
     trades_db = await asyncio.to_thread(get_recent_trades_for_chart, 40, symbol)
 
+    entry_lbl = TF_LABELS.get(ALERT_STATE["entry_tf"], "")
     chart_buf = await asyncio.to_thread(
         generate_chart_snapshot,
         df=analysis["df_entry"],
-        title=f"XAUUSD Real-Time Chart ({tf_lbl})",
+        title=f"XAUUSD Real-Time Chart ({entry_lbl})",
         bars=100,
         near_zone=analysis.get("near_zone"),
         macro_fvg=analysis.get("macro_fvg"),

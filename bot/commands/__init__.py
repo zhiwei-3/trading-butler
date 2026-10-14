@@ -15,6 +15,7 @@ from .settings import (
 )
 from .backtest import backtest_cmd
 from .optimize import optimize_cmd
+from .bro import fuckyou_cmd
 from .callbacks import handle_callback_query
 
 __all__ = [
@@ -25,5 +26,5 @@ __all__ = [
     "diagnose_cmd", "news_calendar_cmd",
     "set_cmd", "set_timeframe", "set_strategy_cmd",
     "filters_cmd", "confluence_cmd", "watchlist_cmd",
-    "backtest_cmd", "optimize_cmd", "handle_callback_query",
+    "backtest_cmd", "optimize_cmd", "fuckyou_cmd", "handle_callback_query",
 ]

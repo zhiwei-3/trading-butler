@@ -87,10 +87,23 @@ def find_sr_zones(df, lookback=180, left=3, right=3, cluster_pct=0.0015, min_tou
                 break
         if not merged:
             zones.append({"price": price, "prices": [price], "touches": 1, "types": {kind}})
-    return sorted([
-        {"price": round(z["price"], 2), "touches": z["touches"], "type": ("mixed" if len(z["types"]) > 1 else next(iter(z["types"])))}
-        for z in zones if z["touches"] >= min_touches
-    ], key=lambda z: z["touches"], reverse=True)
+
+    out = []
+    for z in zones:
+        if z["touches"] < min_touches:
+            continue
+        center = z["price"]
+        half_min = center * cluster_pct * 0.5          # minimum box half-thickness
+        low = min(min(z["prices"]), center - half_min)
+        high = max(max(z["prices"]), center + half_min)
+        out.append({
+            "price": round(center, 2),
+            "low": round(low, 2),
+            "high": round(high, 2),
+            "touches": z["touches"],
+            "type": "mixed" if len(z["types"]) > 1 else next(iter(z["types"])),
+        })
+    return sorted(out, key=lambda z: z["touches"], reverse=True)
 
 def nearest_sr_zone(zones, price, max_distance_pct=0.004):
     candidates = [z for z in zones if abs(z["price"] - price) / price <= max_distance_pct]

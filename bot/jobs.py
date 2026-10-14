@@ -202,6 +202,13 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
         except (TimedOut, NetworkError, TelegramError) as e:
             logging.warning(f"⚠️ Execution report dispatch failed: {e}")
 
+def _zone_from_sig(sig):
+    """Rebuilds the S/R zone that existed when the signal fired (None for pre-migration rows)."""
+    if sig["zone_low"] is None or sig["zone_high"] is None:
+        return None
+    low, high = float(sig["zone_low"]), float(sig["zone_high"])
+    return {"type": sig["zone_type"] or "mixed", "low": low, "high": high, "price": (low + high) / 2}
+
 async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     """
     Tracks each active signal's leg(s) to a terminal outcome.
@@ -229,7 +236,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
         cursor = conn.cursor()
         cursor.execute(
             "SELECT id, timestamp, status, direction, entry_price, sl_price, tp1_price, tp2_price, dual_entry, "
-            "ticket, exec_mode, ticket2, exec_mode2, be_moved2 "
+            "ticket, exec_mode, ticket2, exec_mode2, be_moved2, zone_low, zone_high, zone_type "
             "FROM signals WHERE status IN ('PENDING', 'HIT_TP1')"
         )
         active_signals = cursor.fetchall()
@@ -359,6 +366,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
                     exit_time=closed_at,              # true UTC, 'YYYY-MM-DD HH:MM:SS'
                     dual=bool(sig["dual_entry"]),
                     trades=trades_hist, exclude_id=sig["id"],
+                    near_zone=_zone_from_sig(sig),
                 )
             if chart_buf:
                 await context.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=full_msg, parse_mode="Markdown")

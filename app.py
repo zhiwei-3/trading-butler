@@ -12,7 +12,7 @@ from bot.commands import (
     set_cmd, set_timeframe, set_strategy_cmd, filters_cmd, confluence_cmd, watchlist_cmd,
     trade_cmd, positions_cmd, close_cmd, breakeven_cmd,
     status_cmd, stats_cmd, heartbeat_cmd, diagnose_cmd,
-    backtest_cmd, optimize_cmd,
+    backtest_cmd, optimize_cmd, fuckyou_cmd,
 )
 from bot.jobs import (
     market_scanner_job, 
@@ -128,6 +128,7 @@ def main():
     app.add_handler(CommandHandler("diagnose", diagnose_cmd))
     app.add_handler(CommandHandler("backtest", backtest_cmd))
     app.add_handler(CommandHandler("optimize", optimize_cmd))
+    app.add_handler(CommandHandler("fuckyou", fuckyou_cmd))
 
     # Auto-start Background Jobs
     if USER_ID:

@@ -232,7 +232,8 @@ def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, b
     symbol = a.get("symbol", "XAUUSD")
     dual = _is_dual_entry(score)
 
-    signal_id = log_signal_to_db(symbol, direction, close_price, sl_price, tp1_price, tp2_price, score, dual_entry=dual)
+    signal_id = log_signal_to_db(symbol, direction, close_price, sl_price, tp1_price, tp2_price, score,
+                                 dual_entry=dual, near_zone=a.get("near_zone"))
     request_execution(signal_id, symbol, direction, close_price, sl_price, tp1_price, tp2_price, score, dual_entry=dual)
 
     fixed_lot = ALERT_STATE.get("fixed_lot_size", 0.01)

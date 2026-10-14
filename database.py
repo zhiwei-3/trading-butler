@@ -54,6 +54,9 @@ def init_db():
             ("be_moved2", "INTEGER DEFAULT 0"),
             ("tp1_partial_done", "INTEGER DEFAULT 0"),
             ("be_moved", "INTEGER DEFAULT 0"),
+            ("zone_low", "REAL"),
+            ("zone_high", "REAL"),
+            ("zone_type", "TEXT"),
         ]
         for col_name, col_type in migrations:
             if col_name not in columns:
@@ -107,16 +110,22 @@ def init_db():
 
         conn.commit()
 
-def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score, dual_entry=False):
+def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score,
+                     dual_entry=False, near_zone=None):
     """Logs generated signal details to SQLite. Returns the new row id (or None)."""
     timestamp = datetime.now(timezone.utc).isoformat()
+    zone_low = zone_high = zone_type = None
+    if near_zone:
+        zone_low, zone_high, zone_type = near_zone.get("low"), near_zone.get("high"), near_zone.get("type")
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO signals (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score, status, dual_entry)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
-            ''', (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score, int(bool(dual_entry))))
+                INSERT INTO signals (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price,
+                                     score, status, dual_entry, zone_low, zone_high, zone_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)
+            ''', (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score,
+                  int(bool(dual_entry)), zone_low, zone_high, zone_type))
             conn.commit()
             return cursor.lastrowid
     except Exception as e:
