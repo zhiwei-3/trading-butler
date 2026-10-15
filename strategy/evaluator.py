@@ -1,9 +1,9 @@
 # strategy/evaluator.py
 import pandas_ta as ta
 from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
-from database import log_signal_to_db, get_recent_trades_for_chart
+from database import log_signal_to_db, get_recent_trades_for_chart, set_signal_status
 from mt5_engine import fetch_candles
-from trade_engine import request_execution
+from trade_engine import request_execution, trade_slot_blocker
 from strategy.chart import generate_signal_chart
 from strategy.smc import (
     find_swing_points, detect_market_structure,
@@ -228,34 +228,48 @@ def _is_dual_entry(score):
     return score >= ALERT_STATE.get("dual_entry_score_threshold", 50)
 
 def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, base_msg, score=0, zone=None):
-    """Logs the signal, queues live execution (if armed), and renders the alert."""
+    """Logs the signal, queues live execution (if armed and the slot is free), and renders the alert."""
     symbol = a.get("symbol", "XAUUSD")
     dual = _is_dual_entry(score)
 
+    blocker = None
+    if ALERT_STATE.get("auto_trade_enabled"):
+        blocker = trade_slot_blocker(symbol)
+
     signal_id = log_signal_to_db(symbol, direction, close_price, sl_price, tp1_price, tp2_price, score,
                                  dual_entry=dual, near_zone=a.get("near_zone"))
-    request_execution(signal_id, symbol, direction, close_price, sl_price, tp1_price, tp2_price, score, dual_entry=dual)
+
+    if blocker:
+        # Alert only — no order, and keep it out of the outcome tracker / stats.
+        if signal_id:
+            set_signal_status(signal_id, "SKIPPED")
+    else:
+        request_execution(signal_id, symbol, direction, close_price, sl_price, tp1_price, tp2_price,
+                          score, dual_entry=dual)
 
     fixed_lot = ALERT_STATE.get("fixed_lot_size", 0.01)
     exec_note = ""
-    if ALERT_STATE.get("auto_trade_enabled"):
-        mode_lbl = "DRY-RUN" if ALERT_STATE.get("trade_dry_run", True) else "LIVE"
-        if dual:
-            exec_note = (
-                f"🤖 *Auto-trade {mode_lbl}* — 2 legs of `{fixed_lot}` lots each: Leg 1 closes fully "
-                f"at TP1, Leg 2's SL trails to break-even the moment TP1 hits and runs for TP2.\n\n"
-            )
-        else:
-            exec_note = (
-                f"🤖 *Auto-trade {mode_lbl}* — 1 leg of `{fixed_lot}` lots, targeting **TP1 only** "
-                f"(below the dual-entry score threshold, or a non-confluence strategy).\n\n"
-            )
-
-    pos_info = (
-        f"💼 **Position Plan:**\n"
-        f"• **Sizing:** `{fixed_lot}` lots per leg (fixed)\n"
-        f"• **Legs:** {'2 — TP1 full close + TP2/BE runner 🎯🎯' if dual else '1 — TP1 only 🎯'}\n\n"
-    )
+    pos_info = ""
+    if blocker:
+        exec_note = f"⏭️ *Alert only — no order placed:* {blocker}\n\n"
+    else:
+        if ALERT_STATE.get("auto_trade_enabled"):
+            mode_lbl = "DRY-RUN" if ALERT_STATE.get("trade_dry_run", True) else "LIVE"
+            if dual:
+                exec_note = (
+                    f"🤖 *Auto-trade {mode_lbl}* — 2 legs of `{fixed_lot}` lots each: Leg 1 closes fully "
+                    f"at TP1, Leg 2's SL trails to break-even the moment TP1 hits and runs for TP2.\n\n"
+                )
+            else:
+                exec_note = (
+                    f"🤖 *Auto-trade {mode_lbl}* — 1 leg of `{fixed_lot}` lots, targeting **TP1 only** "
+                    f"(below the dual-entry score threshold, or a non-confluence strategy).\n\n"
+                )
+        pos_info = (
+            f"💼 **Position Plan:**\n"
+            f"• **Sizing:** `{fixed_lot}` lots per leg (fixed)\n"
+            f"• **Legs:** {'2 — TP1 full close + TP2/BE runner 🎯🎯' if dual else '1 — TP1 only 🎯'}\n\n"
+        )
 
     full_msg = base_msg + "\n" + pos_info + exec_note
 

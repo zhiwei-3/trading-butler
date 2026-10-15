@@ -16,7 +16,7 @@ from database import (
 )
 from trade_engine import (
     execute_pending_intents, trail_leg_to_breakeven, force_close_leg, reconcile_exit,
-    close_all_managed, list_managed_positions,
+    close_all_managed, list_managed_positions, enforce_single_trade,
 )
 from mt5_engine import get_gold_symbol, check_mt5_alive, fetch_candles, get_tick
 from news_engine import news_guard_check, check_news_blockade, check_news_post_release
@@ -226,6 +226,13 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     df = await asyncio.to_thread(fetch_candles, symbol, mt5.TIMEFRAME_M1, 5)
     if df is None or df.empty:
         return
+
+    try:
+        for line in await asyncio.to_thread(enforce_single_trade):
+            if USER_ID:
+                await context.bot.send_message(chat_id=int(USER_ID), text=line, parse_mode="Markdown")
+    except Exception:
+        logging.exception("enforce_single_trade failed")
 
     current_price = round(df['close'].iloc[-1], 2)
     chat_id = context.job.chat_id if (context.job and context.job.chat_id) else int(USER_ID)

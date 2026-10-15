@@ -29,6 +29,7 @@ All strategies other than smc_confluence, and any smc_confluence signal below
 the dual-entry threshold, get leg 1 only (single position, TP1-only, no runner).
 """
 
+import time
 import math
 import logging
 import threading
@@ -37,7 +38,8 @@ from datetime import datetime, timezone, timedelta
 import MetaTrader5 as mt5
 
 from config import ALERT_STATE
-from database import attach_trade_execution, count_live_trades_today
+from database import (attach_trade_execution, count_live_trades_today,
+                      set_signal_status, get_active_live_signals)
 from mt5_engine import MT5_LOCK, init_mt5, get_tick
 
 MAX_SEND_RETRIES = 3
@@ -45,6 +47,12 @@ MAX_SEND_RETRIES = 3
 _INTENT_LOCK = threading.Lock()
 _PENDING_INTENTS = []
 _FILLING_CACHE = {}   # symbol -> filling mode that the broker actually accepted
+
+# --- near the other module-level locks ---
+global _LAST_FILL_AT
+_EXEC_LOCK = threading.Lock()   # serialises check-and-open so two drains can never interleave
+_LAST_FILL_AT = 0.0                # monotonic time of the last real fill
+_FILL_COOLDOWN_S = 20              # block new trade ideas this long after any fill
 
 _RC_INVALID_FILL = getattr(mt5, "TRADE_RETCODE_INVALID_FILL", 10030)
 _RC_RETRYABLE = {
@@ -107,11 +115,74 @@ def pending_intent_count():
 
 # ---------------------------------------------------------------- preflight
 
-def list_managed_positions(symbol=None):
-    """Only positions carrying this bot's magic number — manual trades are untouchable."""
+def _fetch_managed(symbol=None):
+    """
+    Returns the list of this bot's positions, or None if MT5 could not be queried.
+    (None must NOT be treated as 'no positions' — that was the fail-open bug.)
+    """
     with MT5_LOCK:
         positions = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
-    return [p for p in (positions or []) if p.magic == _magic()]
+        err = mt5.last_error() if positions is None else None
+    if positions is None:
+        # Some terminal builds return None + (1, 'Success') for "no positions".
+        if err and err[0] == getattr(mt5, "RES_S_OK", 1):
+            return []
+        return None
+    return [p for p in positions if p.magic == _magic()]
+
+def list_managed_positions(symbol=None):
+    """Only positions carrying this bot's magic number — manual trades are untouchable."""
+    return _fetch_managed(symbol) or []
+
+def trade_slot_blocker(symbol):
+    """One-trade-at-a-time gate. FAILS CLOSED. Returns None if a new idea may open."""
+    if (time.monotonic() - _LAST_FILL_AT) < _FILL_COOLDOWN_S:
+        return "a trade was just opened — waiting for the position list to settle."
+    if not init_mt5():
+        return "MT5 terminal unreachable — cannot verify open positions."
+    managed = _fetch_managed(symbol)
+    if managed is None:
+        return "Could not verify open positions (MT5 query failed) — failing closed."
+    if managed:
+        return f"already holding position(s) {', '.join(f'#{p.ticket}' for p in managed)}."
+    return None
+
+def position_by_ticket(ticket):
+    with MT5_LOCK:
+        positions = mt5.positions_get(ticket=int(ticket))
+    return positions[0] if positions else None
+
+def _preflight(symbol, bypass_position_cap=False):
+    if not init_mt5():
+        return False, "MT5 terminal unreachable."
+    with MT5_LOCK:
+        term = mt5.terminal_info()
+        acc = mt5.account_info()
+        info = mt5.symbol_info(symbol)
+    if term is None or not term.trade_allowed:
+        return False, "AutoTrading is OFF in the MT5 terminal (enable the 'Algo Trading' button)."
+    if acc is None:
+        return False, "No MT5 account info available."
+    if not acc.trade_allowed:
+        return False, "Trading disabled for this account (investor password or server restriction)."
+    if info is None:
+        return False, f"Symbol `{symbol}` not found on this server."
+    if info.trade_mode != mt5.SYMBOL_TRADE_MODE_FULL:
+        return False, f"`{symbol}` is not open for full trading (trade_mode={info.trade_mode})."
+
+    # Only the 2nd leg of a dual-entry signal may bypass this. Everything else
+    # needs a completely flat book on this symbol (max_open_positions no longer
+    # lets a 2nd independent trade through).
+    if not bypass_position_cap:
+        blocker = trade_slot_blocker(symbol)
+        if blocker:
+            return False, blocker.capitalize()
+
+    day_n = count_live_trades_today()
+    day_cap = int(ALERT_STATE.get("max_daily_trades", 5))
+    if not ALERT_STATE.get("trade_dry_run", True) and day_n >= day_cap:
+        return False, f"Daily execution cap reached ({day_n}/{day_cap})."
+    return True, ""
 
 def position_by_ticket(ticket):
     with MT5_LOCK:
@@ -192,6 +263,14 @@ def _snap_volume(info, volume):
 
 
 # ---------------------------------------------------------------- open
+def _new_fill(symbol, direction, before):
+    """A managed position of the right side that wasn't there before we started sending."""
+    want = mt5.POSITION_TYPE_BUY if direction == "BUY" else mt5.POSITION_TYPE_SELL
+    for p in (_fetch_managed(symbol) or []):
+        if p.ticket not in before and p.type == want:
+            return p
+    return None
+
 
 def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypass_position_cap=False):
     dry = ALERT_STATE.get("trade_dry_run", True) if dry_run is None else dry_run
@@ -213,11 +292,22 @@ def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypas
 
     order_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
     last_reason = "Order was never sent."
+    before = {p.ticket for p in (_fetch_managed(symbol) or [])}
 
     for attempt in range(1, MAX_SEND_RETRIES + 1):
         tick = get_tick(symbol)
         if tick is None:
             return {"ok": False, "dry_run": dry, "ticket": None, "reason": "No live tick for pricing."}
+
+        if attempt > 1:
+            # A previous attempt may have filled even though we got None/timeout/requote back.
+            dup = _new_fill(symbol, direction, before)
+            if dup is not None:
+                _LAST_FILL_AT = time.monotonic()
+                return {"ok": True, "dry_run": False, "ticket": int(dup.ticket),
+                        "price": float(dup.price_open), "lots": float(dup.volume),
+                        "sl": dup.sl, "tp": dup.tp, "retcode": mt5.TRADE_RETCODE_DONE,
+                        "reason": "Filled (confirmed from position list after ambiguous reply)."}
 
         price = tick.ask if direction == "BUY" else tick.bid
         adj_sl, adj_tp = _adjust_levels(info, direction, price, sl, tp)
@@ -257,6 +347,7 @@ def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypas
                 break
 
             if result.retcode == mt5.TRADE_RETCODE_DONE:
+                _LAST_FILL_AT = time.monotonic()
                 _FILLING_CACHE[symbol] = filling
                 ticket = int(result.order)
                 # BUGFIX: result.order is not reliably the POSITION ticket (e.g. on
@@ -484,15 +575,42 @@ def execute_pending_intents():
         _PENDING_INTENTS[:] = []
     if not batch:
         return []
+    with _EXEC_LOCK:
+        return _drain_batch(batch)
 
+
+def _skip_intent(intent, dual):
+    """Records that no order was sent and takes the signal out of outcome tracking."""
+    fixed_lot = _fixed_lot()
+    attach_trade_execution(intent["signal_id"], 1, None, fixed_lot, "NONE", None)
+    if dual:
+        attach_trade_execution(intent["signal_id"], 2, None, fixed_lot, "NONE", None)
+    set_signal_status(intent["signal_id"], "SKIPPED")
+
+
+def _drain_batch(batch):
     reports = []
     fixed_lot = _fixed_lot()
+    handled_symbols = set()   # only ONE trade idea per symbol per drain, even in dry-run
 
     for intent in batch:
         symbol, direction, dual = intent["symbol"], intent["direction"], intent["dual_entry"]
         sl_dist = abs(intent["entry"] - intent["sl"])
-        if sl_dist <= 1e-9:  # Use tolerance for floating point
+        if sl_dist <= 1e-9:
+            _skip_intent(intent, dual)
             reports.append(f"❌ **Execution skipped** — zero SL distance on {direction} {symbol}.")
+            continue
+
+        # One trade idea at a time (fail-closed). A dual-entry signal's two legs are
+        # opened below, after this gate, so they never count against each other.
+        blocker = None
+        if symbol in handled_symbols:
+            blocker = "another signal on this symbol was already handled this cycle."
+        else:
+            blocker = trade_slot_blocker(symbol)
+        if blocker:
+            _skip_intent(intent, dual)
+            reports.append(f"⏭️ **Execution skipped** — {direction} {symbol} signal ignored, {blocker}")
             continue
 
         # Abort if the market ran away from the signal price while we were queueing.
@@ -502,6 +620,7 @@ def execute_pending_intents():
             drift_pct = abs(live - intent["entry"]) / sl_dist * 100.0
             max_drift = float(ALERT_STATE.get("max_entry_drift_pct", 25.0))
             if drift_pct > max_drift:
+                _skip_intent(intent, dual)
                 reports.append(
                     f"🚫 **Execution aborted** — {direction} {symbol} drifted "
                     f"`{drift_pct:.0f}%` of SL distance from the signal price "
@@ -509,24 +628,11 @@ def execute_pending_intents():
                 )
                 continue
 
-        # One trade idea at a time: if the bot already holds ANY position on this
-        # symbol, skip. A dual-entry signal's two legs are opened below, after this
-        # check, so they never count against each other.
-        open_now = list_managed_positions(symbol)
-        if open_now:
-            tickets = ", ".join(f"#{p.ticket}" for p in open_now)
-            attach_trade_execution(intent["signal_id"], 1, None, fixed_lot, "NONE", None)
-            if dual:
-                attach_trade_execution(intent["signal_id"], 2, None, fixed_lot, "NONE", None)
-            reports.append(
-                f"⏭️ **Execution skipped** — {direction} {symbol} signal ignored, "
-                f"already holding position(s) {tickets}."
-            )
-            continue
+        handled_symbols.add(symbol)
 
         legs = [(1, "TP1", intent["tp1"], False)]
         if dual:
-            legs.append((2, "TP2", intent["tp2"], True))  # leg 2 bypasses the open-position cap
+            legs.append((2, "TP2", intent["tp2"], True))  # only leg 2 bypasses the gate
 
         leg_lines = []
         leg1_ok = False
@@ -537,7 +643,7 @@ def execute_pending_intents():
                 continue
 
             res = open_position(symbol, direction, fixed_lot, intent["sl"], tp_price,
-                                 tag=f"TB-{label}", bypass_position_cap=bypass_cap)
+                                tag=f"TB-{label}", bypass_position_cap=bypass_cap)
 
             if leg_no == 1:
                 leg1_ok = res["ok"]
@@ -558,8 +664,42 @@ def execute_pending_intents():
                 attach_trade_execution(intent["signal_id"], leg_no, None, fixed_lot, "NONE", None)
                 leg_lines.append(f"❌ Leg {leg_no} ({label}) failed — {res['reason']}")
 
+        # Leg 1 never opened -> no trade exists. Stop the tracker from reporting
+        # fake TP/SL outcomes for it.
+        if not leg1_ok:
+            set_signal_status(intent["signal_id"], "SKIPPED")
+
         mode_label = "🎯🎯 DUAL-ENTRY" if dual else "🎯 SINGLE-ENTRY (TP1-only)"
         header = f"{mode_label} — `{direction} {symbol}` (score `{intent['score']}`)"
         reports.append(header + "\n" + "\n".join(f"• {line}" for line in leg_lines))
 
     return reports
+
+# ---------------------------------------------------------------- enforcer
+
+def enforce_single_trade():
+    """
+    Safety net. The only legal live state is ONE signal's legs (1 or 2 tickets).
+    Closes (a) bot positions not linked to any active signal (e.g. retry duplicates)
+    and (b) every active signal after the oldest one. Returns report lines.
+    """
+    if ALERT_STATE.get("trade_dry_run", True):
+        return []
+    with _EXEC_LOCK:
+        positions = _fetch_managed()
+        if not positions:
+            return []
+        signals = get_active_live_signals()          # oldest first
+        keep = signals[0] if signals else None
+        keep_tickets = {t for t in (keep["ticket"], keep["ticket2"]) if t} if keep else set()
+
+        out = []
+        for p in sorted(positions, key=lambda p: p.time):
+            if int(p.ticket) in keep_tickets:
+                continue
+            res = close_position(p.ticket)
+            out.append(f"🛑 **Extra position `#{p.ticket}` closed** (one-trade rule) — "
+                       f"{'✅' if res['ok'] else '⚠️'} {res['reason']}")
+        for extra in signals[1:]:
+            set_signal_status(extra["id"], "SKIPPED")
+        return out

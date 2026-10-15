@@ -240,32 +240,36 @@ def get_daily_performance_stats():
             "today_losses": today_losses
         }
 
+def get_active_live_signals():
+    """Active signals that own live tickets, oldest first."""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, ticket, ticket2 FROM signals "
+            "WHERE status IN ('PENDING','HIT_TP1') "
+            "AND ((exec_mode='LIVE' AND ticket IS NOT NULL) OR (exec_mode2='LIVE' AND ticket2 IS NOT NULL)) "
+            "ORDER BY id ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
 def get_recent_trades_for_chart(limit=30, symbol=None):
-    """Recent signals (open and closed) for overlaying on charts. Times are true UTC."""
+    """Recent signals (open and closed) for overlaying on charts. Times are true UTC.
+    SKIPPED signals (never executed) are excluded."""
     query = """
         SELECT
-            id,
-            symbol,
-            direction,
-            dual_entry,
-            timestamp as time,
-            timestamp as entry_time,
-            entry_price as entry,
-            entry_price,
-            sl_price as sl,
-            sl_price,
-            tp1_price as tp1,
-            tp1_price,
-            tp2_price as tp2,
-            tp2_price,
-            status as outcome,
-            status,
+            id, symbol, direction, dual_entry,
+            timestamp as time, timestamp as entry_time,
+            entry_price as entry, entry_price,
+            sl_price as sl, sl_price,
+            tp1_price as tp1, tp1_price,
+            tp2_price as tp2, tp2_price,
+            status as outcome, status,
             updated_at as closed_at
         FROM signals
+        WHERE status != 'SKIPPED'
     """
     params = []
     if symbol:
-        query += " WHERE symbol = ?"
+        query += " AND symbol = ?"
         params.append(symbol)
     query += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
