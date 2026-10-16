@@ -145,17 +145,17 @@ def generate_xauusd_news_insight(event_title: str, forecast: str, previous: str,
             return "📈 **Bullish XAUUSD** (Lower inflation/growth weakens USD)" if actual_n < forecast_n else "📉 **Bearish XAUUSD** (Higher inflation/growth strengthens USD)"
         return "💡 *Higher actual figures strengthen USD (Bearish Gold); lower figures weaken USD (Bullish Gold).*"
 
-    # 2. Employment Data (NFP, Non-Farm, ADP, Employment Change)
-    elif any(k in title_upper for k in ["NFP", "NON-FARM", "EMPLOYMENT", "ADP"]):
-        if actual_n is not None and forecast_n is not None:
-            return "📈 **Bullish XAUUSD** (Weaker labor market weakens USD)" if actual_n < forecast_n else "📉 **Bearish XAUUSD** (Strong labor market boosts USD)"
-        return "💡 *Strong job growth boosts Fed rate hike expectations (Bearish Gold).* "
-
-    # 3. Unemployment Claims & Unemployment Rate
+    # 2. Unemployment Claims & Unemployment Rate
     elif "UNEMPLOYMENT" in title_upper:
         if actual_n is not None and forecast_n is not None:
             return "📈 **Bullish XAUUSD** (Higher unemployment hurts USD)" if actual_n > forecast_n else "📉 **Bearish XAUUSD** (Lower unemployment supports USD)"
         return "💡 *Higher unemployment weakens USD (Bullish Gold).* "
+
+    # 3. Employment Data (NFP, Non-Farm, ADP, Employment Change)
+    elif any(k in title_upper for k in ["NFP", "NON-FARM", "EMPLOYMENT", "ADP"]):
+        if actual_n is not None and forecast_n is not None:
+            return "📈 **Bullish XAUUSD** (Weaker labor market weakens USD)" if actual_n < forecast_n else "📉 **Bearish XAUUSD** (Strong labor market boosts USD)"
+        return "💡 *Strong job growth boosts Fed rate hike expectations (Bearish Gold).* "
 
     # 4. Central Bank Rates (FOMC, Federal Funds Rate)
     elif any(k in title_upper for k in ["FOMC", "FED", "RATE"]):

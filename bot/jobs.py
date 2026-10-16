@@ -34,6 +34,21 @@ def format_uptime(delta: timedelta) -> str:
     parts.append(f"{minutes}m")
     return " ".join(parts)
 
+async def _send_alert(bot, chat_id, text, photo=None):
+    """
+    Sends an alert with photo. Handles Telegram's 1024-character caption limit by
+    sending the photo separately followed by the full text message when exceeded.
+    """
+    try:
+        if photo and len(text) <= 1024:
+            await bot.send_photo(chat_id=chat_id, photo=photo, caption=text, parse_mode="Markdown")
+            return
+        if photo:
+            await bot.send_photo(chat_id=chat_id, photo=photo)
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+    except (NetworkError, TelegramError) as e:
+        logging.warning(f"⚠️ Alert dispatch failed: {e}")
+
 async def build_status_snapshot() -> str:
     uptime = format_uptime(datetime.now(timezone.utc) - BOT_START_TIME)
     mt5_ok = await asyncio.to_thread(check_mt5_alive)
@@ -159,25 +174,9 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
         for item in signals_found:
             if isinstance(item, tuple):
                 msg_text, chart_buffer = item
-                if chart_buffer:
-                    await context.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=chart_buffer,
-                        caption=msg_text,
-                        parse_mode="Markdown"
-                    )
-                else:
-                    await context.bot.send_message(
-                        chat_id=chat_id, 
-                        text=msg_text, 
-                        parse_mode="Markdown"
-                    )
+                await _send_alert(context.bot, chat_id, msg_text, chart_buffer)
             else:
-                await context.bot.send_message(
-                    chat_id=chat_id, 
-                    text=item, 
-                    parse_mode="Markdown"
-                )
+                await _send_alert(context.bot, chat_id, item)
 
         for watch_msg in watch_found:
             try:
@@ -351,6 +350,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     if not updates_to_send:
         return
     await evaluate_circuit_breaker(context)
+
     # Chart on the ENTRY timeframe with a deep window (not a hardcoded 60 x M5),
     # fetched once and shared by every update in this tick.
     entry_tf = ALERT_STATE.get("entry_tf", mt5.TIMEFRAME_M5)
@@ -375,12 +375,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
                     trades=trades_hist, exclude_id=sig["id"],
                     near_zone=_zone_from_sig(sig),
                 )
-            if chart_buf:
-                await context.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=full_msg, parse_mode="Markdown")
-            else:
-                await context.bot.send_message(chat_id=chat_id, text=full_msg, parse_mode="Markdown")
-        except (NetworkError, TelegramError) as e:
-            logging.warning(f"⚠️ Telegram alert skipped due to network issue: {e}")
+            await _send_alert(context.bot, chat_id, full_msg, chart_buf)
         except Exception as e:
             logging.exception(f"Error sending outcome alert for signal {sig['id']}: {e}")
 

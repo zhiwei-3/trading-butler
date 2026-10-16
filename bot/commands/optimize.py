@@ -256,7 +256,7 @@ async def _optimize_history(update: Update, args, chat_id):
             final_lines.append(f"\n... *(truncated — {total} total sweeps; use* `/optimize history <page>` *to page through)*")
             break
         final_lines.append(line)
-        current_len += line + 1
+        current_len += len(line) + 1
 
     await update.effective_message.reply_text("\n".join(final_lines), parse_mode="Markdown")
 

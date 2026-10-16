@@ -371,9 +371,6 @@ def modify_position_sltp(ticket, sl=None, tp=None):
     pos = position_by_ticket(ticket)
     if pos is None:
         return {"ok": False, "reason": "Position not found (already closed?)."}
-    if ALERT_STATE.get("trade_dry_run", True):
-        logging.info(f"🧪 DRY-RUN SLTP #{ticket} -> sl={sl} tp={tp}")
-        return {"ok": True, "dry_run": True, "reason": "Dry-run — SL/TP not modified."}
 
     with MT5_LOCK:
         info = mt5.symbol_info(pos.symbol)
@@ -422,10 +419,6 @@ def close_position(ticket, lots=None):
         close_vol = pos.volume          # remainder would be untradeable -> close it all
     if close_vol < info.volume_min - 1e-9:
         return {"ok": False, "reason": f"Cannot close {vol} lots — below volume_min {info.volume_min}."}
-
-    if ALERT_STATE.get("trade_dry_run", True):
-        logging.info(f"🧪 DRY-RUN close #{ticket} vol={close_vol}")
-        return {"ok": True, "dry_run": True, "closed": close_vol, "reason": "Dry-run — nothing closed."}
 
     is_buy = pos.type == mt5.POSITION_TYPE_BUY
     order_type = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
