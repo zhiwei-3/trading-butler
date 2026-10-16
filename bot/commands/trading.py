@@ -4,7 +4,6 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, save_settings
-from mt5_engine import get_gold_symbol, calculate_position_size
 from trade_engine import (
     list_managed_positions, close_position, close_all_managed,
     modify_position_sltp, pending_intent_count,
@@ -28,7 +27,6 @@ async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• **Sizing:** `{ALERT_STATE.get('fixed_lot_size')}` lots per leg (fixed — not scaled by account size)\n"
             f"• **Dual-Entry Threshold:** SMC Confluence score `≥ {ALERT_STATE.get('dual_entry_score_threshold')}` "
             f"→ 2 legs (TP1 full close + TP2/BE runner). Below that, or any other strategy, → 1 leg (TP1-only).\n"
-            f"• **Max Open Positions:** `{ALERT_STATE.get('max_open_positions')}` *(the 2nd leg of one signal doesn't count against this)*\n"
             f"• **Max Trades / Day:** `{ALERT_STATE.get('max_daily_trades')}` *(counts tickets, so a dual entry uses 2)*\n"
             f"• **Slippage Allowance:** `{ALERT_STATE.get('max_slippage_points')}` points\n"
             f"• **Entry Drift Abort:** `{ALERT_STATE.get('max_entry_drift_pct')}%` of SL\n"
@@ -75,8 +73,7 @@ async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🟢 **LIVE EXECUTION ENABLED.**\n\n"
             f"• Fixed `{ALERT_STATE.get('fixed_lot_size')}` lots per leg\n"
             f"• Dual-entry (2 legs) above SMC Confluence score `{ALERT_STATE.get('dual_entry_score_threshold')}`\n"
-            f"• Max `{ALERT_STATE.get('max_daily_trades')}` fills/day, "
-            f"`{ALERT_STATE.get('max_open_positions')}` open at once\n"
+            f"• Max `{ALERT_STATE.get('max_daily_trades')}` fills/day (one trade idea open at a time)\n"
             f"• Circuit breaker: `{ALERT_STATE.get('max_daily_losses')}` losses / "
             f"`-{ALERT_STATE.get('max_daily_drawdown_r')}R`\n\n"
             "🧯 Kill switch: `/trade off` then `/close all`.\n"
@@ -161,42 +158,3 @@ async def breakeven_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         f"{icon} **`#{ticket}` SL → break-even** (`${pos.price_open:.2f}`) — {res['reason']}",
         parse_mode="Markdown")
-
-
-@admin_only
-async def calc_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual, standalone reference calculator — independent of the bot's own
-    fixed-lot auto-trade sizing (see /trade)."""
-    try:
-        args = context.args
-        if len(args) < 3:
-            await update.message.reply_text("⚠️ **Usage:** `/calc <balance> <risk_pct> <sl_pips>`", parse_mode="Markdown")
-            return
-
-        balance, risk_pct, sl_pips = float(args[0]), float(args[1]), float(args[2])
-        if sl_pips <= 0:
-            await update.message.reply_text("❌ Stop loss pips must be greater than 0.", parse_mode="Markdown")
-            return
-
-        symbol = await asyncio.to_thread(get_gold_symbol) or "XAUUSD"
-
-        # Convert pips to absolute price distance (XAUUSD 1 pip = 0.1 price move).
-        # Adjust the multiplier if your broker formats gold points differently.
-        sl_dist = sl_pips * 0.1
-
-        pos = await asyncio.to_thread(calculate_position_size, symbol, sl_dist, risk_pct)
-
-        reply = (
-            f"🧮 **POSITION RISK CALCULATOR ({symbol})** — *manual reference only*\n\n"
-            f"• **Account Balance:** `${pos['balance']:,.2f}`\n"
-            f"• **Risk Target ({risk_pct}%):** `${pos['risk_usd']:,.2f}`\n"
-            f"• **Stop Loss Distance:** `{sl_pips} pips`\n\n"
-            f"🎯 **Risk-Based Lot Size:** `{pos['lots']}` Lots\n\n"
-            f"ℹ️ *The bot's own auto-trade execution uses a fixed `{ALERT_STATE.get('fixed_lot_size')}` "
-            f"lots/leg regardless of this calculation — see `/trade`.*"
-        )
-        await update.message.reply_text(reply, parse_mode="Markdown")
-    except ValueError:
-        await update.message.reply_text("❌ Invalid numerical values.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Calculation error: {e}")

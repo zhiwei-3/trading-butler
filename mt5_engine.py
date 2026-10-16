@@ -1,4 +1,3 @@
-import math
 import time
 import logging
 import threading
@@ -112,38 +111,3 @@ def get_broker_utc_offset_seconds():
 
     _OFFSET_CACHE["value"], _OFFSET_CACHE["at"] = value, now
     return value
-
-def calculate_position_size(symbol: str, sl_dist_pts: float, risk_pct: float = 1.0) -> dict:
-    """Calculates exact lot size based on live MT5 balance and SL distance."""
-    with MT5_LOCK:
-        acc = mt5.account_info()
-        symbol_info = mt5.symbol_info(symbol)
-
-    if acc is None or symbol_info is None or sl_dist_pts <= 0:
-        return {"lots": 0.01, "risk_usd": 0.0, "balance": 0.0}
-
-    balance = acc.balance
-    risk_usd = balance * (risk_pct / 100.0)
-
-    trade_tick_value = symbol_info.trade_tick_value
-    trade_tick_size = symbol_info.trade_tick_size
-
-    if trade_tick_size <= 0:
-        return {"lots": symbol_info.volume_min, "risk_usd": risk_usd, "balance": balance}
-
-    ticks_in_sl = sl_dist_pts / trade_tick_size
-    cost_per_lot_sl = ticks_in_sl * trade_tick_value
-
-    lots = (risk_usd / cost_per_lot_sl) if cost_per_lot_sl > 0 else symbol_info.volume_min
-
-    step = symbol_info.volume_step or 0.01
-    # BUGFIX: round() can round UP, silently sizing the position to risk MORE than
-    # risk_pct of the account. Flooring guarantees actual risk <= the requested %.
-    lots = math.floor((lots / step) + 1e-9) * step
-    lots = max(symbol_info.volume_min, min(symbol_info.volume_max, lots))
-
-    return {
-        "lots": round(lots, 2),
-        "risk_usd": round(risk_usd, 2),
-        "balance": round(balance, 2)
-    }

@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 USER_ID = os.getenv("TELEGRAM_USER_ID", None)
 DB_FILE = "trading_butler.db"
 SETTINGS_FILE = "settings.json"
@@ -52,13 +51,11 @@ ALERT_STATE = {
     "active_strategy": "smc_confluence",
 
     "require_structure_break": False,
-    "swing_lookback": 60,
     "fractal_window": 2,
 
     "require_volume_atr_filter": False,
     "atr_multiplier": 1.0,
     "volume_multiplier": 1.2,
-    "vol_atr_avg_period": 20,
 
     "rsi_buy_threshold": 30.0,
     "rsi_sell_threshold": 70.0,
@@ -67,7 +64,6 @@ ALERT_STATE = {
     "tp1_atr_mult": 2.0,
     "tp2_atr_mult": 3.5,
     "min_rrr": 1.5,  # minimum TP1:SL reward-to-risk ratio required to fire a signal
-    "risk_percent": 1.0,  # Default 1% risk per trade
 
     "min_confluence_score": 35,
     "sr_lookback": 180,
@@ -87,7 +83,7 @@ ALERT_STATE = {
     "setup_forming_enabled": True,
     "last_watch_signal": None,
     "watch_rsi_margin": 5,
-    "watch_score_margin": 10,
+    "broker_utc_offset_hours": None,
 
     "circuit_breaker_enabled": True,        # Master ON/OFF toggle
     "max_daily_losses": 3,                  # Max consecutive losses allowed per day
@@ -109,11 +105,6 @@ ALERT_STATE = {
     "trade_dry_run": True,              # build+log the request, never send it
     "magic_number": 770077,             # bot only ever touches its own positions
     "max_slippage_points": 30,          # 'deviation' passed to order_send
-    # Dual-entry uses 2 tickets per signal (one TP1-only, one TP2-runner), so this
-    # must be >=2 for dual-entry signals to actually get their second leg — but the
-    # second leg of a signal's OWN pair bypasses this cap (see trade_engine.py); it
-    # only limits how many *separate* signals can be open at once.
-    "max_open_positions": 2,
     "max_daily_trades": 5,              # hard cap on live fills (tickets) per UTC day
     "max_entry_drift_pct": 25.0,        # abort if price drifted >25% of SL dist since signal
     "fixed_lot_size": 0.01,             # flat lot size per leg — NOT scaled by risk_percent
@@ -151,7 +142,6 @@ PERSISTENT_KEYS = [
     "tp1_atr_mult",
     "tp2_atr_mult",
     "min_rrr",
-    "risk_percent",
     "min_confluence_score",
 
     # --- IFVG strategy ---
@@ -163,9 +153,9 @@ PERSISTENT_KEYS = [
     "ifvg_max_sl_atr",
     "ifvg_fallback_rr",
 
+    "broker_utc_offset_hours",
     "setup_forming_enabled",
     "watch_rsi_margin",
-    "watch_score_margin",
     "heartbeat_enabled",
     "heartbeat_interval_hours",
     # --- circuit breaker ---
@@ -182,7 +172,6 @@ PERSISTENT_KEYS = [
     "trade_dry_run",
     "magic_number",
     "max_slippage_points",
-    "max_open_positions",
     "max_daily_trades",
     "max_entry_drift_pct",
     "fixed_lot_size",

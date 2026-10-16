@@ -1,10 +1,7 @@
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import (
-    ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS,
-    CONFLUENCE_WEIGHTS, save_settings,
-)
+from config import ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, save_settings
 from ._common import admin_only
 
 
@@ -29,7 +26,6 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🤖 **Trade Execution (see `/trade` for full detail):**\n"
             f"• **Fixed Lot/Leg (`lot`):** `{ALERT_STATE.get('fixed_lot_size', 0.01)}`\n"
             f"• **Dual-Entry Score (`dual_score`):** `{ALERT_STATE.get('dual_entry_score_threshold', 50)}`\n"
-            f"• **Manual Calc Risk % (`risk`):** `{ALERT_STATE.get('risk_percent', 1.0)}%` *(reference only, see `/calc`)*\n"
             f"• **Magic (`magic`)**, **Slippage (`slippage`)**, **Max Positions (`max_positions`)**, "
             f"**Max Trades/Day (`max_trades`)**, **Entry Drift (`drift`)**, **Flatten on CB (`flatten_cb`)**\n\n"
 
@@ -70,8 +66,6 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             setting_name, val = "min_confluence_score", int(float(val_str))
         elif key in ("rrr", "min_rrr"):
             setting_name, val = "min_rrr", float(val_str)
-        elif key in ("risk", "risk_percent", "risk_pct"):
-            setting_name, val = "risk_percent", float(val_str)
         elif key in ("sl_mult", "sl_atr"):
             setting_name, val = "sl_atr_mult", float(val_str)
         elif key in ("tp1_mult", "tp1_atr"):
@@ -105,8 +99,6 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             setting_name, val = "magic_number", int(val_str)
         elif key in ("slippage", "deviation", "max_slippage_points"):
             setting_name, val = "max_slippage_points", int(val_str)
-        elif key in ("max_positions", "max_open_positions"):
-            setting_name, val = "max_open_positions", int(val_str)
         elif key in ("max_trades", "max_daily_trades"):
             setting_name, val = "max_daily_trades", int(val_str)
         elif key in ("drift", "max_drift", "max_entry_drift_pct"):
@@ -228,28 +220,6 @@ async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @admin_only
-async def confluence_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
-        weight_lines = "\n".join(f"  • {k.replace('_', ' ').title()}: `{v} pts`" for k, v in CONFLUENCE_WEIGHTS.items())
-        await update.message.reply_text(
-            f"🎯 **CONFLUENCE SCORING**\n\nMinimum score to fire: `{ALERT_STATE['min_confluence_score']}/100`\n"
-            f"Dual-entry (2 legs) threshold: `{ALERT_STATE.get('dual_entry_score_threshold', 50)}/100`\n\n"
-            f"{weight_lines}\n\n**Usage:** `/confluence <0-100>`", parse_mode="Markdown")
-        return
-    try:
-        val = int(args[0])
-        if 0 <= val <= 100:
-            ALERT_STATE["min_confluence_score"] = val
-            save_settings()
-            await update.message.reply_text(f"✅ Minimum confluence score set to `{val}/100`", parse_mode="Markdown")
-        else:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("❌ Provide a number between 0 and 100.")
-
-
-@admin_only
 async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -257,7 +227,6 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👀 **WATCHLIST SETTINGS**\n\n"
             f"• **Status:** {'ON ✅' if ALERT_STATE['setup_forming_enabled'] else 'OFF ❌'}\n"
             f"• **RSI Margin:** `{ALERT_STATE['watch_rsi_margin']}` pts\n"
-            f"• **Score Margin:** `{ALERT_STATE['watch_score_margin']}` pts\n\n"
             "**Usage:** `/watchlist on|off` or `/watchlist rsi_margin <val>`",
             parse_mode="Markdown"
         )

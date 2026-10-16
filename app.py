@@ -8,11 +8,11 @@ from mt5_engine import init_mt5
 from bot.commands import (
     start_cmd, menu_cmd, handle_callback_query,
     enable_scanner, disable_scanner,
-    news_calendar_cmd, spread_check_cmd, calc_risk, gold_snapshot, market_session,
-    set_cmd, set_timeframe, set_strategy_cmd, filters_cmd, confluence_cmd, watchlist_cmd,
+    news_calendar_cmd, spread_check_cmd, gold_snapshot, market_session,
+    set_cmd, set_timeframe, set_strategy_cmd, filters_cmd, watchlist_cmd,
     trade_cmd, positions_cmd, close_cmd, breakeven_cmd,
     status_cmd, stats_cmd, heartbeat_cmd, diagnose_cmd,
-    backtest_cmd, optimize_cmd, fuckyou_cmd,
+    backtest_cmd, optimize_cmd,
 )
 from bot.jobs import (
     market_scanner_job, 
@@ -45,12 +45,10 @@ async def post_init_setup(application: Application) -> None:
         BotCommand("spread", "🔍 Check Spread & Guard Status"),
         BotCommand("news", "🗓️ USD Calendar (day + impact)"),
         BotCommand("session", "🕒 Market Session Clock"),
-        BotCommand("calc", "🧮 Manual Position Size Reference"),
         BotCommand("strategy", "⚙️ Switch Active Trading Strategy"),
         BotCommand("timeframe", "🕒 Change Analysis Timeframe Mode"),
         BotCommand("set", "🔧 View/Adjust Dynamic Parameters"),
         BotCommand("filters", "🎛️ Adjust Structure/Volume Filters"),
-        BotCommand("confluence", "🎯 Adjust Min Confidence Score"),
         BotCommand("watchlist", "👀 Adjust Early Watchlist Pings"),
         BotCommand("status", "🩺 Full Bot Health Check"),
         BotCommand("stats", "📈 Forward-Testing Performance"),
@@ -109,14 +107,12 @@ def main():
     app.add_handler(CommandHandler("scanner_off", disable_scanner))
     app.add_handler(CommandHandler("news", news_calendar_cmd))
     app.add_handler(CommandHandler("spread", spread_check_cmd))
-    app.add_handler(CommandHandler("calc", calc_risk))
     app.add_handler(CommandHandler("gold", gold_snapshot))
     app.add_handler(CommandHandler("session", market_session))
     app.add_handler(CommandHandler("set", set_cmd))
     app.add_handler(CommandHandler("timeframe", set_timeframe))
     app.add_handler(CommandHandler("strategy", set_strategy_cmd))
     app.add_handler(CommandHandler("filters", filters_cmd))
-    app.add_handler(CommandHandler("confluence", confluence_cmd))
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))
     app.add_handler(CommandHandler("trade", trade_cmd))
     app.add_handler(CommandHandler("positions", positions_cmd))
@@ -128,7 +124,6 @@ def main():
     app.add_handler(CommandHandler("diagnose", diagnose_cmd))
     app.add_handler(CommandHandler("backtest", backtest_cmd))
     app.add_handler(CommandHandler("optimize", optimize_cmd))
-    app.add_handler(CommandHandler("fuckyou", fuckyou_cmd))
 
     # Auto-start Background Jobs
     if USER_ID:

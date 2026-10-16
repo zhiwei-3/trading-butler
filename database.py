@@ -52,8 +52,6 @@ def init_db():
             ("exec_mode2", "TEXT DEFAULT 'NONE'"),
             ("fill_price2", "REAL"),
             ("be_moved2", "INTEGER DEFAULT 0"),
-            ("tp1_partial_done", "INTEGER DEFAULT 0"),
-            ("be_moved", "INTEGER DEFAULT 0"),
             ("zone_low", "REAL"),
             ("zone_high", "REAL"),
             ("zone_type", "TEXT"),
@@ -292,17 +290,6 @@ def get_recent_trades_for_chart(limit=30, symbol=None):
     with get_db_connection() as conn:
         rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
-
-def get_signal_chart_data(signal_id):
-    """Fetches a specific signal record for generating post-trade outcome charts."""
-    with get_db_connection() as conn:
-        row = conn.execute("""
-            SELECT 
-                symbol, direction, entry_price, sl_price, tp1_price, tp2_price,
-                status, timestamp as entry_time, dual_entry
-            FROM signals WHERE id = ?
-        """, (signal_id,)).fetchone()
-        return dict(row) if row else None
 
 def log_sweep_run(chat_id, symbol, timeframe_mode, days, rank_mode, swept_flags, min_sample, elapsed_seconds, rows):
     """Persists a completed /optimize sweep run and its detailed results."""
