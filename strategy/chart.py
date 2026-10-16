@@ -17,7 +17,7 @@ BG, GRID, FG = "#121212", "#262626", "#e0e0e0"
 UP, DN = "#00c853", "#ff3d00"
 C_ENTRY, C_SL = "#2962ff", "#ff1744"
 C_TP1, C_TP2 = "#00e676", "#00b0ff"
-C_BE, C_SR, C_FVG = "#17a2b8", "#aa00ff", "#ffd600"
+C_BE, C_SR, C_FVG = "#17a2b8", "#aa00ff", "#e0e0e0"
 C_SUP, C_RES = "#00c853", "#ff3d00"  # Support (Green) / Resistance (Red)
 C_PAST = "#8ab4f8"                   # past (historical) trade entries
 

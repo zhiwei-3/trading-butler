@@ -39,7 +39,8 @@ import MetaTrader5 as mt5
 
 from config import ALERT_STATE
 from database import (attach_trade_execution, count_live_trades_today,
-                      set_signal_status, get_active_live_signals)
+                      set_signal_status, get_active_live_signals,
+                      get_open_executed_signals)
 from mt5_engine import MT5_LOCK, init_mt5, get_tick
 
 MAX_SEND_RETRIES = 3
@@ -48,9 +49,7 @@ _INTENT_LOCK = threading.Lock()
 _PENDING_INTENTS = []
 _FILLING_CACHE = {}   # symbol -> filling mode that the broker actually accepted
 
-# --- near the other module-level locks ---
-global _LAST_FILL_AT
-_EXEC_LOCK = threading.Lock()   # serialises check-and-open so two drains can never interleave
+_EXEC_LOCK = threading.Lock()      # serialises check-and-open so two drains can never interleave
 _LAST_FILL_AT = 0.0                # monotonic time of the last real fill
 _FILL_COOLDOWN_S = 20              # block new trade ideas this long after any fill
 
@@ -134,10 +133,26 @@ def list_managed_positions(symbol=None):
     """Only positions carrying this bot's magic number — manual trades are untouchable."""
     return _fetch_managed(symbol) or []
 
-def trade_slot_blocker(symbol):
-    """One-trade-at-a-time gate. FAILS CLOSED. Returns None if a new idea may open."""
+def trade_slot_blocker(symbol, exclude_signal_id=None):
+    """One-trade-at-a-time gate. FAILS CLOSED. Returns None if a new idea may open.
+    exclude_signal_id: the signal being evaluated (so it never blocks itself)."""
     if (time.monotonic() - _LAST_FILL_AT) < _FILL_COOLDOWN_S:
         return "a trade was just opened — waiting for the position list to settle."
+
+    if pending_intent_count() > 0 and exclude_signal_id is None:
+        return "another signal is already queued for execution."
+
+    # Dry-run has no real MT5 positions, so the DB is the source of truth for
+    # "is a simulated trade still open?".
+    if ALERT_STATE.get("trade_dry_run", True):
+        try:
+            open_sigs = get_open_executed_signals(exclude_id=exclude_signal_id)
+        except Exception as e:
+            return f"Could not verify simulated open trades ({e}) — failing closed."
+        if open_sigs:
+            ids = ", ".join(f"#{s['id']}" for s in open_sigs)
+            return f"already holding simulated position from signal(s) {ids}."
+
     if not init_mt5():
         return "MT5 terminal unreachable — cannot verify open positions."
     managed = _fetch_managed(symbol)
@@ -178,42 +193,6 @@ def _preflight(symbol, bypass_position_cap=False):
         if blocker:
             return False, blocker.capitalize()
 
-    day_n = count_live_trades_today()
-    day_cap = int(ALERT_STATE.get("max_daily_trades", 5))
-    if not ALERT_STATE.get("trade_dry_run", True) and day_n >= day_cap:
-        return False, f"Daily execution cap reached ({day_n}/{day_cap})."
-    return True, ""
-
-def position_by_ticket(ticket):
-    with MT5_LOCK:
-        positions = mt5.positions_get(ticket=int(ticket))
-    return positions[0] if positions else None
-
-def _preflight(symbol, bypass_position_cap=False):
-    if not init_mt5():
-        return False, "MT5 terminal unreachable."
-    with MT5_LOCK:
-        term = mt5.terminal_info()
-        acc = mt5.account_info()
-        info = mt5.symbol_info(symbol)
-    if term is None or not term.trade_allowed:
-        return False, "AutoTrading is OFF in the MT5 terminal (enable the 'Algo Trading' button)."
-    if acc is None:
-        return False, "No MT5 account info available."
-    if not acc.trade_allowed:
-        return False, "Trading disabled for this account (investor password or server restriction)."
-    if info is None:
-        return False, f"Symbol `{symbol}` not found on this server."
-    if info.trade_mode != mt5.SYMBOL_TRADE_MODE_FULL:
-        return False, f"`{symbol}` is not open for full trading (trade_mode={info.trade_mode})."
-    # bypass_position_cap: the 2nd leg of a dual-entry signal is part of the SAME
-    # trade idea as the 1st leg, not a new one — the cap is meant to stop
-    # unrelated signals stacking up, not to block a signal's own paired leg.
-    if not bypass_position_cap:
-        open_n = len(list_managed_positions(symbol))
-        cap = int(ALERT_STATE.get("max_open_positions", 2))
-        if open_n >= cap:
-            return False, f"Already holding {open_n} managed position(s) — cap is {cap}."
     day_n = count_live_trades_today()
     day_cap = int(ALERT_STATE.get("max_daily_trades", 5))
     if not ALERT_STATE.get("trade_dry_run", True) and day_n >= day_cap:
@@ -273,6 +252,7 @@ def _new_fill(symbol, direction, before):
 
 
 def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypass_position_cap=False):
+    global _LAST_FILL_AT
     dry = ALERT_STATE.get("trade_dry_run", True) if dry_run is None else dry_run
     ok, reason = _preflight(symbol, bypass_position_cap=bypass_position_cap)
     if not ok:
@@ -607,7 +587,7 @@ def _drain_batch(batch):
         if symbol in handled_symbols:
             blocker = "another signal on this symbol was already handled this cycle."
         else:
-            blocker = trade_slot_blocker(symbol)
+            blocker = trade_slot_blocker(symbol, exclude_signal_id=intent["signal_id"])
         if blocker:
             _skip_intent(intent, dual)
             reports.append(f"⏭️ **Execution skipped** — {direction} {symbol} signal ignored, {blocker}")

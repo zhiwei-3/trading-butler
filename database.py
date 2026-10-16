@@ -251,6 +251,22 @@ def get_active_live_signals():
         ).fetchall()
         return [dict(r) for r in rows]
 
+def get_open_executed_signals(exclude_id=None):
+    """Signals that own an open (live OR dry-run) trade. Used so the one-trade
+    rule also holds in dry-run, where no real MT5 position exists."""
+    query = (
+        "SELECT id, exec_mode, exec_mode2 FROM signals "
+        "WHERE status IN ('PENDING','HIT_TP1') "
+        "AND (exec_mode IN ('DRY','LIVE') OR exec_mode2 IN ('DRY','LIVE'))"
+    )
+    params = []
+    if exclude_id is not None:
+        query += " AND id != ?"
+        params.append(exclude_id)
+    query += " ORDER BY id ASC"
+    with get_db_connection() as conn:
+        return [dict(r) for r in conn.execute(query, params).fetchall()]
+
 def get_recent_trades_for_chart(limit=30, symbol=None):
     """Recent signals (open and closed) for overlaying on charts. Times are true UTC.
     SKIPPED signals (never executed) are excluded."""
