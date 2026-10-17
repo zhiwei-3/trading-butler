@@ -299,7 +299,7 @@ def _prepare_history(symbol, days, timeframe_mode):
     if df_trend['EMA_50'].notna().sum() == 0 or df_macro['EMA_50'].notna().sum() == 0:
         return {"error": "Not enough historical bars on the trend/macro timeframe to compute a 50-period EMA."}
 
-    return {"mode": mode, "start": start, "df_entry": df_entry, "df_trend": df_trend, "df_macro": df_macro}
+    return {"mode": mode, "preset": preset, "start": start, "df_entry": df_entry, "df_trend": df_trend, "df_macro": df_macro}
 
 def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None, min_rrr=None,
                   spread_pips=2.0, progress_callback=None, strategy_name=None,
@@ -310,6 +310,7 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         return prepared
 
     mode = prepared["mode"]
+    preset = prepared["preset"]
     start = prepared["start"]
     df_entry = prepared["df_entry"]
     df_trend = prepared["df_trend"]
@@ -358,8 +359,12 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
     macro_ema20_arr = df_macro['EMA_20'].values
     macro_ema50_arr = df_macro['EMA_50'].values
 
-    trend_cursor = max(0, int(np.searchsorted(trend_time_arr, time_arr[test_start_idx], side='right')) - 1)
-    macro_cursor = max(0, int(np.searchsorted(macro_time_arr, time_arr[test_start_idx], side='right')) - 1)
+    entry_td = np.timedelta64(_TF_MINUTES[preset["entry"]], "m")
+    trend_close_arr = trend_time_arr + np.timedelta64(_TF_MINUTES[preset["trend"]], "m")
+    macro_close_arr = macro_time_arr + np.timedelta64(_TF_MINUTES[preset["macro"]], "m")
+
+    trend_cursor = max(0, int(np.searchsorted(trend_close_arr, time_arr[test_start_idx] + entry_td, side='right')) - 1)
+    macro_cursor = max(0, int(np.searchsorted(macro_close_arr, time_arr[test_start_idx] + entry_td, side='right')) - 1)
 
     cached_sr_macro_cursor = -1
     cached_sr_zones = []
@@ -391,8 +396,8 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         if np.isnan(rsi_val) or np.isnan(atr_val) or atr_val <= 0:
             continue
 
-        trend_cursor = _advance_cursor(trend_time_arr, trend_cursor, ts)
-        macro_cursor = _advance_cursor(macro_time_arr, macro_cursor, ts)
+        trend_cursor = _advance_cursor(trend_close_arr, trend_cursor, ts + entry_td)
+        macro_cursor = _advance_cursor(macro_close_arr, macro_cursor, ts + entry_td)
         if trend_cursor < 1 or macro_cursor < 1:
             continue
         if (np.isnan(trend_ema20_arr[trend_cursor]) or np.isnan(trend_ema50_arr[trend_cursor])
@@ -455,14 +460,21 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         outcome, close_time = _simulate_trade(df_entry, i, trade, spread_price=spread_price)
         blocked_until = close_time
 
+        tp1_r = trade["tp1_dist"] / trade["sl_dist"] if trade["sl_dist"] > 0 else 0.0
+        tp2_r = trade["tp2_dist"] / trade["sl_dist"] if trade["sl_dist"] > 0 else 0.0
+        is_dual = (active_strat == "smc_confluence"
+                   and trade["score"] >= ALERT_STATE.get("dual_entry_score_threshold", 50))
+
         if outcome == "HIT_SL":
             r_multiple = -1.0
-        elif outcome == "HIT_TP1":
-            r_multiple = round(trade["tp1_dist"] / trade["sl_dist"], 2) if trade["sl_dist"] > 0 else 0.0
-        elif outcome == "HIT_TP2":
-            r_multiple = round(trade["tp2_dist"] / trade["sl_dist"], 2) if trade["sl_dist"] > 0 else 0.0
-        else:
+        elif outcome == "OPEN":
             r_multiple = 0.0
+        elif not is_dual:
+            r_multiple = round(tp1_r, 2)                    # single leg closes at TP1
+        elif outcome == "HIT_TP1":
+            r_multiple = round(tp1_r / 2, 2)                # leg1 TP1 + runner BE
+        else:                                               # HIT_TP2
+            r_multiple = round((tp1_r + tp2_r) / 2, 2)
 
         trades.append({
             "time": ts, "direction": trade["direction"], "entry": trade["entry"],

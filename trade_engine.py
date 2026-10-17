@@ -473,14 +473,13 @@ def close_all_managed(symbol=None):
 
 # ---------------------------------------------------------------- leg management
 
+# trade_engine.py
 def trail_leg_to_breakeven(ticket, entry_price):
-    """Moves a still-open leg's SL to its entry price (used on the TP2 runner
-    once the TP1 leg has won)."""
     pos = position_by_ticket(ticket)
     if pos is None:
-        return "Leg already closed by the broker — nothing to trail."
+        return True, "Leg already closed by the broker — nothing to trail."
     res = modify_position_sltp(ticket, sl=float(entry_price), tp=pos.tp or None)
-    return f"SL → BE: {'✅' if res['ok'] else '⚠️'} {res['reason']}"
+    return res["ok"], f"SL → BE: {'✅' if res['ok'] else '⚠️'} {res['reason']}"
 
 def force_close_leg(ticket, reason_label="invalidated"):
     """Closes a leg immediately at market — used when its sibling leg just hit

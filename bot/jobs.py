@@ -210,7 +210,7 @@ def _zone_from_sig(sig):
 
 async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     """
-    Tracks each active signal's leg(s) to a terminal outcome.
+    Tracks each active signal'parser leg(s) to a terminal outcome.
 
     Single-entry signals (dual_entry=0) have one leg: it resolves straight from
     PENDING to CLOSED_TP1 (full win) or HIT_SL (loss) — no runner phase.
@@ -237,6 +237,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id if (context.job and context.job.chat_id) else int(USER_ID)
 
     updates_to_send = []   # (sig, new_status, msg, extra_note, now_str)
+    be_done = []
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -260,7 +261,8 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
 
             if status == "PENDING":
                 leg1_outcome = None
-                if sig["exec_mode"] == "LIVE" and sig["ticket"]:
+                live1 = sig["exec_mode"] == "LIVE" and sig["ticket"]
+                if live1:
                     try:
                         leg1_outcome = await asyncio.to_thread(
                             reconcile_exit, sig["ticket"], {"HIT_SL": sl, "WON_TP1": tp1}
@@ -268,7 +270,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
                     except Exception as e:
                         logging.warning(f"Reconcile failed for leg1 #{sig['ticket']}: {e}")
 
-                if leg1_outcome is None:
+                if leg1_outcome is None and not live1:
                     if direction == "BUY":
                         if current_price >= tp1:
                             leg1_outcome = "WON_TP1"
@@ -289,11 +291,12 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
                         )
                         if sig["exec_mode2"] == "LIVE" and sig["ticket2"] and not sig["be_moved2"]:
                             try:
-                                extra_note = await asyncio.to_thread(trail_leg_to_breakeven, sig["ticket2"], entry)
+                                ok, extra_note = await asyncio.to_thread(trail_leg_to_breakeven, sig["ticket2"], entry)
+                                if ok:
+                                    be_done.append(sig_id)
                             except Exception as e:
                                 logging.exception(f"Leg2 BE-trail failed for ticket {sig['ticket2']}: {e}")
                                 extra_note = f"SL → BE: ⚠️ error ({e})"
-                            mark_leg2_be_moved(sig_id)
                     else:
                         new_status = "CLOSED_TP1"
                         msg = f"🎯 **XAUUSD {direction} — TP1 HIT! FULL CLOSE.** (${tp1:.2f})"
@@ -311,7 +314,15 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
             elif status == "HIT_TP1":
                 # Dual-entry only: leg 1 already won, leg 2 is running with SL at BE.
                 leg2_outcome = None
-                if sig["exec_mode2"] == "LIVE" and sig["ticket2"]:
+                live2 = sig["exec_mode2"] == "LIVE" and sig["ticket2"]
+                if live2:
+                    if not sig["be_moved2"]:
+                        try:
+                            ok, _ = await asyncio.to_thread(trail_leg_to_breakeven, sig["ticket2"], entry)
+                            if ok:
+                                be_done.append(sig_id)
+                        except Exception:
+                            logging.exception("BE retry failed")
                     try:
                         leg2_outcome = await asyncio.to_thread(
                             reconcile_exit, sig["ticket2"], {"CLOSED_BE": entry, "HIT_TP2": tp2}
@@ -319,7 +330,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
                     except Exception as e:
                         logging.warning(f"Reconcile failed for leg2 #{sig['ticket2']}: {e}")
 
-                if leg2_outcome is None:
+                if leg2_outcome is None and not live2:
                     if direction == "BUY":
                         if current_price >= tp2:
                             leg2_outcome = "HIT_TP2"
@@ -346,6 +357,9 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
                 updates_to_send.append((sig, new_status, msg, extra_note, now_str))
 
         conn.commit()
+
+    for sid in be_done:
+        mark_leg2_be_moved(sid)
 
     if not updates_to_send:
         return
