@@ -425,15 +425,16 @@ async def _optimize_run(update: Update, args, chat_id):
         2: [1.0, 1.3, 1.5, 1.8, 2.0, 2.5, 3.0],
         3: [1.2, 1.5, 1.8, 2.0, 2.5],
     }
-    RSI_POOL = [
-        (25, 65), (30, 60), (30, 65), (30, 70),
-        (35, 60), (35, 65), (40, 60), (40, 65),
-    ]
+    RSI_POOLS = {
+        1: [(25, 65), (30, 60), (30, 65), (30, 70), (35, 60), (35, 65), (40, 60), (40, 65)],
+        2: [(25, 65), (30, 60), (30, 65), (30, 70), (35, 60), (35, 65), (40, 60), (40, 65)],
+        3: [(25, 65), (30, 65), (30, 70), (35, 65)],   # 4×5×5=100, 4×4×5=80 — all < 150
+    }
 
     rrr_values = RRR_POOLS[pool_tier] if "rrr" in sweep_axes else None
     score_values = SCORE_POOLS[pool_tier] if "score" in sweep_axes else None
     sl_values = SL_POOLS[pool_tier] if "sl" in sweep_axes else None
-    rsi_pairs = RSI_POOL if "rsi" in sweep_axes else None
+    rsi_pairs = RSI_POOLS[pool_tier] if "rsi" in sweep_axes else None
     strategy_values = list(STRATEGY_PRESETS.keys()) if "strategies" in sweep_axes else None
 
     flag_str = "" if used_default_axes else f" [{', '.join(sorted(sweep_axes))}]"

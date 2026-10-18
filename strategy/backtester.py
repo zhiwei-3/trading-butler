@@ -219,7 +219,9 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
                 state["last_signal"] = "SELL"
                 return {"direction": "SELL", "entry": close_price, "score": score, "breakdown": breakdown, **targets}
 
-    state["last_signal"] = None
+    # Mirror live: only clear dedup once RSI has left the extreme zone
+    if not (rsi_val <= buy_th or rsi_val >= sell_th):
+        state["last_signal"] = None
     return None
 
 def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forward=MAX_BARS_FORWARD, dual=True):

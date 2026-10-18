@@ -40,6 +40,7 @@ def _plain(text):
     return text.replace("*", "").replace("`", "")
 
 async def _send_text(bot, chat_id, text, **kw):
+    kw.pop("parse_mode", None)  # this helper owns parse_mode
     try:
         return await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown", **kw)
     except BadRequest as e:
@@ -177,26 +178,29 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
             return
 
     # 6. Market Technical Evaluation
-    analysis = await asyncio.to_thread(analyze_market, symbol)
-    if analysis:
-        signals_found, watch_found = await asyncio.to_thread(evaluate_signals, analysis)
-        
-        for item in signals_found:
-            if isinstance(item, tuple):
-                msg_text, chart_buffer = item
-                await _send_alert(context.bot, chat_id, msg_text, chart_buffer)
-            else:
-                await _send_alert(context.bot, chat_id, item)
+    try: 
+        analysis = await asyncio.to_thread(analyze_market, symbol)
+        if analysis:
+            signals_found, watch_found = await asyncio.to_thread(evaluate_signals, analysis)
+            
+            for item in signals_found:
+                if isinstance(item, tuple):
+                    msg_text, chart_buffer = item
+                    await _send_alert(context.bot, chat_id, msg_text, chart_buffer)
+                else:
+                    await _send_alert(context.bot, chat_id, item)
 
-        for watch_msg in watch_found:
-            try:
-                await context.bot.send_message(
-                    chat_id=chat_id, 
-                    text=watch_msg, 
-                    parse_mode="Markdown"
-                )
-            except (TimedOut, NetworkError, TelegramError) as e:
-                logging.warning(f"⚠️ Telegram dispatch timed out: {e}")
+            for watch_msg in watch_found:
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id, 
+                        text=watch_msg, 
+                        parse_mode="Markdown"
+                    )
+                except (TimedOut, NetworkError, TelegramError) as e:
+                    logging.warning(f"⚠️ Telegram dispatch timed out: {e}")
+    except Exception:
+        logging.exception("Scanner evaluation failed")
 
     # 7. Live Execution Drain (blocking MT5 order_send, kept off the event loop)
     try:

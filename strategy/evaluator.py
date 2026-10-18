@@ -278,11 +278,14 @@ def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, b
     except Exception:
         trades_hist = []
 
-    chart_buf = generate_signal_chart(
-        a["df_entry"], symbol, direction, close_price, sl_price, tp1_price, tp2_price,
-        fvg=zone or a.get("fvg"), near_zone=a.get("near_zone"), dual=dual,
-        trades=trades_hist, exclude_id=signal_id
-    )
+    chart_buf = None
+    try:
+        chart_buf = generate_signal_chart(
+            a["df_entry"], symbol, direction, close_price, sl_price, tp1_price, tp2_price,
+            fvg=zone or a.get("fvg"), near_zone=a.get("near_zone"), dual=dual,
+            trades=trades_hist, exclude_id=signal_id)
+    except Exception:
+        logging.exception("Signal chart failed — sending alert without chart")
     return (full_msg, chart_buf)
 
 def score_label(score):
