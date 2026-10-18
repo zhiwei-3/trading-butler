@@ -402,10 +402,11 @@ def modify_position_sltp(ticket, sl=None, tp=None):
             "reason": f"{_rc_text(result.retcode)} — {result.comment}"}
 
 def close_position(ticket, lots=None):
-    """Full or partial close. Refuses a partial that would leave a sub-minimum remainder."""
     pos = position_by_ticket(ticket)
     if pos is None:
         return {"ok": False, "reason": "Position not found (already closed?)."}
+    if pos.magic != _magic():
+        return {"ok": False, "reason": "Not a bot-managed position (magic mismatch) — refusing."}
 
     with MT5_LOCK:
         info = mt5.symbol_info(pos.symbol)
@@ -463,9 +464,11 @@ def close_position(ticket, lots=None):
     return {"ok": False, "reason": last_reason}
 
 def close_all_managed(symbol=None):
-    """Kill switch. Returns one result line per managed position."""
+    positions = _fetch_managed(symbol)
+    if positions is None:
+        return ["❌ MT5 position query FAILED — nothing was closed. Retry or close manually in the terminal."]
     out = []
-    for pos in list_managed_positions(symbol):
+    for pos in positions:
         res = close_position(pos.ticket)
         out.append(f"#{pos.ticket} {pos.volume} lots — {'✅' if res['ok'] else '❌'} {res['reason']}")
     return out or ["No managed positions open."]

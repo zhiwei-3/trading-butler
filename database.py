@@ -58,7 +58,11 @@ def init_db():
         ]
         for col_name, col_type in migrations:
             if col_name not in columns:
-                cursor.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}")
+                if col_name == "updated_at":
+                    cursor.execute("ALTER TABLE signals ADD COLUMN updated_at DATETIME")
+                    cursor.execute("UPDATE signals SET updated_at = COALESCE(created_at, CURRENT_TIMESTAMP)")
+                else:
+                    cursor.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_ticket ON signals(ticket)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_ticket2 ON signals(ticket2)")
 

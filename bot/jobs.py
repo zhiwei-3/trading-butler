@@ -5,7 +5,7 @@ import asyncio
 import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
 from telegram.ext import ContextTypes
-from telegram.error import NetworkError, TelegramError, TimedOut
+from telegram.error import NetworkError, TelegramError, TimedOut, BadRequest
 
 from config import ALERT_STATE, USER_ID, BOT_START_TIME, save_settings
 from database import (
@@ -34,18 +34,30 @@ def format_uptime(delta: timedelta) -> str:
     parts.append(f"{minutes}m")
     return " ".join(parts)
 
+from telegram.error import BadRequest
+
+def _plain(text):
+    return text.replace("*", "").replace("`", "")
+
+async def _send_text(bot, chat_id, text, **kw):
+    try:
+        return await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown", **kw)
+    except BadRequest as e:
+        logging.warning(f"Markdown rejected ({e}); resending as plain text")
+        return await bot.send_message(chat_id=chat_id, text=_plain(text), **kw)
+
 async def _send_alert(bot, chat_id, text, photo=None):
-    """
-    Sends an alert with photo. Handles Telegram's 1024-character caption limit by
-    sending the photo separately followed by the full text message when exceeded.
-    """
     try:
         if photo and len(text) <= 1024:
-            await bot.send_photo(chat_id=chat_id, photo=photo, caption=text, parse_mode="Markdown")
+            try:
+                await bot.send_photo(chat_id=chat_id, photo=photo, caption=text, parse_mode="Markdown")
+            except BadRequest:
+                photo.seek(0)
+                await bot.send_photo(chat_id=chat_id, photo=photo, caption=_plain(text))
             return
         if photo:
             await bot.send_photo(chat_id=chat_id, photo=photo)
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+        await _send_text(bot, chat_id, text)
     except (NetworkError, TelegramError) as e:
         logging.warning(f"⚠️ Alert dispatch failed: {e}")
 
@@ -113,10 +125,8 @@ async def evaluate_circuit_breaker(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
         flatten_note = ""
         if ALERT_STATE.get("flatten_on_circuit_breaker", True):
-            managed = await asyncio.to_thread(list_managed_positions)
-            if managed:
-                results = await asyncio.to_thread(close_all_managed)
-                flatten_note = "\n\n🧯 **Flattened managed positions:**\n" + "\n".join(f"• {r}" for r in results)
+            results = await asyncio.to_thread(close_all_managed)
+            flatten_note = "\n\n🧯 **Flattened managed positions:**\n" + "\n".join(f"• {r}" for r in results)
 
         msg = (
             f"🚨 **CIRCUIT BREAKER TRIGGERED — SCANNER DEACTIVATED** 🚨\n\n"
@@ -197,7 +207,7 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
 
     for report in exec_reports:
         try:
-            await context.bot.send_message(chat_id=chat_id, text=report, parse_mode="Markdown")
+            await _send_text(context.bot, chat_id=chat_id, text=report, parse_mode="Markdown")
         except (TimedOut, NetworkError, TelegramError) as e:
             logging.warning(f"⚠️ Execution report dispatch failed: {e}")
 
@@ -229,7 +239,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         for line in await asyncio.to_thread(enforce_single_trade):
             if USER_ID:
-                await context.bot.send_message(chat_id=int(USER_ID), text=line, parse_mode="Markdown")
+                await _send_text(context.bot, chat_id=int(USER_ID), text=line, parse_mode="Markdown")
     except Exception:
         logging.exception("enforce_single_trade failed")
 
@@ -422,11 +432,11 @@ async def mt5_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
 
 def ensure_watchdog_running(job_queue, chat_id):
     if not job_queue.get_jobs_by_name("mt5_watchdog"):
-        job_queue.run_repeating(mt5_watchdog_job, interval=90, first=15, chat_id=chat_id, name="mt5_watchdog")
+        job_queue.run_repeating(mt5_watchdog_job, interval=90, first=15, chat_id=chat_id, name="mt5_watchdog", job_kwargs={"misfire_grace_time": 30})
 
 def restart_heartbeat_job(job_queue, chat_id):
     for job in job_queue.get_jobs_by_name("heartbeat_ping"):
         job.schedule_removal()
     if ALERT_STATE["heartbeat_enabled"]:
         interval_seconds = ALERT_STATE["heartbeat_interval_hours"] * 3600
-        job_queue.run_repeating(heartbeat_job, interval=interval_seconds, first=10, chat_id=chat_id, name="heartbeat_ping")
+        job_queue.run_repeating(heartbeat_job, interval=interval_seconds, first=10, chat_id=chat_id, name="heartbeat_ping", job_kwargs={"misfire_grace_time": 30})

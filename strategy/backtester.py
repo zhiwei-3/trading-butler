@@ -222,7 +222,7 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
     state["last_signal"] = None
     return None
 
-def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forward=MAX_BARS_FORWARD):
+def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forward=MAX_BARS_FORWARD, dual=True):
     direction = trade["direction"]
     sl, tp1, tp2 = trade["sl_price"], trade["tp1_price"], trade["tp2_price"]
     end_idx = min(entry_idx + max_bars_forward, len(df_entry) - 1)
@@ -241,6 +241,8 @@ def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forwa
                 if sim_low <= sl:
                     return "HIT_SL", times[i]
                 if sim_high >= tp1:
+                    if not dual:
+                        return "HIT_TP1", times[i]      # single leg: fully closed at TP1
                     hit_tp1 = True
                     sl = trade["entry"]
                     if sim_high >= tp2:
@@ -257,6 +259,8 @@ def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forwa
                 if sim_high >= sl:
                     return "HIT_SL", times[i]
                 if sim_low <= tp1:
+                    if not dual:
+                        return "HIT_TP1", times[i]      # single leg: fully closed at TP1
                     hit_tp1 = True
                     sl = trade["entry"]
                     if sim_low <= tp2:
@@ -420,10 +424,11 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
                 state["last_signal"] = None
                 continue
 
+        # run_backtest loop — always compute the real flag, gate only if required
         vol_filter_ok = True
-        if state["require_volume_atr_filter"]:
+        if state["require_volume_atr_filter"] or active_strat == "smc_confluence":
             vol_filter_ok = _vol_filter_ok(df_entry.iloc[i], atr_multiplier, volume_multiplier)
-            if not vol_filter_ok:
+            if state["require_volume_atr_filter"] and not vol_filter_ok:
                 state["last_signal"] = None
                 continue
 
@@ -457,13 +462,13 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         if trade is None:
             continue
 
-        outcome, close_time = _simulate_trade(df_entry, i, trade, spread_price=spread_price)
+        is_dual = (active_strat == "smc_confluence" 
+                   and trade["score"] >= ALERT_STATE.get("dual_entry_score_threshold", 50))
+        outcome, close_time = _simulate_trade(df_entry, i, trade, spread_price=spread_price, dual=is_dual)
         blocked_until = close_time
 
         tp1_r = trade["tp1_dist"] / trade["sl_dist"] if trade["sl_dist"] > 0 else 0.0
         tp2_r = trade["tp2_dist"] / trade["sl_dist"] if trade["sl_dist"] > 0 else 0.0
-        is_dual = (active_strat == "smc_confluence"
-                   and trade["score"] >= ALERT_STATE.get("dual_entry_score_threshold", 50))
 
         if outcome == "HIT_SL":
             r_multiple = -1.0

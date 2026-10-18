@@ -1,3 +1,5 @@
+# strategy/smc.py
+
 import numpy as np
 
 def find_swing_points(df, left=2, right=2):
@@ -56,12 +58,6 @@ def detect_fvg(df):
     Detects a 3-candle Fair Value Gap at the END of the window (i.e. the most
     recent gap only). Used for the LTF/entry-timeframe check, where "did a gap
     just form" is exactly what's wanted.
-
-    BUGFIX: previously returned only bullish_fvg/bearish_fvg/gap_size, but three
-    call sites (the htf_fvg_sweep strategy's price-containment check, and the
-    signal chart's FVG shading) read fvg_top/fvg_bottom that were never present
-    — so the containment check silently degraded to "always true" and the chart
-    never drew the box. Both fields are now always returned (None when no gap).
     """
     empty = {"bullish_fvg": False, "bearish_fvg": False, "gap_size": 0.0,
              "fvg_top": None, "fvg_bottom": None}
@@ -82,11 +78,6 @@ def find_unmitigated_fvgs(df, lookback=100, max_gaps=5):
     """
     Scans a window for 3-candle Fair Value Gaps and returns the ones that
     haven't yet been filled by later price action (i.e. still "live" zones).
-
-    BUGFIX: the HTF/macro FVG tap used detect_fvg(df_macro), which only ever
-    inspects the LAST 3 macro bars — so a macro gap was visible to the strategy
-    for exactly one bar and there was no way to detect price returning to tap an
-    older gap later, which is the entire premise of "HTF FVG tap" strategies.
     """
     if len(df) < 3:
         return []
@@ -140,11 +131,14 @@ def macro_fvg_snapshot(df, price, lookback=100, max_gaps=5):
 def detect_order_block(df, lookback=20):
     """Detects recent Bullish/Bearish Order Blocks (OB) and mitigation zones."""
     if len(df) < lookback:
-        return {"bullish_ob": False, "bearish_ob": False, "ob_level": None}
+        return {"bullish_ob": False, "bearish_ob": False,
+                "bullish_ob_level": None, "bearish_ob_level": None,
+                "ob_level": None}
 
     recent = df.iloc[-lookback:].reset_index(drop=True)
     c_curr = recent.iloc[-1]
-    bullish_ob, bearish_ob, ob_level = False, False, None
+    bullish_ob = bearish_ob = False
+    bull_level = bear_level = None
 
     # Bullish OB: Last down-candle before strong bullish displacement
     for i in range(len(recent) - 4, 1, -1):
@@ -153,7 +147,7 @@ def detect_order_block(df, lookback=20):
         if c_ob['close'] < c_ob['open'] and (c_exp['close'] - c_exp['open']) > 1.5 * abs(c_ob['open'] - c_ob['close']):
             if c_curr['low'] <= c_ob['high'] and c_curr['close'] >= c_ob['low']:
                 bullish_ob = True
-                ob_level = round(c_ob['low'], 2)
+                bull_level = round(c_ob['low'], 2)
                 break
 
     # Bearish OB: Last up-candle before strong bearish drop
@@ -163,10 +157,12 @@ def detect_order_block(df, lookback=20):
         if c_ob['close'] > c_ob['open'] and (c_exp['open'] - c_exp['close']) > 1.5 * abs(c_ob['open'] - c_ob['close']):
             if c_curr['high'] >= c_ob['low'] and c_curr['close'] <= c_ob['high']:
                 bearish_ob = True
-                ob_level = round(c_ob['high'], 2)
+                bear_level = round(c_ob['high'], 2)
                 break
 
-    return {"bullish_ob": bullish_ob, "bearish_ob": bearish_ob, "ob_level": ob_level}
+    return {"bullish_ob": bullish_ob, "bearish_ob": bearish_ob,
+            "bullish_ob_level": bull_level, "bearish_ob_level": bear_level,
+            "ob_level": bull_level if bullish_ob else bear_level}
 
 
 # ---------------------------------------------------------------- IFVG (liquidity sweep + inverted FVG)
