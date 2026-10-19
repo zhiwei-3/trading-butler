@@ -394,10 +394,10 @@ def modify_position_sltp(ticket, sl=None, tp=None):
     }
     with MT5_LOCK:
         result = mt5.order_send(request)
-    if result is None:
-        return {"ok": False, "reason": "order_send returned None."}
     if result.retcode == mt5.TRADE_RETCODE_DONE:
         return {"ok": True, "sl": adj_sl, "tp": adj_tp, "reason": "SL/TP updated."}
+    if result.retcode == getattr(mt5, "TRADE_RETCODE_NO_CHANGES", 10025):
+        return {"ok": True, "sl": adj_sl, "tp": adj_tp, "reason": "SL/TP already at requested levels."}
     return {"ok": False, "retcode": result.retcode,
             "reason": f"{_rc_text(result.retcode)} — {result.comment}"}
 

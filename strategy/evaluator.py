@@ -1,4 +1,6 @@
 # strategy/evaluator.py
+
+import logging
 import pandas_ta as ta
 from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
 from database import log_signal_to_db, get_recent_trades_for_chart, set_signal_status

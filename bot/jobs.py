@@ -34,8 +34,6 @@ def format_uptime(delta: timedelta) -> str:
     parts.append(f"{minutes}m")
     return " ".join(parts)
 
-from telegram.error import BadRequest
-
 def _plain(text):
     return text.replace("*", "").replace("`", "")
 
@@ -251,126 +249,128 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id if (context.job and context.job.chat_id) else int(USER_ID)
 
     updates_to_send = []   # (sig, new_status, msg, extra_note, now_str)
+    status_writes = []
     be_done = []
 
     with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
+        active_signals = conn.execute(
             "SELECT id, timestamp, status, direction, entry_price, sl_price, tp1_price, tp2_price, dual_entry, "
             "ticket, exec_mode, ticket2, exec_mode2, be_moved2, zone_low, zone_high, zone_type "
             "FROM signals WHERE status IN ('PENDING', 'HIT_TP1')"
-        )
-        active_signals = cursor.fetchall()
-        now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        ).fetchall()
 
-        for sig in active_signals:
-            sig_id = sig["id"]
-            status = sig["status"]
-            direction = sig["direction"]
-            entry, sl, tp1, tp2 = sig["entry_price"], sig["sl_price"], sig["tp1_price"], sig["tp2_price"]
-            dual = bool(sig["dual_entry"])
-            new_status = None
-            msg = None
-            extra_note = None
+    now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
-            if status == "PENDING":
-                leg1_outcome = None
-                live1 = sig["exec_mode"] == "LIVE" and sig["ticket"]
-                if live1:
-                    try:
-                        leg1_outcome = await asyncio.to_thread(
-                            reconcile_exit, sig["ticket"], {"HIT_SL": sl, "WON_TP1": tp1}
-                        )
-                    except Exception as e:
-                        logging.warning(f"Reconcile failed for leg1 #{sig['ticket']}: {e}")
+    for sig in active_signals:
+        sig_id = sig["id"]
+        status = sig["status"]
+        direction = sig["direction"]
+        entry, sl, tp1, tp2 = sig["entry_price"], sig["sl_price"], sig["tp1_price"], sig["tp2_price"]
+        dual = bool(sig["dual_entry"])
+        new_status = None
+        msg = None
+        extra_note = None
 
-                if leg1_outcome is None and not live1:
-                    if direction == "BUY":
-                        if current_price >= tp1:
-                            leg1_outcome = "WON_TP1"
-                        elif current_price <= sl:
-                            leg1_outcome = "HIT_SL"
-                    else:
-                        if current_price <= tp1:
-                            leg1_outcome = "WON_TP1"
-                        elif current_price >= sl:
-                            leg1_outcome = "HIT_SL"
+        if status == "PENDING":
+            leg1_outcome = None
+            live1 = sig["exec_mode"] == "LIVE" and sig["ticket"]
+            if live1:
+                try:
+                    leg1_outcome = await asyncio.to_thread(
+                        reconcile_exit, sig["ticket"], {"HIT_SL": sl, "WON_TP1": tp1}
+                    )
+                except Exception as e:
+                    logging.warning(f"Reconcile failed for leg1 #{sig['ticket']}: {e}")
 
-                if leg1_outcome == "WON_TP1":
-                    if dual:
-                        new_status = "HIT_TP1"
-                        msg = (
-                            f"🎯 **XAUUSD {direction} — LEG 1 (TP1) HIT!** (${tp1:.2f})\n"
-                            f"🛡️ *Leg 2's Stop Loss is being trailed to Break-Even (${entry:.2f}) — running for TP2.*"
-                        )
-                        if sig["exec_mode2"] == "LIVE" and sig["ticket2"] and not sig["be_moved2"]:
-                            try:
-                                ok, extra_note = await asyncio.to_thread(trail_leg_to_breakeven, sig["ticket2"], entry)
-                                if ok:
-                                    be_done.append(sig_id)
-                            except Exception as e:
-                                logging.exception(f"Leg2 BE-trail failed for ticket {sig['ticket2']}: {e}")
-                                extra_note = f"SL → BE: ⚠️ error ({e})"
-                    else:
-                        new_status = "CLOSED_TP1"
-                        msg = f"🎯 **XAUUSD {direction} — TP1 HIT! FULL CLOSE.** (${tp1:.2f})"
+            if leg1_outcome is None and not live1:
+                if direction == "BUY":
+                    if current_price >= tp1:
+                        leg1_outcome = "WON_TP1"
+                    elif current_price <= sl:
+                        leg1_outcome = "HIT_SL"
+                else:
+                    if current_price <= tp1:
+                        leg1_outcome = "WON_TP1"
+                    elif current_price >= sl:
+                        leg1_outcome = "HIT_SL"
 
-                elif leg1_outcome == "HIT_SL":
-                    new_status = "HIT_SL"
-                    msg = f"🛡️ **XAUUSD {direction} — STOP LOSS HIT** (${sl:.2f})"
-                    if dual and sig["exec_mode2"] == "LIVE" and sig["ticket2"]:
+            if leg1_outcome == "WON_TP1":
+                if dual:
+                    new_status = "HIT_TP1"
+                    msg = (
+                        f"🎯 **XAUUSD {direction} — LEG 1 (TP1) HIT!** (${tp1:.2f})\n"
+                        f"🛡️ *Leg 2's Stop Loss is being trailed to Break-Even (${entry:.2f}) — running for TP2.*"
+                    )
+                    if sig["exec_mode2"] == "LIVE" and sig["ticket2"] and not sig["be_moved2"]:
                         try:
-                            extra_note = await asyncio.to_thread(force_close_leg, sig["ticket2"], "leg 1 stopped out")
-                        except Exception as e:
-                            logging.exception(f"Leg2 force-close failed for ticket {sig['ticket2']}: {e}")
-                            extra_note = f"Leg 2 force-close: ⚠️ error ({e})"
-
-            elif status == "HIT_TP1":
-                # Dual-entry only: leg 1 already won, leg 2 is running with SL at BE.
-                leg2_outcome = None
-                live2 = sig["exec_mode2"] == "LIVE" and sig["ticket2"]
-                if live2:
-                    if not sig["be_moved2"]:
-                        try:
-                            ok, _ = await asyncio.to_thread(trail_leg_to_breakeven, sig["ticket2"], entry)
+                            ok, extra_note = await asyncio.to_thread(trail_leg_to_breakeven, sig["ticket2"], entry)
                             if ok:
                                 be_done.append(sig_id)
-                        except Exception:
-                            logging.exception("BE retry failed")
+                        except Exception as e:
+                            logging.exception(f"Leg2 BE-trail failed for ticket {sig['ticket2']}: {e}")
+                            extra_note = f"SL → BE: ⚠️ error ({e})"
+                else:
+                    new_status = "CLOSED_TP1"
+                    msg = f"🎯 **XAUUSD {direction} — TP1 HIT! FULL CLOSE.** (${tp1:.2f})"
+
+            elif leg1_outcome == "HIT_SL":
+                new_status = "HIT_SL"
+                msg = f"🛡️ **XAUUSD {direction} — STOP LOSS HIT** (${sl:.2f})"
+                if dual and sig["exec_mode2"] == "LIVE" and sig["ticket2"]:
                     try:
-                        leg2_outcome = await asyncio.to_thread(
-                            reconcile_exit, sig["ticket2"], {"CLOSED_BE": entry, "HIT_TP2": tp2}
-                        )
+                        extra_note = await asyncio.to_thread(force_close_leg, sig["ticket2"], "leg 1 stopped out")
                     except Exception as e:
-                        logging.warning(f"Reconcile failed for leg2 #{sig['ticket2']}: {e}")
+                        logging.exception(f"Leg2 force-close failed for ticket {sig['ticket2']}: {e}")
+                        extra_note = f"Leg 2 force-close: ⚠️ error ({e})"
 
-                if leg2_outcome is None and not live2:
-                    if direction == "BUY":
-                        if current_price >= tp2:
-                            leg2_outcome = "HIT_TP2"
-                        elif current_price <= entry:
-                            leg2_outcome = "CLOSED_BE"
-                    else:
-                        if current_price <= tp2:
-                            leg2_outcome = "HIT_TP2"
-                        elif current_price >= entry:
-                            leg2_outcome = "CLOSED_BE"
+        elif status == "HIT_TP1":
+            # Dual-entry only: leg 1 already won, leg 2 is running with SL at BE.
+            leg2_outcome = None
+            live2 = sig["exec_mode2"] == "LIVE" and sig["ticket2"]
+            if live2:
+                if not sig["be_moved2"]:
+                    try:
+                        ok, _ = await asyncio.to_thread(trail_leg_to_breakeven, sig["ticket2"], entry)
+                        if ok:
+                            be_done.append(sig_id)
+                    except Exception:
+                        logging.exception("BE retry failed")
+                try:
+                    leg2_outcome = await asyncio.to_thread(
+                        reconcile_exit, sig["ticket2"], {"CLOSED_BE": entry, "HIT_TP2": tp2}
+                    )
+                except Exception as e:
+                    logging.warning(f"Reconcile failed for leg2 #{sig['ticket2']}: {e}")
 
-                if leg2_outcome == "HIT_TP2":
-                    new_status = "HIT_TP2"
-                    msg = f"🚀 **XAUUSD {direction} — LEG 2 TP2 HIT!** (${tp2:.2f}) — Full Target Reached!"
-                elif leg2_outcome == "CLOSED_BE":
-                    new_status = "CLOSED_BE"
-                    msg = f"🔒 **XAUUSD {direction} — LEG 2 CLOSED AT BREAK-EVEN** (${entry:.2f})"
+            if leg2_outcome is None and not live2:
+                if direction == "BUY":
+                    if current_price >= tp2:
+                        leg2_outcome = "HIT_TP2"
+                    elif current_price <= entry:
+                        leg2_outcome = "CLOSED_BE"
+                else:
+                    if current_price <= tp2:
+                        leg2_outcome = "HIT_TP2"
+                    elif current_price >= entry:
+                        leg2_outcome = "CLOSED_BE"
 
-            if new_status:
-                cursor.execute(
-                    "UPDATE signals SET status = ?, updated_at = ? WHERE id = ?",
-                    (new_status, now_str, sig_id)
-                )
-                updates_to_send.append((sig, new_status, msg, extra_note, now_str))
+            if leg2_outcome == "HIT_TP2":
+                new_status = "HIT_TP2"
+                msg = f"🚀 **XAUUSD {direction} — LEG 2 TP2 HIT!** (${tp2:.2f}) — Full Target Reached!"
+            elif leg2_outcome == "CLOSED_BE":
+                new_status = "CLOSED_BE"
+                msg = f"🔒 **XAUUSD {direction} — LEG 2 CLOSED AT BREAK-EVEN** (${entry:.2f})"
 
-        conn.commit()
+        if new_status:
+            status_writes.append((new_status, now_str, sig_id))
+            updates_to_send.append((sig, new_status, msg, extra_note, now_str))
+
+    if status_writes:
+        with get_db_connection() as conn:
+            conn.executemany(
+                "UPDATE signals SET status = ?, updated_at = ? WHERE id = ?", status_writes
+            )
+            conn.commit()
 
     for sid in be_done:
         mark_leg2_be_moved(sid)

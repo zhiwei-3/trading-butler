@@ -1,6 +1,8 @@
 # strategy/chart.py
 
 import io
+import threading
+import functools
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -44,6 +46,14 @@ _EXIT_RULES = {
 _EPOCH = pd.Timestamp("1970-01-01", tz="UTC")
 _ONE_SEC = pd.Timedelta(seconds=1)
 
+CHART_LOCK = threading.RLock()
+
+def _locked(fn):
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        with CHART_LOCK:
+            return fn(*a, **k)
+    return wrapper
 
 # ------------------------------------------------------------------ time helpers
 def _utc_epoch(value):
@@ -332,6 +342,7 @@ def _apply_legend(ax, with_trades=False):
 
 
 # ------------------------------------------------------------------ market snapshot
+@_locked
 def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=100, near_zone=None,
                             macro_fvg=None, trades=None, server_offset_s=None, tf_label=None):
     """
@@ -382,6 +393,7 @@ def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=100, near_z
 
 
 # ------------------------------------------------------------------ live signal alert
+@_locked
 def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2,
                           fvg=None, near_zone=None, bars=80, dual=True,
                           trades=None, exclude_id=None, server_offset_s=None, tf_label=None):
@@ -454,6 +466,7 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2,
 
 
 # ------------------------------------------------------------------ post-trade outcome
+@_locked
 def generate_outcome_chart(df, entry_p, sl_p, tp1_p, tp2_p, outcome_status, symbol="XAUUSD",
                            direction=None, entry_time=None, exit_time=None, dual=True,
                            pre_bars=25, post_bars=8, trades=None, exclude_id=None,

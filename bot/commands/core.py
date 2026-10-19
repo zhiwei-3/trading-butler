@@ -155,6 +155,8 @@ async def heartbeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     counts = get_signal_stats()
+    skipped = counts.get('SKIPPED', 0)
+    total_signals = sum(v for k, v in counts.items() if k != 'SKIPPED')
     pending = counts.get('PENDING', 0)
     running = counts.get('HIT_TP1', 0)          # dual-entry: leg1 won, leg2 still running
     closed_tp1 = counts.get('CLOSED_TP1', 0)    # single-entry: full win at TP1
@@ -169,7 +171,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply = (
         f"📊 **FORWARD-TESTING PERFORMANCE STATS**\n\n"
-        f"• **Total Signals:** `{sum(counts.values())}` | **Pending Entry:** `{pending}`\n"
+        f"• **Total Signals:** `{total_signals}` | **Pending Entry:** `{pending}` | **Skipped (alert-only):** `{skipped}`\n"
         f"• **Dual-Entry Runners (leg2 in flight):** `{running}` 🎯 *(open — not counted below)*\n"
         f"• **Single-Entry TP1 Wins:** `{closed_tp1}` 🎯\n"
         f"• **TP2 Hits (leg2):** `{tp2}` 🚀\n"
