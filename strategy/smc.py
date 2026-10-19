@@ -133,12 +133,15 @@ def detect_order_block(df, lookback=20):
     if len(df) < lookback:
         return {"bullish_ob": False, "bearish_ob": False,
                 "bullish_ob_level": None, "bearish_ob_level": None,
+                "bullish_ob_top": None, "bullish_ob_bottom": None,
+                "bearish_ob_top": None, "bearish_ob_bottom": None,
                 "ob_level": None}
 
     recent = df.iloc[-lookback:].reset_index(drop=True)
     c_curr = recent.iloc[-1]
     bullish_ob = bearish_ob = False
     bull_level = bear_level = None
+    bull_top = bull_bot = bear_top = bear_bot = None
 
     # Bullish OB: Last down-candle before strong bullish displacement
     for i in range(len(recent) - 4, 1, -1):
@@ -148,6 +151,8 @@ def detect_order_block(df, lookback=20):
             if c_curr['low'] <= c_ob['high'] and c_curr['close'] >= c_ob['low']:
                 bullish_ob = True
                 bull_level = round(c_ob['low'], 2)
+                bull_top = round(float(c_ob['high']), 2)
+                bull_bot = round(float(c_ob['low']), 2)
                 break
 
     # Bearish OB: Last up-candle before strong bearish drop
@@ -158,10 +163,14 @@ def detect_order_block(df, lookback=20):
             if c_curr['high'] >= c_ob['low'] and c_curr['close'] <= c_ob['high']:
                 bearish_ob = True
                 bear_level = round(c_ob['high'], 2)
+                bear_top = round(float(c_ob['high']), 2)
+                bear_bot = round(float(c_ob['low']), 2)
                 break
 
     return {"bullish_ob": bullish_ob, "bearish_ob": bearish_ob,
             "bullish_ob_level": bull_level, "bearish_ob_level": bear_level,
+            "bullish_ob_top": bull_top, "bullish_ob_bottom": bull_bot,
+            "bearish_ob_top": bear_top, "bearish_ob_bottom": bear_bot,
             "ob_level": bull_level if bullish_ob else bear_level}
 
 

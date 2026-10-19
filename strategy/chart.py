@@ -21,6 +21,7 @@ C_ENTRY, C_SL = "#2962ff", "#ff1744"
 C_TP1, C_TP2 = "#00e676", "#00b0ff"
 C_BE, C_SR, C_FVG = "#17a2b8", "#aa00ff", "#e0e0e0"
 C_SUP, C_RES = "#00c853", "#ff3d00"  # Support (Green) / Resistance (Red)
+C_BULL_OB, C_BEAR_OB = "#00e5ff", "#ff4081"  # Bullish OB (Cyan) / Bearish OB (Pink)
 C_PAST = "#8ab4f8"                   # past (historical) trade entries
 
 TERMINAL = ("HIT_SL", "CLOSED_TP1", "HIT_TP2", "CLOSED_BE", "CLOSED_RUNNER_SL")
@@ -148,8 +149,8 @@ def _fit_ylim(ax, df, levels, pad=0.08):
 
 
 def _label_x_start(n, pad):
-    """Data-x where the right-hand label column begins (≈ axes fraction 0.79)."""
-    return -1 + 0.79 * (n + pad + 1)
+    """Data-x where the right-hand label column ends near the right chart border."""
+    return n + pad - 0.5
 
 
 def _place_labels(ax, labels):
@@ -211,11 +212,11 @@ def _stamp(ax, tf, n):
             bbox=dict(boxstyle="round,pad=0.2", fc=BG, ec="none", alpha=0.7))
 
 
-def _zone_bounds(near_zone):
-    """(bottom, top) of an S/R zone. Falls back to a thin band if low/high are missing."""
-    if not near_zone:
+def _zone_bounds(zone):
+    """(bottom, top) of a zone or level dict."""
+    if not zone:
         return None
-    low, high, price = near_zone.get("low"), near_zone.get("high"), near_zone.get("price")
+    low, high, price = zone.get("low"), zone.get("high"), zone.get("price")
     if low is None or high is None:
         if price is None:
             return None
@@ -237,8 +238,8 @@ def _get_zone_style(near_zone, ref_price=None):
     return C_SR, "S/R"
 
 
-def _draw_zone_box(ax, near_zone, x0, x1, ref_price, labels):
-    """Shaded green (support) / red (resistance) box with edge lines. Call AFTER the y-limits are set."""
+def _draw_zone_box(ax, near_zone, x0, x1, ref_price, labels=None):
+    """Shaded green (support) / red (resistance) box with edge lines (no axis text label)."""
     bounds = _zone_bounds(near_zone)
     if bounds is None:
         return False
@@ -249,9 +250,65 @@ def _draw_zone_box(ax, near_zone, x0, x1, ref_price, labels):
     color, tag = _get_zone_style(near_zone, ref_price)
     ax.fill_between([x0, x1], [bot, bot], [top, top], color=color, alpha=0.18, linewidth=0, zorder=1)
     ax.hlines([bot, top], x0, x1, colors=color, linestyles="-", linewidth=0.9, alpha=0.8, zorder=2)
-    mid = near_zone.get("price") or (bot + top) / 2
-    labels.append((mid, f"{tag} ${bot:.2f}–${top:.2f}", color))
     return True
+
+
+def _draw_ob_box(ax, order_block, x0, x1, ref_price, labels=None):
+    """Shaded Cyan (Bullish OB) / Pink (Bearish OB) box with boundary lines (no axis text label)."""
+    if not order_block or not isinstance(order_block, dict):
+        return False
+
+    drawn = False
+    lo, hi = ax.get_ylim()
+
+    # Case A: Standard SMC order_block dictionary from detect_order_block
+    if "bullish_ob" in order_block or "bearish_ob" in order_block:
+        # Bullish OB
+        if order_block.get("bullish_ob") or order_block.get("bullish_ob_level") is not None:
+            level = order_block.get("bullish_ob_level") or order_block.get("ob_level")
+            bot = order_block.get("bullish_ob_bottom")
+            top = order_block.get("bullish_ob_top")
+            if bot is None or top is None:
+                if level is not None:
+                    half = float(level) * 0.00075
+                    bot, top = float(level) - half, float(level) + half
+            if bot is not None and top is not None:
+                bot, top = min(bot, top), max(bot, top)
+                if not (top < lo or bot > hi):
+                    ax.fill_between([x0, x1], [bot, bot], [top, top], color=C_BULL_OB, alpha=0.18, linewidth=0, zorder=1)
+                    ax.hlines([bot, top], x0, x1, colors=C_BULL_OB, linestyles="-.", linewidth=0.9, alpha=0.85, zorder=2)
+                    drawn = True
+
+        # Bearish OB
+        if order_block.get("bearish_ob") or order_block.get("bearish_ob_level") is not None:
+            level = order_block.get("bearish_ob_level") or order_block.get("ob_level")
+            bot = order_block.get("bearish_ob_bottom")
+            top = order_block.get("bearish_ob_top")
+            if bot is None or top is None:
+                if level is not None:
+                    half = float(level) * 0.00075
+                    bot, top = float(level) - half, float(level) + half
+            if bot is not None and top is not None:
+                bot, top = min(bot, top), max(bot, top)
+                if not (top < lo or bot > hi):
+                    ax.fill_between([x0, x1], [bot, bot], [top, top], color=C_BEAR_OB, alpha=0.18, linewidth=0, zorder=1)
+                    ax.hlines([bot, top], x0, x1, colors=C_BEAR_OB, linestyles="-.", linewidth=0.9, alpha=0.85, zorder=2)
+                    drawn = True
+
+    # Case B: Custom zone-style dict
+    else:
+        bounds = _zone_bounds(order_block)
+        if bounds is not None:
+            bot, top = bounds
+            if not (top < lo or bot > hi):
+                z_type = str(order_block.get("type", "")).lower()
+                is_bull = "bull" in z_type or (ref_price is not None and ref_price >= (bot + top) / 2)
+                color = C_BULL_OB if is_bull else C_BEAR_OB
+                ax.fill_between([x0, x1], [bot, bot], [top, top], color=color, alpha=0.18, linewidth=0, zorder=1)
+                ax.hlines([bot, top], x0, x1, colors=color, linestyles="-.", linewidth=0.9, alpha=0.85, zorder=2)
+                drawn = True
+
+    return drawn
 
 
 # ------------------------------------------------------------------ past-trade overlay (shared)
@@ -267,12 +324,7 @@ def _trade_price(t, name):
 
 
 def _overlay_trades(ax, dfp, candle_ts, trades, offset_s, exclude_id=None):
-    """
-    Draws historical trades that fall inside the visible window: entry triangle at
-    the actual entry price, exit marker at the actual exit level (TP star / BE
-    diamond / SL cross), joined by a dotted line. Trades outside the window are
-    skipped (never clamped to the chart edge). Returns True if anything was drawn.
-    """
+    """Draws historical trades that fall inside the visible window."""
     if not trades or candle_ts is None or len(candle_ts) == 0:
         return False
 
@@ -344,11 +396,9 @@ def _apply_legend(ax, with_trades=False):
 # ------------------------------------------------------------------ market snapshot
 @_locked
 def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=100, near_zone=None,
-                            macro_fvg=None, trades=None, server_offset_s=None, tf_label=None):
-    """
-    Real-time candlestick snapshot with EMAs, current price, nearest S/R box, HTF FVG,
-    and overlays for all past trade entries/exits inside the candle window.
-    """
+                            order_block=None, macro_fvg=None, trades=None, server_offset_s=None, tf_label=None):
+    """Real-time candlestick snapshot with EMAs, current price, nearest S/R box, Order Block box, HTF FVG,
+    and overlays for all past trade entries/exits inside the candle window."""
     if df is None or len(df) < min(bars, 20):
         return None
 
@@ -374,6 +424,7 @@ def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=100, near_z
 
     x_end = _label_x_start(n, pad) - 0.5
     _draw_zone_box(ax, near_zone, -1, x_end, close, labels)
+    _draw_ob_box(ax, order_block, -1, x_end, close, labels)
 
     if macro_fvg and macro_fvg.get("fvg_top") is not None and macro_fvg.get("fvg_bottom") is not None:
         top, bot = macro_fvg["fvg_top"], macro_fvg["fvg_bottom"]
@@ -395,9 +446,9 @@ def generate_chart_snapshot(df, title="XAUUSD Market Snapshot", bars=100, near_z
 # ------------------------------------------------------------------ live signal alert
 @_locked
 def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2,
-                          fvg=None, near_zone=None, bars=80, dual=True,
+                          fvg=None, near_zone=None, order_block=None, bars=80, dual=True,
                           trades=None, exclude_id=None, server_offset_s=None, tf_label=None):
-    """Alert chart with projected entry/SL/TP lines, shaded risk/reward zones, S/R box and past trade history."""
+    """Alert chart with projected entry/SL/TP lines, shaded risk/reward zones, S/R box, Order Block box, and trade history."""
     if df is None or len(df) < min(bars, 50):
         return None
 
@@ -450,6 +501,7 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2,
         labels.append((tp2, f"TP2 ${tp2:.2f}{_r_text(tp2, entry, sl_dist, signal_type)}", C_TP2))
 
     _draw_zone_box(ax, near_zone, -1, x1, entry, labels)
+    _draw_ob_box(ax, order_block, -1, x1, entry, labels)
 
     drawn = _overlay_trades(ax, dfp, candle_ts, trades, offset_s, exclude_id=exclude_id)
 
@@ -470,13 +522,8 @@ def generate_signal_chart(df, symbol, signal_type, entry, sl, tp1, tp2,
 def generate_outcome_chart(df, entry_p, sl_p, tp1_p, tp2_p, outcome_status, symbol="XAUUSD",
                            direction=None, entry_time=None, exit_time=None, dual=True,
                            pre_bars=25, post_bars=8, trades=None, exclude_id=None,
-                           server_offset_s=None, near_zone=None, tf_label=None, min_bars=60):
-    """
-    Post-trade chart. Entry and exit markers are placed on the real entry/exit
-    candles, the chart is trimmed to [entry - pre_bars, exit + post_bars] (never
-    fewer than `min_bars` candles), and the S/R zone the signal fired at is drawn
-    as a green (support) / red (resistance) box.
-    """
+                           server_offset_s=None, near_zone=None, order_block=None, tf_label=None, min_bars=60):
+    """Post-trade chart with entry/exit markers, S/R zone box, and Order Block box."""
     if df is None or len(df) == 0:
         return None
     df = df.copy().reset_index(drop=True)
@@ -595,6 +642,7 @@ def generate_outcome_chart(df, entry_p, sl_p, tp1_p, tp2_p, outcome_status, symb
         labels.append((tp2_p, f"TP2 ${tp2_p:.2f}{_r_text(tp2_p, entry_p, sl_dist, direction)}", C_TP2))
 
     _draw_zone_box(ax, near_zone, -1, ext_to, entry_p, labels)
+    _draw_ob_box(ax, order_block, -1, ext_to, entry_p, labels)
 
     ax.set_xlim(-1, n + pad)
     _set_time_ticks(ax, dfp, offset_s=offset_s)
