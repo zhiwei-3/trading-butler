@@ -199,48 +199,45 @@ def get_signal_stats():
     return counts
 
 def get_daily_performance_stats():
-    """Calculates today's CLOSED trade performance (UTC day) from the database."""
+    """Today's CLOSED trade performance (UTC day). R is computed from each signal's real levels,
+    using the same model as the backtester (dual: TP1/2 leg-averages; BE runner = tp1_r/2)."""
     today_start = datetime.now(timezone.utc).strftime('%Y-%m-%d 00:00:00')
-
     with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT status FROM signals "
+        rows = conn.execute(
+            "SELECT status, entry_price, sl_price, tp1_price, tp2_price FROM signals "
             "WHERE status IN ('CLOSED_TP1', 'HIT_TP2', 'CLOSED_BE', 'HIT_SL') "
-            "AND updated_at >= ? ORDER BY id ASC",
+            "AND updated_at >= ? ORDER BY updated_at ASC, id ASC",
             (today_start,)
-        )
-        rows = cursor.fetchall()
+        ).fetchall()
 
+    consecutive_losses, net_r, today_wins, today_losses = 0, 0.0, 0, 0
+    for row in rows:
+        sl_dist = abs(row["entry_price"] - row["sl_price"])
+        tp1_r = abs(row["tp1_price"] - row["entry_price"]) / sl_dist if sl_dist > 0 else 0.0
+        tp2_r = abs(row["tp2_price"] - row["entry_price"]) / sl_dist if sl_dist > 0 else 0.0
+        status = row["status"]
+
+        if status == 'HIT_SL':
+            today_losses += 1
+            consecutive_losses += 1
+            net_r -= 1.0
+            continue
+
+        today_wins += 1
         consecutive_losses = 0
-        net_r = 0.0
-        today_wins = 0
-        today_losses = 0
+        if status == 'CLOSED_TP1':
+            net_r += tp1_r
+        elif status == 'HIT_TP2':
+            net_r += (tp1_r + tp2_r) / 2
+        elif status == 'CLOSED_BE':
+            net_r += tp1_r / 2
 
-        for row in rows:
-            status = row["status"]
-            if status == 'HIT_SL':
-                today_losses += 1
-                consecutive_losses += 1
-                net_r -= 1.0
-            elif status == 'HIT_TP2':
-                today_wins += 1
-                consecutive_losses = 0
-                net_r += 2.0
-            elif status == 'CLOSED_TP1':
-                today_wins += 1
-                consecutive_losses = 0
-                net_r += 1.0
-            elif status == 'CLOSED_BE':
-                today_wins += 1
-                consecutive_losses = 0
-
-        return {
-            "consecutive_losses": consecutive_losses,
-            "net_r": net_r,
-            "today_wins": today_wins,
-            "today_losses": today_losses
-        }
+    return {
+        "consecutive_losses": consecutive_losses,
+        "net_r": round(net_r, 2),
+        "today_wins": today_wins,
+        "today_losses": today_losses,
+    }
 
 def get_active_live_signals():
     """Active signals that own live tickets, oldest first."""

@@ -358,8 +358,9 @@ def calculate_targets(direction, close_price, atr_val, order_block, near_zone,
 
     if direction == "BUY":
         sl_price, sl_source = close_price - atr_val * sl_mult, "ATR"
-        if order_block.get("bullish_ob") and order_block.get("ob_level") is not None:
-            ob_sl = order_block["ob_level"] - ob_buffer
+        ob_level = order_block.get("bullish_ob_level") if order_block.get("bullish_ob") else None
+        if ob_level is not None:
+            ob_sl = ob_level - ob_buffer
             if ob_sl < close_price and (close_price - ob_sl) >= min_dist:
                 sl_price, sl_source = ob_sl, "Order Block"
 
@@ -371,8 +372,9 @@ def calculate_targets(direction, close_price, atr_val, order_block, near_zone,
 
     else:  # SELL
         sl_price, sl_source = close_price + atr_val * sl_mult, "ATR"
-        if order_block.get("bearish_ob") and order_block.get("ob_level") is not None:
-            ob_sl = order_block["ob_level"] + ob_buffer
+        ob_level = order_block.get("bearish_ob_level") if order_block.get("bearish_ob") else None
+        if ob_level is not None:
+            ob_sl = ob_level + ob_buffer
             if ob_sl > close_price and (ob_sl - close_price) >= min_dist:
                 sl_price, sl_source = ob_sl, "Order Block"
 

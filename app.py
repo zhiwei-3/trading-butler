@@ -89,12 +89,13 @@ def main():
 
     if init_mt5():
         print("✅ MT5 Engine Online!")
-        if ALERT_STATE.get("heartbeat_enabled") and USER_ID:
-            restart_heartbeat_job(app.job_queue, int(USER_ID))
-        if USER_ID:
-            ensure_watchdog_running(app.job_queue, int(USER_ID))
     else:
-        print("⚠️ Warning: MT5 connection failed.")
+        print("⚠️ Warning: MT5 connection failed — watchdog will keep retrying.")
+
+    boot_chat = int(USER_ID)
+    ensure_watchdog_running(app.job_queue, boot_chat)
+    if ALERT_STATE.get("heartbeat_enabled"):
+        restart_heartbeat_job(app.job_queue, boot_chat)
 
     # Register Global Error Handler
     app.add_error_handler(error_handler)

@@ -167,27 +167,27 @@ def position_by_ticket(ticket):
         positions = mt5.positions_get(ticket=int(ticket))
     return positions[0] if positions else None
 
-def _preflight(symbol, bypass_position_cap=False):
+def _preflight(symbol, bypass_position_cap=False, dry=None):
+    dry = ALERT_STATE.get("trade_dry_run", True) if dry is None else dry
     if not init_mt5():
         return False, "MT5 terminal unreachable."
     with MT5_LOCK:
         term = mt5.terminal_info()
         acc = mt5.account_info()
         info = mt5.symbol_info(symbol)
-    if term is None or not term.trade_allowed:
-        return False, "AutoTrading is OFF in the MT5 terminal (enable the 'Algo Trading' button)."
-    if acc is None:
-        return False, "No MT5 account info available."
-    if not acc.trade_allowed:
-        return False, "Trading disabled for this account (investor password or server restriction)."
     if info is None:
         return False, f"Symbol `{symbol}` not found on this server."
-    if info.trade_mode != mt5.SYMBOL_TRADE_MODE_FULL:
-        return False, f"`{symbol}` is not open for full trading (trade_mode={info.trade_mode})."
 
-    # Only the 2nd leg of a dual-entry signal may bypass this. Everything else
-    # needs a completely flat book on this symbol (max_open_positions no longer
-    # lets a 2nd independent trade through).
+    if not dry:   # permissions only matter when a real order will be sent
+        if term is None or not term.trade_allowed:
+            return False, "AutoTrading is OFF in the MT5 terminal (enable the 'Algo Trading' button)."
+        if acc is None:
+            return False, "No MT5 account info available."
+        if not acc.trade_allowed:
+            return False, "Trading disabled for this account (investor password or server restriction)."
+        if info.trade_mode != mt5.SYMBOL_TRADE_MODE_FULL:
+            return False, f"`{symbol}` is not open for full trading (trade_mode={info.trade_mode})."
+
     if not bypass_position_cap:
         blocker = trade_slot_blocker(symbol)
         if blocker:
@@ -195,7 +195,7 @@ def _preflight(symbol, bypass_position_cap=False):
 
     day_n = count_live_trades_today()
     day_cap = int(ALERT_STATE.get("max_daily_trades", 5))
-    if not ALERT_STATE.get("trade_dry_run", True) and day_n >= day_cap:
+    if not dry and day_n >= day_cap:
         return False, f"Daily execution cap reached ({day_n}/{day_cap})."
     return True, ""
 
@@ -254,7 +254,7 @@ def _new_fill(symbol, direction, before):
 def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypass_position_cap=False):
     global _LAST_FILL_AT
     dry = ALERT_STATE.get("trade_dry_run", True) if dry_run is None else dry_run
-    ok, reason = _preflight(symbol, bypass_position_cap=bypass_position_cap)
+    ok, reason = _preflight(symbol, bypass_position_cap=bypass_position_cap, dry=dry)
     if not ok:
         return {"ok": False, "dry_run": dry, "ticket": None, "reason": reason}
 

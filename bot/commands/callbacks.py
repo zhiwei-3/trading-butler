@@ -31,9 +31,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("⚙️ **Select Active Strategy:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     elif data.startswith("set_strat_"):
         new_strat = data.replace("set_strat_", "")
-        ALERT_STATE["active_strategy"] = new_strat
-        ALERT_STATE["last_rsi_signal"] = None
-        save_settings()
+        if new_strat in STRATEGY_PRESETS:
+            ALERT_STATE["active_strategy"] = new_strat
+            ALERT_STATE["last_rsi_signal"] = None
+            ALERT_STATE["last_ifvg_signal"] = None
+            save_settings()
         await menu_cmd(update, context)
     elif data == "btn_tf_menu":
         # Built from the real preset labels so they can never drift apart.

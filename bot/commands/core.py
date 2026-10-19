@@ -106,8 +106,6 @@ async def enable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job_kwargs={"misfire_grace_time": 30}
     )
     ensure_watchdog_running(context.job_queue, chat_id)
-    if not USER_ID:
-        restart_heartbeat_job(context.job_queue, chat_id)
     await update.effective_message.reply_text("🟢 **Market Scanner Activated!** Checking XAUUSD every 60 seconds.", parse_mode="Markdown")
 
 

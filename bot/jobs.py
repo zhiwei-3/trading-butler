@@ -224,7 +224,7 @@ def _zone_from_sig(sig):
 
 async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     """
-    Tracks each active signal'parser leg(s) to a terminal outcome.
+    Tracks each active signal's leg(s) to a terminal outcome.
 
     Single-entry signals (dual_entry=0) have one leg: it resolves straight from
     PENDING to CLOSED_TP1 (full win) or HIT_SL (loss) — no runner phase.

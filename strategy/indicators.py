@@ -27,6 +27,8 @@ def get_macd_bias(df, fast=12, slow=26, signal=9):
     if not macd_col or not signal_col:
         return None
     line, sig = macd_df[macd_col].iloc[-1], macd_df[signal_col].iloc[-1]
+    if pd.isna(line) or pd.isna(sig):
+        return None
     return "BULLISH" if line > sig else "BEARISH"
 
 def detect_candlestick_pattern(df):

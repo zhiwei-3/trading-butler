@@ -139,6 +139,9 @@ def generate_xauusd_news_insight(event_title: str, forecast: str, previous: str,
     actual_n = _to_num(actual)
     forecast_n = _to_num(forecast)
 
+    if actual_n is not None and forecast_n is not None and actual_n == forecast_n:
+        return "⚖️ **Neutral XAUUSD** (Actual in line with forecast — expect muted, two-way volatility.)"
+
     # 1. Inflation & Growth (CPI, PPI, PCE, GDP, Retail Sales)
     if any(k in title_upper for k in ["CPI", "PPI", "PCE", "GDP", "RETAIL SALES"]):
         if actual_n is not None and forecast_n is not None:

@@ -26,7 +26,7 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🤖 **Trade Execution (see `/trade` for full detail):**\n"
             f"• **Fixed Lot/Leg (`lot`):** `{ALERT_STATE.get('fixed_lot_size', 0.01)}`\n"
             f"• **Dual-Entry Score (`dual_score`):** `{ALERT_STATE.get('dual_entry_score_threshold', 50)}`\n"
-            f"• **Magic (`magic`)**, **Slippage (`slippage`)**, **Max Positions (`max_positions`)**, "
+            f"• **Magic (`magic`)**, **Slippage (`slippage`)**, "
             f"**Max Trades/Day (`max_trades`)**, **Entry Drift (`drift`)**, **Flatten on CB (`flatten_cb`)**\n\n"
 
             "🚨 **Circuit Breaker Settings:**\n"
@@ -118,7 +118,12 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             setting_name, val = "news_blockade_mins_after", int(val_str)
         elif key in ("news_impact", "news_level", "news_impacts", "news_blockade_impacts"):
             setting_name = "news_blockade_impacts"
-            val = [x.strip().lower() for x in val_str.split(",") if x.strip()]
+            val = [x.strip().lower() for x in val_str.replace(",", " ").split() if x.strip()]
+            bad = [v for v in val if v not in ("high", "medium", "low", "holiday")]
+            if not val or bad:
+                await update.message.reply_text(
+                    "❌ Impact levels must be from: `high`, `medium`, `low`, `holiday`.", parse_mode="Markdown")
+                return
         else:
             await update.message.reply_text(f"❌ Unknown setting key `{key}`.", parse_mode="Markdown")
             return
