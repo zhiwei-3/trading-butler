@@ -1,3 +1,5 @@
+# app.py
+
 import logging
 from telegram import BotCommand
 from telegram.error import NetworkError, TimedOut
@@ -7,7 +9,7 @@ from database import init_db
 from mt5_engine import init_mt5
 from bot.commands import (
     start_cmd, menu_cmd, handle_callback_query,
-    enable_scanner, disable_scanner,
+    enable_scanner, disable_scanner, account_cmd,
     news_calendar_cmd, spread_check_cmd, gold_snapshot, market_session,
     set_cmd, set_timeframe, set_strategy_cmd, filters_cmd, watchlist_cmd,
     trade_cmd, positions_cmd, close_cmd, breakeven_cmd,
@@ -23,7 +25,6 @@ from bot.jobs import (
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Logs uncaught exceptions raised by command handlers."""
-    # Suppress verbose tracebacks for transient network hiccups during polling
     if isinstance(context.error, (NetworkError, TimedOut)):
         logging.warning(f"⚠️ Network connection dropped (auto-retrying): {context.error}")
         return
@@ -34,6 +35,7 @@ async def post_init_setup(application: Application) -> None:
     commands = [
         BotCommand("start", "🤵‍♂️ Show Quick Command Guide"),
         BotCommand("menu", "🎛️ Interactive Control Dashboard"),
+        BotCommand("account", "💳 Account Balance, Equity & PnL"),
         BotCommand("scanner_on", "🟢 Activate Market Scanner"),
         BotCommand("scanner_off", "🔴 Deactivate Market Scanner"),
         BotCommand("trade", "🤖 Arm / Disarm Live Execution"),
@@ -62,9 +64,6 @@ def main():
     if not TELEGRAM_TOKEN:
         print("❌ TELEGRAM_TOKEN missing in environment.")
         return
-    # BUGFIX: admin_only did `int(USER_ID)` with no guard, so every single
-    # command crashed if this was unset. Refuse to start instead of letting
-    # that surface at the first /start.
     if not USER_ID:
         print("❌ TELEGRAM_USER_ID missing in environment — required for admin authorization and background jobs.")
         return
@@ -75,7 +74,6 @@ def main():
         save_settings()
         print("⚠️ Live execution reset to DRY-RUN on startup. Re-arm with /trade live CONFIRM.")
 
-    # Build app instance BEFORE calling app.job_queue
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
@@ -103,6 +101,7 @@ def main():
     # Register All Command Handlers
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
+    app.add_handler(CommandHandler(["account", "balance", "pnl"], account_cmd))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(CommandHandler("scanner_on", enable_scanner))
     app.add_handler(CommandHandler("scanner_off", disable_scanner))
@@ -129,10 +128,6 @@ def main():
     # Auto-start Background Jobs
     if USER_ID:
         boot_id = int(USER_ID)
-        # BUGFIX: this job used to have no `name=`, so /scanner_off and the
-        # circuit breaker (which both remove jobs by name "xauusd_scanner")
-        # could never actually stop it — and /scanner_on would then add a
-        # SECOND scanner job, causing every tick to run (and fire signals) twice.
         app.job_queue.run_repeating(
             market_scanner_job,
             interval=60,

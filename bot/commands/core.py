@@ -1,8 +1,15 @@
+# bot/commands/core.py
+
+import logging
+import asyncio
+from datetime import datetime, timezone, timedelta
+import MetaTrader5 as mt5
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from config import USER_ID, ALERT_STATE, save_settings
 from database import get_signal_stats
+from mt5_engine import check_mt5_alive
 from bot.jobs import (
     build_status_snapshot,
     market_scanner_job,
@@ -10,6 +17,55 @@ from bot.jobs import (
     restart_heartbeat_job,
 )
 from ._common import admin_only
+
+
+def _fetch_account_data(days: int = 1):
+    """Synchronous MT5 worker function to fetch account state and deal history."""
+    if not check_mt5_alive():
+        return None, "🔴 MT5 terminal is not connected or unreachable."
+
+    info = mt5.account_info()
+    if info is None:
+        return None, "❌ Failed to retrieve MT5 account details."
+
+    now = datetime.now(timezone.utc)
+    from_date = now - timedelta(days=days)
+    deals = mt5.history_deals_get(from_date, now)
+
+    closed_deals = []
+    if deals:
+        for d in deals:
+            # Entry OUT (1), INOUT (2), or OUT_BY (3) indicates a closed trade leg
+            if d.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_INOUT, mt5.DEAL_ENTRY_OUT_BY):
+                if d.type in (mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL):
+                    net_pnl = d.profit + d.swap + d.commission
+                    closed_deals.append({
+                        "ticket": d.ticket,
+                        "order": d.order,
+                        "time": datetime.fromtimestamp(d.time, tz=timezone.utc),
+                        "symbol": d.symbol,
+                        "type": "BUY" if d.type == mt5.DEAL_TYPE_BUY else "SELL",
+                        "volume": d.volume,
+                        "price": d.price,
+                        "profit": d.profit,
+                        "swap": d.swap,
+                        "commission": d.commission,
+                        "net_pnl": net_pnl,
+                    })
+
+    return {
+        "login": info.login,
+        "server": info.server,
+        "currency": info.currency or "USD",
+        "leverage": info.leverage,
+        "balance": info.balance,
+        "equity": info.equity,
+        "profit": info.profit,
+        "margin": info.margin,
+        "free_margin": info.margin_free,
+        "margin_level": info.margin_level if info.margin > 0 else 0.0,
+        "closed_deals": closed_deals,
+    }, None
 
 
 @admin_only
@@ -21,6 +77,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤵‍♂️ **Trading Butler Online (Full Stack Modular)**\n\n"
         "**🎛️ Core & Dashboards**\n"
         "• `/menu` - Interactive Control Dashboard\n"
+        "• `/account [days]` - Account Balance, Equity, PnL & History (`/account 7d`)\n"
         "• `/scanner_on` / `/scanner_off` - Toggle Market Scanner\n"
         "• `/status` - Full Bot Health Check\n"
         "• `/stats` - Forward-Testing Performance & Win Rate\n\n"
@@ -75,8 +132,8 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🔴 Scanner OFF", callback_data="btn_scanner_off"),
         ],
         [
+            InlineKeyboardButton("💳 Account", callback_data="btn_account"),
             InlineKeyboardButton("📊 Gold Chart", callback_data="btn_gold"),
-            InlineKeyboardButton("🔍 Spread Check", callback_data="btn_spread"),
             InlineKeyboardButton("📈 Stats", callback_data="btn_stats"),
         ],
         [
@@ -90,6 +147,69 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     else:
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+@admin_only
+async def account_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetches real-time MT5 account balance, floating PnL, closed PnL, and recent trade history."""
+    days = 1
+    if context.args:
+        arg = context.args[0].lower().replace("d", "").strip()
+        if arg.isdigit():
+            days = max(1, min(int(arg), 365))
+
+    data, err = await asyncio.to_thread(_fetch_account_data, days)
+    if err:
+        await update.effective_message.reply_text(err, parse_mode="Markdown")
+        return
+
+    curr = data['currency']
+    float_pnl = data['profit']
+    pnl_sign = "+" if float_pnl > 0 else ""
+    pnl_icon = "📈" if float_pnl > 0 else ("📉" if float_pnl < 0 else "⚖️")
+
+    closed = data['closed_deals']
+    closed_pnl = sum(d['net_pnl'] for d in closed)
+    closed_sign = "+" if closed_pnl > 0 else ""
+    wins = sum(1 for d in closed if d['net_pnl'] > 0)
+    losses = sum(1 for d in closed if d['net_pnl'] < 0)
+    total_closed = len(closed)
+    win_rate = round((wins / total_closed * 100), 1) if total_closed > 0 else 0.0
+
+    period_str = "Today (24h)" if days == 1 else f"Last {days} Days"
+
+    # Format recent closed deals (up to 5)
+    history_lines = []
+    for d in sorted(closed, key=lambda x: x['time'], reverse=True)[:5]:
+        t_str = d['time'].strftime('%Y-%m-%d %H:%M')
+        d_pnl_sign = "+" if d['net_pnl'] > 0 else ""
+        d_icon = "🎯" if d['net_pnl'] > 0 else "🛡️"
+        history_lines.append(
+            f"• `{t_str}` | **{d['symbol']} {d['type']}** `{d['volume']}` lots {d_icon}\n"
+            f"  └ Exit: `${d['price']:.2f}` | PnL: `{d_pnl_sign}${d['net_pnl']:.2f} {curr}`"
+        )
+
+    history_text = "\n".join(history_lines) if history_lines else "_No closed deals in this timeframe._"
+
+    text = (
+        f"💳 **ACCOUNT & PNL OVERVIEW**\n\n"
+        f"**👤 Account Info**\n"
+        f"• **Account:** `{data['login']}` (`{data['server']}`)\n"
+        f"• **Balance:** `${data['balance']:,.2f} {curr}`\n"
+        f"• **Equity:** `${data['equity']:,.2f} {curr}`\n"
+        f"• **Floating PnL:** `{pnl_sign}${float_pnl:,.2f} {curr}` {pnl_icon}\n"
+        f"• **Margin:** `${data['margin']:,.2f}` | **Free Margin:** `${data['free_margin']:,.2f}`\n"
+        f"• **Margin Level:** `{data['margin_level']:.1f}%` | **Leverage:** `1:{data['leverage']}`\n\n"
+        f"**📊 Realized PnL ({period_str})**\n"
+        f"• **Closed PnL:** `{closed_sign}${closed_pnl:,.2f} {curr}`\n"
+        f"• **Record:** `{wins}W - {losses}L` (`{total_closed}` trades)\n"
+        f"• **Win Rate:** `{win_rate}%`\n\n"
+        f"**📜 Recent Closed History**\n"
+        f"{history_text}\n\n"
+        f"💡 _Tip: Use `/account 7d` or `/account 30d` for longer history lookup._"
+    )
+
+    await update.effective_message.reply_text(text, parse_mode="Markdown")
 
 
 @admin_only
