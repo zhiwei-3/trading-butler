@@ -38,7 +38,7 @@
     "news_blockade_mins_before": 30,
     "news_blockade_mins_after": 30,
     "auto_trade_enabled": true,
-    "trade_dry_run": true,
+    "trade_dry_run": false,
     "magic_number": 770077,
     "max_slippage_points": 30,
     "max_daily_trades": 10,

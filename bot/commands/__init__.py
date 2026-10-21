@@ -1,6 +1,6 @@
 from .core import (
     start_cmd, menu_cmd, enable_scanner, disable_scanner,
-    account_cmd, status_cmd, heartbeat_cmd, stats_cmd,
+    account_cmd, status_cmd, heartbeat_cmd,
 )
 from .trading import (
     trade_cmd, positions_cmd, close_cmd, breakeven_cmd,

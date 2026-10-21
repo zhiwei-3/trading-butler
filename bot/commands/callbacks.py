@@ -3,7 +3,8 @@ from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, save_settings
 from ._common import admin_only
-from .core import menu_cmd, enable_scanner, disable_scanner, stats_cmd
+from .core import menu_cmd, enable_scanner, disable_scanner, account_cmd
+from .trading import positions_cmd
 from .market import gold_snapshot, spread_check_cmd
 
 
@@ -22,8 +23,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await gold_snapshot(update, context)
     elif data == "btn_spread":
         await spread_check_cmd(update, context)
-    elif data == "btn_stats":
-        await stats_cmd(update, context)
+    elif data == "btn_account":
+        await account_cmd(update, context)
+    elif data in ("btn_positions"):
+        await positions_cmd(update, context)
     elif data == "btn_strat_menu":
         # Built live from STRATEGY_PRESETS so the menu can never drift from it.
         keyboard = [[InlineKeyboardButton(v, callback_data=f"set_strat_{k}")] for k, v in STRATEGY_PRESETS.items()]

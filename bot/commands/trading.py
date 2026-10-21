@@ -1,3 +1,5 @@
+# bot/commands/trading.py
+
 import asyncio
 import MetaTrader5 as mt5
 from telegram import Update
@@ -9,6 +11,7 @@ from trade_engine import (
     modify_position_sltp, pending_intent_count,
 )
 from ._common import admin_only
+from .core import _fetch_account_data, _deal_stats, _parse_period, _money, _pf_text
 
 
 @admin_only
@@ -84,24 +87,90 @@ async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    positions = await asyncio.to_thread(list_managed_positions)
-    if not positions:
-        await update.effective_message.reply_text("📭 **No bot-managed positions open.**", parse_mode="Markdown")
+    """Trade Desk & Journal: Active open positions, historical closed deals, win/loss analytics."""
+    since_utc, period_str, is_all = _parse_period(context.args)
+    if since_utc is None:
+        await update.effective_message.reply_text(
+            "⚠️ **Usage:** `/positions [period]`\n\n"
+            "• `/positions` — today (since 00:00 UTC)\n"
+            "• `/positions week` · `/positions month` · `/positions 14d` · `/positions all`",
+            parse_mode="Markdown"
+        )
         return
 
-    lines = ["💼 **OPEN MANAGED POSITIONS**\n"]
-    total = 0.0
-    for p in positions:
-        side = "BUY 🟢" if p.type == mt5.POSITION_TYPE_BUY else "SELL 🔴"
-        total += p.profit
-        lines.append(
-            f"• `#{p.ticket}` {side} `{p.volume}` lots {p.symbol} — *{p.comment or ''}*\n"
-            f"   Entry `${p.price_open:.2f}` → Now `${p.price_current:.2f}`\n"
-            f"   SL `${p.sl:.2f}` | TP `${p.tp:.2f}` | P&L `${p.profit:.2f}`"
+    data, err = await asyncio.to_thread(_fetch_account_data)
+    if err:
+        await update.effective_message.reply_text(err, parse_mode="Markdown")
+        return
+
+    curr = data["currency"]
+    positions = data["open_positions"]
+    all_trades = data["trades"]
+    period_trades = [t for t in all_trades if t["time"] >= since_utc]
+    st = _deal_stats(period_trades)
+
+    filter_mode = "ALL"
+    if len(context.args) > 1:
+        f_arg = context.args[1].lower()
+        if f_arg == "bot":
+            period_trades = [t for t in period_trades if t["is_bot"]]
+            st = _deal_stats(period_trades)
+            filter_mode = "BOT"
+        elif f_arg in ("manual", "man"):
+            period_trades = [t for t in period_trades if not t["is_bot"]]
+            st = _deal_stats(period_trades)
+            filter_mode = "MANUAL"
+
+    pos_lines = []
+    if not positions:
+        pos_text = "_No open positions currently._\n"
+    else:
+        total_float = sum(p.profit for p in positions)
+        for p in positions:
+            side = "BUY 🟢" if p.type == mt5.POSITION_TYPE_BUY else "SELL 🔴"
+            pos_lines.append(
+                f"• `#{p.ticket}` {side} `{p.volume}` lots **{p.symbol}** — *{p.comment or ''}*\n"
+                f"   Entry `${p.price_open:.2f}` ➔ Now `${p.price_current:.2f}` | "
+                f"SL `${p.sl:.2f}` | TP `${p.tp:.2f}` | PnL: `{_money(p.profit, curr)}`"
+            )
+        pos_lines.append(f"   └ **Total Floating PnL:** `{_money(total_float, curr)}`")
+        pos_text = "\n".join(pos_lines) + "\n"
+
+    bot_st = _deal_stats([t for t in period_trades if t["is_bot"]])
+    man_st = _deal_stats([t for t in period_trades if not t["is_bot"]])
+
+    analytics_text = (
+        f"• **Net Realized PnL:** `{_money(st['pnl'], curr)}` | `{st['wins']}W - {st['losses']}L` (`{st['n']}` deals)\n"
+        f"• **Win Rate:** `{st['win_rate']}%` | **Profit Factor:** `{_pf_text(st)}` | **Expectancy:** `{st['expectancy']:+,.2f}`/deal\n"
+        f"• **Avg Win:** `{st['avg_win']:+,.2f}` | **Avg Loss:** `{st['avg_loss']:+,.2f}` | "
+        f"**Best:** `{st['best']:+,.2f}` | **Worst:** `{st['worst']:+,.2f}`\n"
+        f"• **Max Drawdown:** `-{st['max_dd']:,.2f} {curr}` | **Streaks:** `{st['max_w']}`W / `{st['max_l']}`L\n"
+        f"• 🤖 Bot: `{_money(bot_st['pnl'], curr)}` ({bot_st['n']} deals, {bot_st['win_rate']}% WR) | "
+        f"🖐️ Manual: `{_money(man_st['pnl'], curr)}` ({man_st['n']} deals, {man_st['win_rate']}% WR)\n"
+    )
+
+    recent_lines = []
+    for t in sorted(period_trades, key=lambda x: x["time"], reverse=True)[:5]:
+        icon = "🎯" if t["net_pnl"] > 0 else ("🛡️" if t["net_pnl"] < 0 else "⚖️")
+        src = "🤖" if t["is_bot"] else "🖐️"
+        recent_lines.append(
+            f"• `{t['time'].strftime('%m-%d %H:%M')} UTC` {src} **{t['symbol']} {t['type']}** "
+            f"`{t['volume']}` lots {icon} `{_money(t['net_pnl'], curr)}`"
         )
-    lines.append(f"\n📊 **Floating P&L:** `${total:.2f}`")
-    lines.append("\n*Close with* `/close <ticket>` *or* `/close all`.")
-    await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
+    recent_text = "\n".join(recent_lines) if recent_lines else "_No closed deals in this window._"
+
+    text = (
+        f"📑 **POSITIONS & TRADE JOURNAL ({period_str})**" + (f" `[{filter_mode}]`\n\n" if filter_mode != "ALL" else "\n\n") +
+        f"**💼 Active Managed Positions ({len(positions)})**\n"
+        f"{pos_text}\n"
+        f"**📊 Trade Execution Analytics**\n"
+        f"{analytics_text}\n"
+        f"**📜 Recent Closed Deals**\n"
+        f"{recent_text}\n\n"
+        f"💡 _Filter with `/positions week`, `/positions month`, `/positions all`, `/positions week bot`, or `/positions month manual`._"
+    )
+
+    await update.effective_message.reply_text(text, parse_mode="Markdown")
 
 
 @admin_only
@@ -135,9 +204,7 @@ async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def breakeven_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manually trail a managed position's SL to its entry price. The bot does
-    this automatically for a dual-entry signal's runner leg — this is for
-    manual overrides."""
+    """Manually trail a managed position's SL to its entry price."""
     if not context.args:
         await update.effective_message.reply_text("⚠️ **Usage:** `/breakeven <ticket>`", parse_mode="Markdown")
         return

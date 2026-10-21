@@ -13,7 +13,7 @@ from bot.commands import (
     news_calendar_cmd, spread_check_cmd, gold_snapshot, market_session,
     set_cmd, set_timeframe, set_strategy_cmd, filters_cmd, watchlist_cmd,
     trade_cmd, positions_cmd, close_cmd, breakeven_cmd,
-    status_cmd, stats_cmd, heartbeat_cmd, diagnose_cmd,
+    status_cmd, heartbeat_cmd, diagnose_cmd,
     backtest_cmd, optimize_cmd,
 )
 from bot.jobs import (
@@ -35,11 +35,11 @@ async def post_init_setup(application: Application) -> None:
     commands = [
         BotCommand("start", "🤵‍♂️ Show Quick Command Guide"),
         BotCommand("menu", "🎛️ Interactive Control Dashboard"),
-        BotCommand("account", "💳 Account Balance, Equity & PnL"),
+        BotCommand("account", "💳 Executive Capital & Margin Health"),
         BotCommand("scanner_on", "🟢 Activate Market Scanner"),
         BotCommand("scanner_off", "🔴 Deactivate Market Scanner"),
         BotCommand("trade", "🤖 Arm / Disarm Live Execution"),
-        BotCommand("positions", "💼 View Managed Positions"),
+        BotCommand("positions", "💼 Open Positions & Trade Journal"),
         BotCommand("close", "🧯 Close Position or Flatten All"),
         BotCommand("breakeven", "🔒 Move SL to Break-Even"),
         BotCommand("gold", "📊 Real-Time Chart & Analysis"),
@@ -53,7 +53,6 @@ async def post_init_setup(application: Application) -> None:
         BotCommand("filters", "🎛️ Adjust Structure/Volume Filters"),
         BotCommand("watchlist", "👀 Adjust Early Watchlist Pings"),
         BotCommand("status", "🩺 Full Bot Health Check"),
-        BotCommand("stats", "📈 Forward-Testing Performance"),
         BotCommand("heartbeat", "💓 Adjust Periodic Status Pings"),
         BotCommand("backtest", "🧪 Replay Strategy Over History"),
         BotCommand("optimize", "⚡ Parameter Optimization Sweep"),
@@ -119,7 +118,6 @@ def main():
     app.add_handler(CommandHandler("close", close_cmd))
     app.add_handler(CommandHandler("breakeven", breakeven_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("heartbeat", heartbeat_cmd))
     app.add_handler(CommandHandler("diagnose", diagnose_cmd))
     app.add_handler(CommandHandler("backtest", backtest_cmd))
