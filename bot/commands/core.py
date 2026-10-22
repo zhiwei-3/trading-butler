@@ -175,7 +175,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/status` - Full Bot Health Check\n\n"
         "**🤖 Trade Execution**\n"
         "• `/trade` - Arm/Disarm Live Execution (Dry/Live)\n"
-        "• `/positions [period]` - Open Positions (Dry/Live), Trade Journal & Metrics\n"
+        "• `/positions` - Open Running Positions (Live + Dry-Run)\n"
+        "• `/journal` - Trade Journal dashboard (buttons + chart; `/journal help` for shortcuts)\n"
         "• `/close <ticket|all>` - Close Position or Flatten All\n"
         "• `/breakeven <ticket>` - Trail SL to Entry Price\n\n"
         "**📊 Market Analysis**\n"
@@ -225,9 +226,10 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton("💳 Account", callback_data="btn_account"),
             InlineKeyboardButton("📑 Positions", callback_data="btn_positions"),
-            InlineKeyboardButton("📊 Gold Chart", callback_data="btn_gold"),
+            InlineKeyboardButton("📓 Journal", callback_data="btn_journal"),
         ],
         [
+            InlineKeyboardButton("📊 Gold Chart", callback_data="btn_gold"),
             InlineKeyboardButton("⚙️ Strategy Selector", callback_data="btn_strat_menu"),
             InlineKeyboardButton("🕒 Timeframe Selector", callback_data="btn_tf_menu"),
         ],
@@ -303,39 +305,9 @@ async def account_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **Total Signals:** `{total_sig}` | **Pending:** `{pending_sig}` | **Runners Active:** `{running_sig}` | **Alert-Only:** `{skipped}`\n"
         f"• 🎯 TP1: `{tp1_sig}` | 🚀 TP2: `{tp2_sig}` | 🔒 BE: `{be_sig}` | 🛡️ SL: `{sl_sig}`\n"
         f"• **Forward Win Rate:** `{wr_sig}%` (`{wins_sig}/{closed_sig}` closed signals)\n\n"
-        f"💡 _Tip: Use `/position` for open positions (dry/live), deal history, and metrics._"
     )
 
     await update.effective_message.reply_text(text, parse_mode="Markdown")
-
-
-@admin_only
-async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    counts = await asyncio.to_thread(get_signal_stats)   # blocking SQLite off the event loop
-    skipped = counts.get('SKIPPED', 0)
-    total_signals = sum(v for k, v in counts.items() if k != 'SKIPPED')
-    pending = counts.get('PENDING', 0)
-    running = counts.get('HIT_TP1', 0)
-    closed_tp1 = counts.get('CLOSED_TP1', 0)
-    tp2 = counts.get('HIT_TP2', 0)
-    be = counts.get('CLOSED_BE', 0)
-    sl = counts.get('HIT_SL', 0)
-
-    wins = closed_tp1 + tp2 + be
-    total_closed = wins + sl
-    win_rate = round((wins / total_closed * 100), 1) if total_closed > 0 else 0.0
-
-    reply = (
-        f"📊 **FORWARD-TESTING PERFORMANCE STATS**\n\n"
-        f"• **Total Signals:** `{total_signals}` | **Pending Entry:** `{pending}` | **Skipped (alert-only):** `{skipped}`\n"
-        f"• **Dual-Entry Runners (leg2 in flight):** `{running}` 🎯 *(open — not counted below)*\n"
-        f"• **Single-Entry TP1 Wins:** `{closed_tp1}` 🎯\n"
-        f"• **TP2 Hits (leg2):** `{tp2}` 🚀\n"
-        f"• **Break-Even Closes (leg2):** `{be}` 🔒\n"
-        f"• **Stop Loss Hits:** `{sl}` 🛡️\n\n"
-        f"📈 **Win Rate:** `{win_rate}%` (`{wins}/{total_closed}` closed trades)"
-    )
-    await update.effective_message.reply_text(reply, parse_mode="Markdown")
 
 
 @admin_only

@@ -240,7 +240,8 @@ def get_daily_performance_stats():
     }
 
 def get_open_dry_run_signals():
-    """Active signals that are running in dry-run or simulated paper mode."""
+    """Open simulated (dry-run) trades only: signals with at least one DRY leg still running.
+    Alert-only signals (exec_mode 'NONE') are NOT positions and are excluded."""
     with get_db_connection() as conn:
         rows = conn.execute(
             "SELECT id, timestamp, created_at, symbol, direction, entry_price, sl_price, "
@@ -248,8 +249,7 @@ def get_open_dry_run_signals():
             "       exec_mode, fill_price, ticket2, lots2, exec_mode2, fill_price2, be_moved2 "
             "FROM signals "
             "WHERE status IN ('PENDING', 'HIT_TP1') "
-            "  AND (exec_mode = 'DRY' OR exec_mode2 = 'DRY' "
-            "       OR (ticket IS NULL AND ticket2 IS NULL AND exec_mode != 'LIVE' AND exec_mode2 != 'LIVE')) "
+            "  AND (exec_mode = 'DRY' OR exec_mode2 = 'DRY') "
             "ORDER BY id ASC"
         ).fetchall()
         return [dict(r) for r in rows]
@@ -280,6 +280,39 @@ def get_open_executed_signals(exclude_id=None):
     query += " ORDER BY id ASC"
     with get_db_connection() as conn:
         return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+
+def get_dry_run_journal_signals():
+    """Every signal that owns at least one dry-run leg (open or closed). Alert-only
+    and SKIPPED signals never have exec_mode 'DRY', so they are excluded."""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, timestamp, updated_at, symbol, direction, entry_price, sl_price, "
+            "       tp1_price, tp2_price, score, status, dual_entry, "
+            "       lots, exec_mode, fill_price, lots2, exec_mode2, fill_price2 "
+            "FROM signals "
+            "WHERE status != 'SKIPPED' AND (exec_mode = 'DRY' OR exec_mode2 = 'DRY') "
+            "ORDER BY id ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_live_signal_links():
+    """Maps live position tickets back to the signal that opened them: {ticket: {id, leg, score}}."""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, score, ticket, ticket2, exec_mode, exec_mode2 FROM signals "
+            "WHERE (exec_mode = 'LIVE' AND ticket IS NOT NULL) "
+            "   OR (exec_mode2 = 'LIVE' AND ticket2 IS NOT NULL)"
+        ).fetchall()
+    links = {}
+    for r in rows:
+        if r["exec_mode"] == "LIVE" and r["ticket"]:
+            links[int(r["ticket"])] = {"id": r["id"], "leg": 1, "score": r["score"]}
+        if r["exec_mode2"] == "LIVE" and r["ticket2"]:
+            links[int(r["ticket2"])] = {"id": r["id"], "leg": 2, "score": r["score"]}
+    return links
+    
 
 def get_recent_trades_for_chart(limit=30, symbol=None):
     """Recent signals (open and closed) for overlaying on charts. Times are true UTC.

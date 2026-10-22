@@ -1,6 +1,6 @@
 from .core import (
     start_cmd, menu_cmd, enable_scanner, disable_scanner,
-    account_cmd, status_cmd, heartbeat_cmd, stats_cmd,
+    account_cmd, status_cmd, heartbeat_cmd,
 )
 from .trading import (
     trade_cmd, positions_cmd, close_cmd, breakeven_cmd,
@@ -13,17 +13,18 @@ from .settings import (
     set_cmd, set_timeframe, set_strategy_cmd,
     filters_cmd, watchlist_cmd,
 )
+from .journal import journal_cmd
 from .backtest import backtest_cmd
 from .optimize import optimize_cmd
 from .callbacks import handle_callback_query
 
 __all__ = [
     "start_cmd", "menu_cmd", "enable_scanner", "disable_scanner",
-    "account_cmd", "status_cmd", "heartbeat_cmd", "stats_cmd",
+    "account_cmd", "status_cmd", "heartbeat_cmd",
     "trade_cmd", "positions_cmd", "close_cmd", "breakeven_cmd",
     "gold_snapshot", "spread_check_cmd", "market_session",
     "diagnose_cmd", "news_calendar_cmd",
     "set_cmd", "set_timeframe", "set_strategy_cmd",
     "filters_cmd", "watchlist_cmd",
-    "backtest_cmd", "optimize_cmd", "handle_callback_query",
+    "journal_cmd", "backtest_cmd", "optimize_cmd", "handle_callback_query",
 ]

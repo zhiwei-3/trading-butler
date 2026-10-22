@@ -16,15 +16,7 @@ from trade_engine import (
 from ._common import admin_only, md_safe
 from .core import _money
 
-_POSITIONS_USAGE = (
-    "⚠️ **Usage:** `/position [all|dry|live|bot|manual]`\n\n"
-    "• `/position` — all open & running positions (dry-run & live)\n"
-    "• `/position dry` — show only running dry-run positions\n"
-    "• `/position live` — show only running live MT5 positions\n"
-    "• `/position bot` — show bot positions (live + dry-run)\n"
-    "• `/position manual` — show manual MT5 positions\n"
-    "• Aliases: `/position` or `/positions`"
-)
+
 _MAX_POSITION_ROWS = 12
 
 
@@ -91,62 +83,35 @@ def _fetch_dry_run_positions(curr="USD"):
             except Exception:
                 ticks[symbol] = None
         tick = ticks.get(symbol)
+        live_price = float(tick.bid if direction == "BUY" else tick.ask) if tick is not None else None
 
-        live_price = None
-        if tick is not None:
-            live_price = float(tick.bid if direction == "BUY" else tick.ask)
-
-        # Leg 1: active only when status is PENDING and not a live ticket
-        if status == "PENDING" and not (sig.get("exec_mode") == "LIVE" and sig.get("ticket")):
+        # Leg 1: only while PENDING and it was actually opened as a DRY leg
+        if status == "PENDING" and sig.get("exec_mode") == "DRY":
             entry = float(sig["fill_price"]) if sig.get("fill_price") else float(sig["entry_price"])
             lots = float(sig["lots"]) if sig.get("lots") else fixed_lot
-            sl = float(sig["sl_price"])
-            tp = float(sig["tp1_price"])
             pnl = _calc_pnl(symbol, direction, lots, entry, live_price) if live_price is not None else 0.0
             positions.append({
-                "signal_id": sig["id"],
-                "leg": 1,
-                "label": "TP1",
-                "symbol": symbol,
-                "direction": direction,
-                "volume": lots,
-                "price_open": entry,
-                "sl": sl,
-                "tp": tp,
-                "price_current": live_price,
-                "profit": pnl,
-                "is_be": False,
-                "status": status,
-                "score": sig.get("score"),
-                "timestamp": sig.get("timestamp") or sig.get("created_at"),
+                "signal_id": sig["id"], "leg": 1, "label": "TP1",
+                "symbol": symbol, "direction": direction, "volume": lots,
+                "price_open": entry, "sl": float(sig["sl_price"]), "tp": float(sig["tp1_price"]),
+                "price_current": live_price, "profit": pnl, "is_be": False,
             })
 
-        # Leg 2: active if dual_entry is True and not a live ticket
-        if dual and not (sig.get("exec_mode2") == "LIVE" and sig.get("ticket2")):
+        # Leg 2: only if it was actually opened as a DRY leg
+        if dual and sig.get("exec_mode2") == "DRY":
             entry2 = float(sig["fill_price2"]) if sig.get("fill_price2") else (
                 float(sig["fill_price"]) if sig.get("fill_price") else float(sig["entry_price"])
             )
             lots2 = float(sig["lots2"]) if sig.get("lots2") else fixed_lot
-            tp2 = float(sig["tp2_price"])
             is_be = (status == "HIT_TP1") or bool(sig.get("be_moved2"))
             sl2 = entry2 if is_be else float(sig["sl_price"])
             pnl2 = _calc_pnl(symbol, direction, lots2, entry2, live_price) if live_price is not None else 0.0
             positions.append({
-                "signal_id": sig["id"],
-                "leg": 2,
+                "signal_id": sig["id"], "leg": 2,
                 "label": "TP2 (Runner)" if is_be else "TP2",
-                "symbol": symbol,
-                "direction": direction,
-                "volume": lots2,
-                "price_open": entry2,
-                "sl": sl2,
-                "tp": tp2,
-                "price_current": live_price,
-                "profit": pnl2,
-                "is_be": is_be,
-                "status": status,
-                "score": sig.get("score"),
-                "timestamp": sig.get("timestamp") or sig.get("created_at"),
+                "symbol": symbol, "direction": direction, "volume": lots2,
+                "price_open": entry2, "sl": sl2, "tp": float(sig["tp2_price"]),
+                "price_current": live_price, "profit": pnl2, "is_be": is_be,
             })
 
     return positions
@@ -178,7 +143,7 @@ async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `/trade off` — disarm entirely\n"
             "• `/trade dry` — back to dry-run\n"
             "• `/trade live CONFIRM` — ⚠️ send **real orders**\n"
-            "• `/position` · `/close <ticket|all>`",
+            "• `/positions` · `/close <ticket|all>`",
             parse_mode="Markdown"
         )
         return
@@ -225,132 +190,57 @@ async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays only open and running positions of dry run and live trades."""
-    args = [a.lower() for a in (context.args or [])]
-
-    filter_mode = "ALL"
-    filter_map = {
-        "bot": "BOT",
-        "manual": "MANUAL",
-        "man": "MANUAL",
-        "dry": "DRY",
-        "dryrun": "DRY",
-        "sim": "DRY",
-        "paper": "DRY",
-        "live": "LIVE",
-        "all": "ALL",
-    }
-
-    if args:
-        sub = args[0]
-        if sub in filter_map:
-            filter_mode = filter_map[sub]
-        else:
-            await update.effective_message.reply_text(_POSITIONS_USAGE, parse_mode="Markdown")
-            return
-
-    curr, all_live, err = await asyncio.to_thread(_fetch_live_positions)
+    """Shows ONLY currently open/running positions: live MT5 + dry-run. No filters, no history."""
+    curr, live_positions, err = await asyncio.to_thread(_fetch_live_positions)
     magic = int(ALERT_STATE.get("magic_number", 770077))
+    dry_positions = await asyncio.to_thread(_fetch_dry_run_positions, curr)
 
-    include_live = filter_mode in ("ALL", "LIVE", "BOT", "MANUAL")
-    include_dry = filter_mode in ("ALL", "DRY", "BOT")
+    mt5_warning = f"⚠️ *MT5 Offline:* `{md_safe(err)}` — live positions unavailable.\n\n" if err else ""
+    total = len(live_positions) + len(dry_positions)
 
-    mt5_warning = ""
-    if err:
-        mt5_warning = f"⚠️ *MT5 Offline:* `{err}` — Live positions unavailable.\n\n"
-        live_positions = []
-    elif filter_mode == "BOT":
-        live_positions = [p for p in all_live if p.magic == magic]
-    elif filter_mode == "MANUAL":
-        live_positions = [p for p in all_live if p.magic != magic]
-    elif filter_mode == "DRY":
-        live_positions = []
-    else:  # ALL or LIVE
-        live_positions = all_live
-
-    if not include_live:
-        live_positions = []
-
-    dry_positions = []
-    if include_dry:
-        dry_positions = await asyncio.to_thread(_fetch_dry_run_positions, curr)
-
-    total_positions = len(live_positions) + len(dry_positions)
-
-    if total_positions == 0:
-        if filter_mode == "DRY":
-            pos_text = "_No open dry-run positions currently._"
-        elif filter_mode == "LIVE":
-            pos_text = "_No open live positions currently._"
-        elif filter_mode == "BOT":
-            pos_text = "_No open bot positions currently (live or dry-run)._"
-        elif filter_mode == "MANUAL":
-            pos_text = "_No open manual positions currently._"
-        else:
-            pos_text = "_No open or running positions currently (dry-run or live)._"
-    else:
-        sections = []
-        if include_live:
-            if live_positions:
-                live_lines = [f"🟢 **Live MT5 Positions ({len(live_positions)}):**"]
-                for p in live_positions[:_MAX_POSITION_ROWS]:
-                    side = "BUY 🟢" if p.type == mt5.POSITION_TYPE_BUY else "SELL 🔴"
-                    src = "🤖" if p.magic == magic else "🖐️"
-                    comment = f" `{md_safe(p.comment)}`" if p.comment else ""
-                    live_lines.append(
-                        f"• {src} `#{p.ticket}` {side} `{p.volume}` lots **{p.symbol}**{comment}\n"
-                        f"   Entry `${p.price_open:.2f}` ➔ Now `${p.price_current:.2f}` | "
-                        f"SL `${p.sl:.2f}` | TP `${p.tp:.2f}` | PnL: `{_money(p.profit, curr)}`"
-                    )
-                if len(live_positions) > _MAX_POSITION_ROWS:
-                    live_lines.append(f"   … and `{len(live_positions) - _MAX_POSITION_ROWS}` more")
-                total_live_float = sum(p.profit for p in live_positions)
-                live_lines.append(f"   └ **Live Floating PnL:** `{_money(total_live_float, curr)}`")
-                sections.append("\n".join(live_lines))
-            elif include_dry and dry_positions:
-                sections.append("🟢 **Live MT5 Positions:** _None active._")
-
-        if include_dry:
-            if dry_positions:
-                dry_lines = [f"🧪 **Dry-Run Positions ({len(dry_positions)}):**"]
-                for dp in dry_positions[:_MAX_POSITION_ROWS]:
-                    side = "BUY 🟢" if dp["direction"] == "BUY" else "SELL 🔴"
-                    be_note = " 🔒[BE]" if dp.get("is_be") else ""
-                    now_str = f"${dp['price_current']:.2f}" if dp.get("price_current") is not None else "N/A"
-                    pnl_str = _money(dp["profit"], curr) if dp.get("price_current") is not None else "N/A"
-                    dry_lines.append(
-                        f"• 🧪 `[DRY] #{dp['signal_id']} Leg {dp['leg']} ({dp['label']})` {side} `{dp['volume']}` lots **{dp['symbol']}**{be_note}\n"
-                        f"   Entry `${dp['price_open']:.2f}` ➔ Now `{now_str}` | "
-                        f"SL `${dp['sl']:.2f}` | TP `${dp['tp']:.2f}` | PnL: `{pnl_str}`"
-                    )
-                if len(dry_positions) > _MAX_POSITION_ROWS:
-                    dry_lines.append(f"   … and `{len(dry_positions) - _MAX_POSITION_ROWS}` more")
-                total_dry_float = sum(dp["profit"] for dp in dry_positions if dp.get("price_current") is not None)
-                dry_lines.append(f"   └ **Dry-Run Floating PnL:** `{_money(total_dry_float, curr)}`")
-                sections.append("\n".join(dry_lines))
-            elif include_live and live_positions:
-                sections.append("🧪 **Dry-Run Positions:** _None active._")
-
-        # Summary total if both live and dry exist
-        if live_positions and dry_positions:
-            total_live_float = sum(p.profit for p in live_positions)
-            total_dry_float = sum(dp["profit"] for dp in dry_positions if dp.get("price_current") is not None)
-            sections.append(
-                f"📊 **Combined Floating:** `{_money(total_live_float, curr)}` (Live) | "
-                f"`{_money(total_dry_float, curr)}` (Dry-Run)"
+    sections = []
+    if live_positions:
+        lines = [f"🟢 **Live MT5 Positions ({len(live_positions)}):**"]
+        for p in live_positions[:_MAX_POSITION_ROWS]:
+            side = "BUY 🟢" if p.type == mt5.POSITION_TYPE_BUY else "SELL 🔴"
+            src = "🤖" if p.magic == magic else "🖐️"
+            comment = f" `{md_safe(p.comment)}`" if p.comment else ""
+            lines.append(
+                f"• {src} `#{p.ticket}` {side} `{p.volume}` lots **{p.symbol}**{comment}\n"
+                f"   Entry `${p.price_open:.2f}` ➔ Now `${p.price_current:.2f}` | "
+                f"SL `${p.sl:.2f}` | TP `${p.tp:.2f}` | PnL: `{_money(p.profit, curr)}`"
             )
+        if len(live_positions) > _MAX_POSITION_ROWS:
+            lines.append(f"   … and `{len(live_positions) - _MAX_POSITION_ROWS}` more")
+        lines.append(f"   └ **Live Floating PnL:** `{_money(sum(p.profit for p in live_positions), curr)}`")
+        sections.append("\n".join(lines))
 
-        pos_text = "\n\n".join(sections)
+    if dry_positions:
+        lines = [f"🧪 **Dry-Run Positions ({len(dry_positions)}):**"]
+        for dp in dry_positions[:_MAX_POSITION_ROWS]:
+            side = "BUY 🟢" if dp["direction"] == "BUY" else "SELL 🔴"
+            be_note = " 🔒[BE]" if dp.get("is_be") else ""
+            has_px = dp.get("price_current") is not None
+            now_str = f"${dp['price_current']:.2f}" if has_px else "N/A"
+            pnl_str = _money(dp["profit"], curr) if has_px else "N/A"
+            lines.append(
+                f"• `[DRY] #{dp['signal_id']} Leg {dp['leg']} ({dp['label']})` {side} "
+                f"`{dp['volume']}` lots **{dp['symbol']}**{be_note}\n"
+                f"   Entry `${dp['price_open']:.2f}` ➔ Now `{now_str}` | "
+                f"SL `${dp['sl']:.2f}` | TP `${dp['tp']:.2f}` | PnL: `{pnl_str}`"
+            )
+        if len(dry_positions) > _MAX_POSITION_ROWS:
+            lines.append(f"   … and `{len(dry_positions) - _MAX_POSITION_ROWS}` more")
+        dry_float = sum(dp["profit"] for dp in dry_positions if dp.get("price_current") is not None)
+        lines.append(f"   └ **Dry-Run Floating PnL:** `{_money(dry_float, curr)}`")
+        sections.append("\n".join(lines))
 
-    filter_tag = f" `[{filter_mode}]`" if filter_mode != "ALL" else ""
-    text = (
-        f"💼 **OPEN & RUNNING POSITIONS ({total_positions})**{filter_tag}\n\n"
-        f"{mt5_warning}"
-        f"{pos_text}\n\n"
-        f"💡 _Filter with `/position dry`, `/position live`, `/position bot`, `/position manual`._"
+    body = "\n\n".join(sections) if sections else "_No open or running positions (live or dry-run)._"
+
+    await update.effective_message.reply_text(
+        f"💼 **OPEN & RUNNING POSITIONS ({total})**\n\n{mt5_warning}{body}",
+        parse_mode="Markdown"
     )
-
-    await update.effective_message.reply_text(text, parse_mode="Markdown")
 
 
 @admin_only

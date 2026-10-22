@@ -9,7 +9,7 @@ from database import init_db
 from mt5_engine import init_mt5
 from bot.commands import (
     start_cmd, menu_cmd, handle_callback_query,
-    enable_scanner, disable_scanner, account_cmd, stats_cmd,
+    enable_scanner, disable_scanner, account_cmd, journal_cmd,
     news_calendar_cmd, spread_check_cmd, gold_snapshot, market_session,
     set_cmd, set_timeframe, set_strategy_cmd, filters_cmd, watchlist_cmd,
     trade_cmd, positions_cmd, close_cmd, breakeven_cmd,
@@ -36,7 +36,7 @@ async def post_init_setup(application: Application) -> None:
         BotCommand("start", "🤵‍♂️ Show Quick Command Guide"),
         BotCommand("menu", "🎛️ Interactive Control Dashboard"),
         BotCommand("account", "💳 Executive Capital & Margin Health"),
-        BotCommand("stats", "📊 Forward-Test Signal Stats"),
+        BotCommand("journal", "📓 Trade Journal (Manual, Dry-Run & Live)"),
         BotCommand("scanner_on", "🟢 Activate Market Scanner"),
         BotCommand("scanner_off", "🔴 Deactivate Market Scanner"),
         BotCommand("trade", "🤖 Arm / Disarm Live Execution"),
@@ -101,8 +101,8 @@ def main():
     # Register All Command Handlers
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
-    app.add_handler(CommandHandler(["account", "balance", "pnl"], account_cmd))
-    app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_handler(CommandHandler("account", account_cmd))
+    app.add_handler(CommandHandler("journal", journal_cmd))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(CommandHandler("scanner_on", enable_scanner))
     app.add_handler(CommandHandler("scanner_off", disable_scanner))

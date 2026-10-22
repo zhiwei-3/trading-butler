@@ -6,6 +6,7 @@ from config import ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, save_settin
 from ._common import admin_only
 from .core import menu_cmd, enable_scanner, disable_scanner, account_cmd
 from .trading import positions_cmd
+from .journal import journal_cmd, journal_callback
 from .market import gold_snapshot, spread_check_cmd
 
 
@@ -20,9 +21,14 @@ def _reset_dedup():
 @admin_only
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-
     data = query.data
+
+    # Journal buttons answer the query themselves (alerts / "rendering…" toasts).
+    if data.startswith(("j:", "jc:", "jn")):
+        await journal_callback(update, context)
+        return
+
+    await query.answer()
 
     try:
         if data == "btn_scanner_on":
@@ -35,6 +41,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await spread_check_cmd(update, context)
         elif data == "btn_account":
             await account_cmd(update, context)
+        elif data == "btn_journal":
+            await journal_cmd(update, context)
         elif data == "btn_positions":
             await positions_cmd(update, context)
         elif data == "btn_strat_menu":
