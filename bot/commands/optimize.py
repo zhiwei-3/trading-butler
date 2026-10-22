@@ -113,11 +113,10 @@ async def _optimize_view(update: Update, args, chat_id):
 
     if sort_key:
         spec = SORT_FIELDS[sort_key]
-        rows = sorted(
-            rows,
-            key=lambda r: (r.get(spec["column"]) if r.get(spec["column"]) is not None else float("-inf")),
-            reverse=spec["reverse"],
-        )
+        col = spec["column"]
+        present = [r for r in rows if r.get(col) is not None]
+        missing = [r for r in rows if r.get(col) is None]
+        rows = sorted(present, key=lambda r: r[col], reverse=spec["reverse"]) + missing
         rank_label = spec["label"]
     else:
         rank_label = "Net R ÷ Max Drawdown (risk-adjusted)" if run["rank_mode"] == "calmar" \
@@ -329,6 +328,8 @@ async def _optimize_apply(update: Update, args, chat_id):
         tf_note = f"\n• **Timeframe:** `{old['timeframe_mode']}` ➡️ `{sweep_mode}` *(matches the backtest this result came from)*"
 
     ALERT_STATE["last_rsi_signal"] = None
+    ALERT_STATE["last_ifvg_signal"] = None
+    ALERT_STATE["last_watch_signal"] = None
     save_settings()
 
     await update.effective_message.reply_text(

@@ -11,7 +11,7 @@ from mt5_engine import get_gold_symbol, get_tick
 from news_engine import fetch_economic_events
 from strategy.evaluator import analyze_market
 from strategy.chart import generate_chart_snapshot
-from ._common import admin_only
+from ._common import admin_only, md_safe
 
 
 # ---------------------------------------------------------------- /news helpers
@@ -146,9 +146,9 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title = _news_md_escape(ev.get("title", "N/A"))
             ev_imp = str(ev.get("impact", "")).strip().lower()
             badge = _NEWS_IMPACT_EMOJI.get(ev_imp, "⚪")
-            forecast = str(ev.get("forecast", "") or "").strip()
-            prev = str(ev.get("previous", "") or "").strip()
-            actual = str(ev.get("actual", "") or "").strip()
+            forecast = _news_md_escape(str(ev.get("forecast", "") or "").strip())
+            prev = _news_md_escape(str(ev.get("previous", "") or "").strip())
+            actual = _news_md_escape(str(ev.get("actual", "") or "").strip())
 
             details = []
             if actual:
@@ -204,7 +204,7 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /gold command and menu button callbacks."""
     symbol = await asyncio.to_thread(get_gold_symbol) or "XAUUSD"
 
-    await update.effective_message.reply_chat_action("upload_photo")
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
     analysis = await asyncio.to_thread(analyze_market, symbol)
 
     if not analysis:
@@ -272,7 +272,7 @@ async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{'⚡ **HIGH VOLATILITY OVERLAP! (London + NY)**' if london_ny_overlap else ''}"
         f"{'😴 **ASIAN CONSOLIDATION PHASE (Low Volatility for Gold)**' if asian_session and not (london or ny) else ''}"
     )
-    await update.message.reply_text(reply, parse_mode="Markdown")
+    await update.effective_message.reply_text(reply, parse_mode="Markdown")
 
 
 @admin_only

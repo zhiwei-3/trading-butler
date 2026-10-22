@@ -5,6 +5,7 @@ import asyncio
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 import MetaTrader5 as mt5
+from telegram.error import BadRequest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
@@ -174,7 +175,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/status` - Full Bot Health Check\n\n"
         "**🤖 Trade Execution**\n"
         "• `/trade` - Arm/Disarm Live Execution (Dry/Live)\n"
-        "• `/positions [period]` - Positions, Trade Journal & Closed Deal History\n"
+        "• `/positions [period]` - Open Positions (Dry/Live), Trade Journal & Metrics\n"
         "• `/close <ticket|all>` - Close Position or Flatten All\n"
         "• `/breakeven <ticket>` - Trail SL to Entry Price\n\n"
         "**📊 Market Analysis**\n"
@@ -234,7 +235,11 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
     else:
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
@@ -298,10 +303,39 @@ async def account_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **Total Signals:** `{total_sig}` | **Pending:** `{pending_sig}` | **Runners Active:** `{running_sig}` | **Alert-Only:** `{skipped}`\n"
         f"• 🎯 TP1: `{tp1_sig}` | 🚀 TP2: `{tp2_sig}` | 🔒 BE: `{be_sig}` | 🛡️ SL: `{sl_sig}`\n"
         f"• **Forward Win Rate:** `{wr_sig}%` (`{wins_sig}/{closed_sig}` closed signals)\n\n"
-        f"💡 _Tip: Use `/positions` for open trade details, deal history, and execution metrics._"
+        f"💡 _Tip: Use `/position` for open positions (dry/live), deal history, and metrics._"
     )
 
     await update.effective_message.reply_text(text, parse_mode="Markdown")
+
+
+@admin_only
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    counts = await asyncio.to_thread(get_signal_stats)   # blocking SQLite off the event loop
+    skipped = counts.get('SKIPPED', 0)
+    total_signals = sum(v for k, v in counts.items() if k != 'SKIPPED')
+    pending = counts.get('PENDING', 0)
+    running = counts.get('HIT_TP1', 0)
+    closed_tp1 = counts.get('CLOSED_TP1', 0)
+    tp2 = counts.get('HIT_TP2', 0)
+    be = counts.get('CLOSED_BE', 0)
+    sl = counts.get('HIT_SL', 0)
+
+    wins = closed_tp1 + tp2 + be
+    total_closed = wins + sl
+    win_rate = round((wins / total_closed * 100), 1) if total_closed > 0 else 0.0
+
+    reply = (
+        f"📊 **FORWARD-TESTING PERFORMANCE STATS**\n\n"
+        f"• **Total Signals:** `{total_signals}` | **Pending Entry:** `{pending}` | **Skipped (alert-only):** `{skipped}`\n"
+        f"• **Dual-Entry Runners (leg2 in flight):** `{running}` 🎯 *(open — not counted below)*\n"
+        f"• **Single-Entry TP1 Wins:** `{closed_tp1}` 🎯\n"
+        f"• **TP2 Hits (leg2):** `{tp2}` 🚀\n"
+        f"• **Break-Even Closes (leg2):** `{be}` 🔒\n"
+        f"• **Stop Loss Hits:** `{sl}` 🛡️\n\n"
+        f"📈 **Win Rate:** `{win_rate}%` (`{wins}/{total_closed}` closed trades)"
+    )
+    await update.effective_message.reply_text(reply, parse_mode="Markdown")
 
 
 @admin_only
@@ -362,32 +396,3 @@ async def heartbeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔴 Heartbeat **OFF**", parse_mode="Markdown")
     else:
         await update.message.reply_text("⚠️ **Unknown option.** Usage: `/heartbeat on|off|test`", parse_mode="Markdown")
-
-
-@admin_only
-async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    counts = get_signal_stats()
-    skipped = counts.get('SKIPPED', 0)
-    total_signals = sum(v for k, v in counts.items() if k != 'SKIPPED')
-    pending = counts.get('PENDING', 0)
-    running = counts.get('HIT_TP1', 0)
-    closed_tp1 = counts.get('CLOSED_TP1', 0)
-    tp2 = counts.get('HIT_TP2', 0)
-    be = counts.get('CLOSED_BE', 0)
-    sl = counts.get('HIT_SL', 0)
-
-    wins = closed_tp1 + tp2 + be
-    total_closed = wins + sl
-    win_rate = round((wins / total_closed * 100), 1) if total_closed > 0 else 0.0
-
-    reply = (
-        f"📊 **FORWARD-TESTING PERFORMANCE STATS**\n\n"
-        f"• **Total Signals:** `{total_signals}` | **Pending Entry:** `{pending}` | **Skipped (alert-only):** `{skipped}`\n"
-        f"• **Dual-Entry Runners (leg2 in flight):** `{running}` 🎯 *(open — not counted below)*\n"
-        f"• **Single-Entry TP1 Wins:** `{closed_tp1}` 🎯\n"
-        f"• **TP2 Hits (leg2):** `{tp2}` 🚀\n"
-        f"• **Break-Even Closes (leg2):** `{be}` 🔒\n"
-        f"• **Stop Loss Hits:** `{sl}` 🛡️\n\n"
-        f"📈 **Win Rate:** `{win_rate}%` (`{wins}/{total_closed}` closed trades)"
-    )
-    await update.effective_message.reply_text(reply, parse_mode="Markdown")

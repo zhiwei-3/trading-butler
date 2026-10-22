@@ -1,3 +1,4 @@
+import math
 import logging
 import asyncio
 from telegram import Update
@@ -9,21 +10,33 @@ from strategy.backtester import run_backtest, generate_equity_chart
 from ._common import admin_only
 
 
+def _finite(val_str, lo=None, hi=None, lo_open=False):
+    v = float(val_str)
+    if not math.isfinite(v):
+        raise ValueError("not finite")
+    if lo is not None and (v < lo or (lo_open and v == lo)):
+        raise ValueError(f"must be above {lo}")
+    if hi is not None and v > hi:
+        raise ValueError(f"must be at most {hi}")
+    return v
+
+
 def _parse_rsi_pair(val_str):
     """Accepts '30/65' or '30,65'. Returns (buy, sell) floats or raises ValueError."""
     sep = "/" if "/" in val_str else ","
     parts = [p.strip() for p in val_str.split(sep) if p.strip()]
     if len(parts) != 2:
         raise ValueError("RSI override needs two numbers, e.g. rsi=30/65")
-    return float(parts[0]), float(parts[1])
+    buy, sell = _finite(parts[0], 1, 99), _finite(parts[1], 1, 99)
+    if buy >= sell:
+        raise ValueError("buy RSI must be lower than sell RSI")
+    return buy, sell
 
 
 def _parse_backtest_overrides(tokens):
     """
     Parses key=value override tokens for a one-off /backtest run. These are NEVER
-    written to ALERT_STATE/settings.json — they exist only for the duration of
-    this single backtest call, so testing a hypothesis never requires a /set
-    round-trip (and can't accidentally leave live scanning on a test value).
+    written to ALERT_STATE/settings.json — they exist only for this single call.
 
     Returns (overrides_dict, display_dict, error_str_or_None).
     """
@@ -52,15 +65,11 @@ def _parse_backtest_overrides(tokens):
         val_str = raw_val.strip()
         try:
             if key == "min_confluence_score":
-                overrides["min_confluence_score"] = int(float(val_str))
+                overrides["min_confluence_score"] = int(_finite(val_str, 0, 100))
             elif key == "min_rrr":
-                overrides["min_rrr"] = float(val_str)
-            elif key == "sl_atr_mult":
-                overrides["sl_atr_mult"] = float(val_str)
-            elif key == "tp1_atr_mult":
-                overrides["tp1_atr_mult"] = float(val_str)
-            elif key == "tp2_atr_mult":
-                overrides["tp2_atr_mult"] = float(val_str)
+                overrides["min_rrr"] = _finite(val_str, 0, 20, lo_open=True)
+            elif key in ("sl_atr_mult", "tp1_atr_mult", "tp2_atr_mult"):
+                overrides[key] = _finite(val_str, 0, 20, lo_open=True)
             elif key == "strategy_name":
                 strat = val_str.lower()
                 if strat not in STRATEGY_PRESETS:
@@ -69,8 +78,8 @@ def _parse_backtest_overrides(tokens):
             elif key == "rsi_pair":
                 buy, sell = _parse_rsi_pair(val_str)
                 overrides["rsi_buy_threshold"], overrides["rsi_sell_threshold"] = buy, sell
-        except ValueError:
-            return None, None, f"Invalid value `{val_str}` for `{raw_key}`."
+        except ValueError as e:
+            return None, None, f"Invalid value `{val_str}` for `{raw_key}` ({e})."
         display[raw_key.lower()] = val_str
 
     return overrides, display, None

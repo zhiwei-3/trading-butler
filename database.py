@@ -239,6 +239,21 @@ def get_daily_performance_stats():
         "today_losses": today_losses,
     }
 
+def get_open_dry_run_signals():
+    """Active signals that are running in dry-run or simulated paper mode."""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, timestamp, created_at, symbol, direction, entry_price, sl_price, "
+            "       tp1_price, tp2_price, score, status, dual_entry, ticket, lots, "
+            "       exec_mode, fill_price, ticket2, lots2, exec_mode2, fill_price2, be_moved2 "
+            "FROM signals "
+            "WHERE status IN ('PENDING', 'HIT_TP1') "
+            "  AND (exec_mode = 'DRY' OR exec_mode2 = 'DRY' "
+            "       OR (ticket IS NULL AND ticket2 IS NULL AND exec_mode != 'LIVE' AND exec_mode2 != 'LIVE')) "
+            "ORDER BY id ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
 def get_active_live_signals():
     """Active signals that own live tickets, oldest first."""
     with get_db_connection() as conn:
