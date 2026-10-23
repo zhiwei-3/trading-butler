@@ -69,10 +69,6 @@ def main():
         return
 
     init_db()
-    if ALERT_STATE.get("auto_trade_enabled") and not ALERT_STATE.get("trade_dry_run", True):
-        ALERT_STATE["trade_dry_run"] = True
-        save_settings()
-        print("⚠️ Live execution reset to DRY-RUN on startup. Re-arm with /trade live CONFIRM.")
 
     app = (
         Application.builder()

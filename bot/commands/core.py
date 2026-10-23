@@ -26,7 +26,7 @@ _HISTORY_START = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
 def _parse_period(args):
     """
-    /account or /positions -> today (since 00:00 UTC)
+    /account, /positions, or /journal -> today (since 00:00 UTC)
     today|week|month|all
     7d | 7 -> rolling N days (1..365)
     """
@@ -173,10 +173,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/account [period]` - Executive Capital & Margin Health Snapshot\n"
         "• `/scanner_on` / `/scanner_off` - Toggle Market Scanner\n"
         "• `/status` - Full Bot Health Check\n\n"
-        "**🤖 Trade Execution**\n"
+        "**🤖 Trade Execution & History**\n"
         "• `/trade` - Arm/Disarm Live Execution (Dry/Live)\n"
         "• `/positions` - Open Running Positions (Live + Dry-Run)\n"
-        "• `/journal` - Trade Journal dashboard (buttons + chart; `/journal help` for shortcuts)\n"
+        "• `/journal [period]` - Interactive Trade Journal & Closed Deal Analytics\n"
         "• `/close <ticket|all>` - Close Position or Flatten All\n"
         "• `/breakeven <ticket>` - Trail SL to Entry Price\n\n"
         "**📊 Market Analysis**\n"
@@ -225,7 +225,7 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("💳 Account", callback_data="btn_account"),
-            InlineKeyboardButton("📑 Positions", callback_data="btn_positions"),
+            InlineKeyboardButton("💼 Positions", callback_data="btn_positions"),
             InlineKeyboardButton("📓 Journal", callback_data="btn_journal"),
         ],
         [
@@ -305,6 +305,7 @@ async def account_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **Total Signals:** `{total_sig}` | **Pending:** `{pending_sig}` | **Runners Active:** `{running_sig}` | **Alert-Only:** `{skipped}`\n"
         f"• 🎯 TP1: `{tp1_sig}` | 🚀 TP2: `{tp2_sig}` | 🔒 BE: `{be_sig}` | 🛡️ SL: `{sl_sig}`\n"
         f"• **Forward Win Rate:** `{wr_sig}%` (`{wins_sig}/{closed_sig}` closed signals)\n\n"
+        f"💡 _Tip: Use `/positions` for open trades and `/journal` for deal history & analytics._"
     )
 
     await update.effective_message.reply_text(text, parse_mode="Markdown")

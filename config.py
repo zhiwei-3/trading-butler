@@ -101,8 +101,8 @@ ALERT_STATE = {
     "consecutive_mt5_failures": 0,
 
     # === LIVE TRADE EXECUTION ===
-    "auto_trade_enabled": False,        # master switch — bot places orders
-    "trade_dry_run": True,              # build+log the request, never send it
+    "auto_trade_enabled": True,        # master switch — bot places orders
+    "trade_dry_run": False,              # build+log the request, never send it
     "magic_number": 770077,             # bot only ever touches its own positions
     "max_slippage_points": 30,          # 'deviation' passed to order_send
     "max_daily_trades": 5,              # hard cap on live fills (tickets) per UTC day
