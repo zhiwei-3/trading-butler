@@ -33,7 +33,7 @@ def _parse_period(args):
     now = datetime.now(timezone.utc)
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if not args:
-        return midnight, "Today (UTC)", False
+        return _HISTORY_START, "All Time", True
 
     arg = args[0].lower().strip()
     if arg in ("today", "1d"):
@@ -70,6 +70,9 @@ def _fetch_account_data():
         positions = mt5.positions_get()
 
     trades, deposits, withdrawals = [], 0.0, 0.0
+    # Commission/fee is often charged on the OPENING deal. Carry it onto the closing
+    # deal so per-trade P&L matches /journal (which sums every deal of a position).
+    entry_cost = defaultdict(float)
     for d in (deals or []):
         if d.type == mt5.DEAL_TYPE_BALANCE:
             if d.profit > 0:
@@ -77,8 +80,12 @@ def _fetch_account_data():
             else:
                 withdrawals += -d.profit
             continue
-        if d.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_INOUT, mt5.DEAL_ENTRY_OUT_BY) \
-                and d.type in (mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL):
+        if d.type not in (mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL):
+            continue
+        cost = d.commission + getattr(d, "fee", 0.0)
+        if d.entry == mt5.DEAL_ENTRY_IN:
+            entry_cost[d.position_id] += cost
+        elif d.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_INOUT, mt5.DEAL_ENTRY_OUT_BY):
             trades.append({
                 "ticket": d.ticket,
                 "time": datetime.fromtimestamp(d.time - offset_s, tz=timezone.utc),
@@ -86,7 +93,7 @@ def _fetch_account_data():
                 "type": "SELL" if d.type == mt5.DEAL_TYPE_BUY else "BUY",
                 "volume": d.volume,
                 "price": d.price,
-                "net_pnl": d.profit + d.swap + d.commission,
+                "net_pnl": d.profit + d.swap + cost + entry_cost.pop(d.position_id, 0.0),
                 "is_bot": d.magic == magic,
             })
     trades.sort(key=lambda t: t["time"])

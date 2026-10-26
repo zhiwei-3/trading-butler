@@ -241,6 +241,9 @@ def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, b
     signal_id = log_signal_to_db(symbol, direction, close_price, sl_price, tp1_price, tp2_price, score,
                                  dual_entry=dual, near_zone=a.get("near_zone"))
 
+    if signal_id is None and ALERT_STATE.get("auto_trade_enabled") and not blocker:
+        blocker = "the signal could not be logged to the database, so no untracked trade will be opened."
+
     if blocker:
         # Alert only — no order, and keep it out of the outcome tracker / stats.
         if signal_id:

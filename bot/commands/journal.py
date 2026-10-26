@@ -39,7 +39,7 @@ for _name, _label in (("DEAL_REASON_SL", "SL"), ("DEAL_REASON_TP", "TP"), ("DEAL
 #   sort   : r newest | o oldest | b best | w worst
 
 _FIELDS = ("period", "side", "result", "origin", "sort", "page")
-_DEFAULT = {"period": "w", "side": "a", "result": "a", "origin": "a", "sort": "r", "page": 1}
+_DEFAULT = {"period": "a", "side": "a", "result": "a", "origin": "a", "sort": "r", "page": 1}
 _VALID = {
     "side": {"a", "B", "S"},
     "result": {"a", "W", "L", "E", "O"},

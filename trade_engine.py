@@ -50,7 +50,7 @@ _PENDING_INTENTS = []
 _FILLING_CACHE = {}   # symbol -> filling mode that the broker actually accepted
 
 _EXEC_LOCK = threading.Lock()      # serialises check-and-open so two drains can never interleave
-_LAST_FILL_AT = 0.0                # monotonic time of the last real fill
+_LAST_FILL_AT = float("-inf")      # monotonic time of the last real fill
 _FILL_COOLDOWN_S = 20              # block new trade ideas this long after any fill
 
 _RC_INVALID_FILL = getattr(mt5, "TRADE_RETCODE_INVALID_FILL", 10030)
@@ -96,6 +96,9 @@ def _fixed_lot():
 def request_execution(signal_id, symbol, direction, entry, sl_price, tp1_price, tp2_price, score, dual_entry=False):
     """Called by the strategy layer. Queues an intent; never touches MT5 itself."""
     if not ALERT_STATE.get("auto_trade_enabled", False):
+        return False
+    if not signal_id:
+        logging.error("request_execution: signal was not logged to the DB — refusing to open an untracked trade.")
         return False
     with _INTENT_LOCK:
         _PENDING_INTENTS.append({
@@ -381,8 +384,8 @@ def modify_position_sltp(ticket, sl=None, tp=None):
     direction = "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL"
     ref_price = tick.bid if direction == "BUY" else tick.ask
     adj_sl, adj_tp = _adjust_levels(info, direction, ref_price,
-                                    sl if sl is not None else pos.sl or None,
-                                    tp if tp is not None else pos.tp or None)
+                                    sl if sl is not None else (pos.sl or None),
+                                    tp if tp is not None else (pos.tp or None))
 
     request = {
         "action": mt5.TRADE_ACTION_SLTP,
@@ -394,6 +397,9 @@ def modify_position_sltp(ticket, sl=None, tp=None):
     }
     with MT5_LOCK:
         result = mt5.order_send(request)
+        err = mt5.last_error() if result is None else None
+    if result is None:
+        return {"ok": False, "reason": f"order_send returned None ({err})."}
     if result.retcode == mt5.TRADE_RETCODE_DONE:
         return {"ok": True, "sl": adj_sl, "tp": adj_tp, "reason": "SL/TP updated."}
     if result.retcode == getattr(mt5, "TRADE_RETCODE_NO_CHANGES", 10025):
@@ -502,12 +508,6 @@ def reconcile_exit(ticket, candidates):
     If `ticket`'s position is closed, classify the outcome by which known price
     level (candidates: {label: price}) the FINAL exit deal landed closest to.
 
-    BUGFIX (vs. an earlier profit-sum approach): summing profit across every
-    deal on a ticket misclassifies a leg whenever more than one exit deal exists
-    on it (e.g. a broker-side partial fill quirk). Comparing the *last* exit
-    deal's actual price against the known SL/TP/BE levels is robust regardless
-    of how many deals make up the position's history.
-
     Returns the matching label, or None if the position is still open or no
     deal history is available yet.
     """
@@ -517,12 +517,13 @@ def reconcile_exit(ticket, candidates):
         with MT5_LOCK:
             deals = mt5.history_deals_get(position=int(ticket))
         if not deals:
+            # history_deals_get() can't combine a date range with position=, so
+            # pull a date window and filter. The window ends +1 day so it covers
+            # broker-server timestamps that run ahead of UTC.
+            now = datetime.now(timezone.utc)
             with MT5_LOCK:
-                deals = mt5.history_deals_get(
-                    datetime.now(timezone.utc) - timedelta(days=7),
-                    datetime.now(timezone.utc) + timedelta(minutes=5),
-                    position=int(ticket),
-                )
+                window = mt5.history_deals_get(now - timedelta(days=8), now + timedelta(days=1))
+            deals = [d for d in (window or []) if int(d.position_id) == int(ticket)]
     except Exception as e:
         logging.warning(f"Deal history lookup failed for #{ticket}: {e}")
         return None

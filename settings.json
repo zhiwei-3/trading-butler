@@ -21,7 +21,7 @@
     "ifvg_sl_buffer_atr": 0.25,
     "ifvg_max_sl_atr": 3.0,
     "ifvg_fallback_rr": 3.0,
-    "broker_utc_offset_hours": 3,
+    "broker_utc_offset_hours": 2,
     "setup_forming_enabled": true,
     "watch_rsi_margin": 5.0,
     "heartbeat_enabled": true,

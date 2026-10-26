@@ -9,7 +9,7 @@ import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
-from mt5_engine import MT5_LOCK
+from mt5_engine import MT5_LOCK, get_broker_utc_offset_seconds
 from strategy.smc import (
     find_swing_points, detect_market_structure,
     detect_liquidity_sweeps, detect_fvg, detect_order_block,
@@ -283,7 +283,11 @@ def _prepare_history(symbol, days, timeframe_mode):
         return {"error": f"Unknown timeframe mode '{mode}'"}
     preset = TIMEFRAME_PRESETS[mode]
 
-    end = datetime.now(timezone.utc)
+    # MT5 candle timestamps are broker-SERVER time (epoch labelled as UTC), so the
+    # request window must be expressed in server time too. Using true UTC here cut
+    # the most recent <offset> hours off every backtest.
+    offset = timedelta(seconds=get_broker_utc_offset_seconds())
+    end = datetime.now(timezone.utc) + offset
     start = end - timedelta(days=days)
     warmup_days = max(
         10, days // 4,
