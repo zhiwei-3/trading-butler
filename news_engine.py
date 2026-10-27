@@ -328,7 +328,7 @@ async def check_news_blockade():
 
         if block_start <= now_utc <= block_end:
             title = ev.get("title", "USD News Event")
-            event_time_str = event_dt.strftime("%H:%M UTC")
+            event_time_str = event_dt.astimezone().strftime("%H:%M %Z")
             reason = f"{ev_impact.upper()} Impact: {title} @ {event_time_str}"
             return True, reason
 

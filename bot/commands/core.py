@@ -3,7 +3,7 @@
 import logging
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time as dtime
 import MetaTrader5 as mt5
 from telegram.error import BadRequest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -26,18 +26,19 @@ _HISTORY_START = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
 def _parse_period(args):
     """
-    /account, /positions, or /journal -> today (since 00:00 UTC)
+    /account, /positions, or /journal -> all time
     today|week|month|all
     7d | 7 -> rolling N days (1..365)
+    "Today" starts at 00:00 in the PC's local timezone.
     """
-    now = datetime.now(timezone.utc)
-    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    now = datetime.now().astimezone()
+    midnight = datetime.combine(now.date(), dtime.min).astimezone()   # local midnight (DST-correct)
     if not args:
         return _HISTORY_START, "All Time", True
 
     arg = args[0].lower().strip()
     if arg in ("today", "1d"):
-        return midnight, "Today (UTC)", False
+        return midnight, "Today", False
     if arg in ("week", "7d"):
         return now - timedelta(days=7), "Last 7 Days", False
     if arg in ("month", "30d"):
@@ -88,7 +89,7 @@ def _fetch_account_data():
         elif d.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_INOUT, mt5.DEAL_ENTRY_OUT_BY):
             trades.append({
                 "ticket": d.ticket,
-                "time": datetime.fromtimestamp(d.time - offset_s, tz=timezone.utc),
+                "time": datetime.fromtimestamp(d.time - offset_s, tz=timezone.utc).astimezone(),
                 "symbol": d.symbol,
                 "type": "SELL" if d.type == mt5.DEAL_TYPE_BUY else "BUY",
                 "volume": d.volume,
@@ -260,8 +261,8 @@ async def account_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if since_utc is None:
         await update.effective_message.reply_text(
             "⚠️ **Usage:** `/account [period]`\n\n"
-            "• `/account` — today (since 00:00 UTC)\n"
-            "• `/account week` · `/account month` · `/account 14d` · `/account all`",
+            "• `/account` — all time\n"
+            "• `/account today` · `/account week` · `/account month` · `/account 14d`",
             parse_mode="Markdown"
         )
         return

@@ -254,6 +254,7 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_utc = datetime.now(timezone.utc)
     ch = now_utc.hour
+    now_local = now_utc.astimezone()
 
     sydney = (22 <= ch or ch < 7)
     tokyo = (0 <= ch < 9)
@@ -264,7 +265,7 @@ async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asian_session = tokyo or sydney
 
     reply = (
-        f"🕒 **GLOBAL MARKET SESSIONS (UTC: {now_utc.strftime('%H:%M')})**\n\n"
+        f"🕒 **GLOBAL MARKET SESSIONS** (UTC `{now_utc.strftime('%H:%M')}` · Local `{now_local.strftime('%H:%M %Z')}`)\n\n"
         f"🇦🇺 **Sydney:** {'OPEN 🟢' if sydney else 'CLOSED 🔴'}\n"
         f"🇯🇵 **Tokyo (Asian):** {'OPEN 🟢' if tokyo else 'CLOSED 🔴'}\n"
         f"🇬🇧 **London:** {'OPEN 🟢' if london else 'CLOSED 🔴'}\n"

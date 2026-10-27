@@ -741,7 +741,7 @@ def generate_journal_chart(trades, curr="USD", title="Trade Journal", subtitle="
     ax3.axhline(0, color="#666666", linewidth=0.9)
     ax3.set_xticks(range(0, 24, 3))
     ax3.set_xlim(-0.8, 23.8)
-    ax3.set_title("P&L by close hour (UTC)", color=FG, fontsize=10, loc="left")
+    ax3.set_title("P&L by close hour (local time)", color=FG, fontsize=10, loc="left")
 
     fig.suptitle(title, color="white", fontsize=13, fontweight="bold", y=0.985)
     if subtitle:

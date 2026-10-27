@@ -6,7 +6,7 @@ import logging
 import asyncio
 from itertools import accumulate
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time as dtime
 import MetaTrader5 as mt5
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
@@ -20,6 +20,7 @@ from ._common import admin_only, md_safe
 from .core import _HISTORY_START, _deal_stats, _money, _pf_text
 
 PAGE_SIZE = 6
+MAX_PAGE = 9999          # keeps callback_data well under Telegram's 64-byte limit
 _EPS = 0.005
 _MSG_BUDGET = 3900
 
@@ -73,7 +74,7 @@ def _decode(data):
     parts = data.split(":")
     try:
         st = dict(zip(_FIELDS, parts[1:7]))
-        st["page"] = max(1, int(st["page"]))
+        st["page"] = min(MAX_PAGE, max(1, int(st["page"])))
         if not _valid_period(st["period"]):
             raise ValueError
         for k, allowed in _VALID.items():
@@ -84,13 +85,19 @@ def _decode(data):
         return dict(_DEFAULT)
 
 
+def _local_midnight(day):
+    """Local-timezone midnight for a date (DST-correct)."""
+    return datetime.combine(day, dtime.min).astimezone()
+
+
 def _period_bounds(code):
-    now = datetime.now(timezone.utc)
-    mid = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    now = datetime.now().astimezone()
+    today = now.date()
+    mid = _local_midnight(today)
     if code == "t":
-        return mid, None, "Today (UTC)"
+        return mid, None, "Today"
     if code == "y":
-        return mid - timedelta(days=1), mid, "Yesterday (UTC)"
+        return _local_midnight(today - timedelta(days=1)), mid, "Yesterday"
     if code == "w":
         return now - timedelta(days=7), None, "Last 7 Days"
     if code == "m":
@@ -148,7 +155,7 @@ def _parse_args(args):
         t = raw.lower().strip()
         m_page = re.fullmatch(r"p(?:age)?(\d+)", t)
         if m_page:
-            st["page"] = max(1, int(m_page.group(1)))
+            st["page"] = min(MAX_PAGE, max(1, int(m_page.group(1))))
         elif t in ("today", "day", "1d"):
             st["period"] = "t"
         elif t == "yesterday":
@@ -178,13 +185,15 @@ def _parse_args(args):
 
 
 def _parse_utc(v):
+    """DB timestamps are stored as UTC; returns them as tz-aware LOCAL time."""
     if not v:
         return None
     try:
         dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
     except ValueError:
         return None
-    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+    return dt.astimezone()
 
 
 def _result(net):
@@ -196,6 +205,18 @@ def _result(net):
 
 
 # ================================================================ data: live MT5
+
+def _account_currency():
+    """BLOCKING. Account currency for dry-only views; falls back to USD if MT5 is unavailable."""
+    try:
+        with MT5_LOCK:
+            info = mt5.account_info()
+        if info is not None and info.currency:
+            return info.currency
+    except Exception:
+        pass
+    return "USD"
+
 
 def _fetch_live_trades(since_utc):
     """BLOCKING. Closed MT5 positions (bot + manual) from deal history. Returns (currency, trades, error)."""
@@ -212,14 +233,19 @@ def _fetch_live_trades(since_utc):
     with MT5_LOCK:
         info = mt5.account_info()
         deals = mt5.history_deals_get(start + shift, now + shift + timedelta(days=1))
+        deals_err = mt5.last_error() if deals is None else None
         positions = mt5.positions_get()
     if info is None:
         return "USD", [], "Failed to retrieve MT5 account details."
     curr = info.currency or "USD"
 
+    # history_deals_get() returns None on failure — don't mistake that for "no trades".
+    if deals is None and deals_err and deals_err[0] != getattr(mt5, "RES_S_OK", 1):
+        return curr, [], f"Deal history query failed ({deals_err})."
+
     links = get_live_signal_links()
     open_ids = {int(p.ticket) for p in (positions or [])}   # still running -> /positions
-    to_utc = lambda ts: datetime.fromtimestamp(ts - offset_s, tz=timezone.utc)
+    to_utc = lambda ts: datetime.fromtimestamp(ts - offset_s, tz=timezone.utc).astimezone()
 
     by_pos = defaultdict(list)
     for d in (deals or []):
@@ -241,7 +267,9 @@ def _fetch_live_trades(since_utc):
         else:   # opening deal fell outside the window: infer from the closing deal
             direction = "SELL" if outs[0].type == mt5.DEAL_TYPE_BUY else "BUY"
 
-        net = sum(d.profit + d.swap + d.commission + getattr(d, "fee", 0.0) for d in ds)
+        # Round to cents so the BE/WIN/LOSS label and _deal_stats (which counts >0 / <0)
+        # can never disagree about a trade like +0.003.
+        net = round(sum(d.profit + d.swap + d.commission + getattr(d, "fee", 0.0) for d in ds), 2)
         link = links.get(pid)
         ref = f"#{pid}" + (f" S{link['id']}·L{link['leg']}" if link else "")
         trades.append({
@@ -303,9 +331,12 @@ def _fetch_dry_trades():
                 legs.append((1, sl, "SL", entry1, lots1, closed))
             elif status == "CLOSED_TP1":
                 legs.append((1, tp1, "TP1", entry1, lots1, closed))
-            elif status in ("HIT_TP1", "HIT_TP2", "CLOSED_BE"):
+            elif status == "HIT_TP1":
+                # Runner still open: updated_at was last written the moment leg 1 hit TP1.
+                legs.append((1, tp1, "TP1", entry1, lots1, closed))
+            elif status in ("HIT_TP2", "CLOSED_BE"):
                 # Leg 1 closed at TP1 earlier; its exact close time isn't stored
-                # (updated_at tracks the runner), so fall back to the entry time.
+                # (updated_at now tracks the runner), so fall back to the entry time.
                 legs.append((1, tp1, "TP1", entry1, lots1, opened))
         if dual and s["exec_mode2"] == "DRY":
             lots2 = float(s["lots2"] or fixed_lot)
@@ -323,14 +354,14 @@ def _fetch_dry_trades():
                 pnl, res = 0.0, "OPEN"
             else:
                 diff = (exit_p - entry) if direction == "BUY" else (entry - exit_p)
-                pnl = diff * lots * _contract_size(symbol, sizes)
+                pnl = round(diff * lots * _contract_size(symbol, sizes), 2)
                 res = _result(pnl)
             trades.append({
                 "source": "dry", "who": "bot",
                 "symbol": symbol, "direction": direction, "volume": round(lots, 2),
                 "entry": entry, "exit": exit_p,
                 "opened": opened, "time": when,
-                "net_pnl": round(pnl, 2), "result": res, "kind": kind,
+                "net_pnl": pnl, "result": res, "kind": kind,
                 "ref": f"S{s['id']}·L{leg_no}",
             })
     return trades
@@ -349,6 +380,8 @@ def _build_view(st):
     if want_live:
         curr, live, err = _fetch_live_trades(since)
         trades += live
+    else:
+        curr = _account_currency()      # dry-only view: still show the real account currency
     if want_dry:
         trades += _fetch_dry_trades()
 
@@ -524,7 +557,7 @@ def _render(st, view):
             for lab, pnls in sorted(by_origin.items()):
                 w = sum(1 for p in pnls if p > _EPS)
                 lines.append(f"{lab}: `{len(pnls)}` trades · `{w}W` · `{_money(sum(pnls), curr)}`")
-            if "🧪 Dry-run" in by_origin and len(by_origin) > 1:
+            if "🧪 Dry-run" in by_origin:
                 lines.append("_Net P&L mixes simulated and real results — use 💰 Live / 🧪 Dry to separate._")
 
     # ---- ordering + paging
@@ -537,6 +570,7 @@ def _render(st, view):
     ordered = sorted(rows, key=key_fn, reverse=rev)
     pages = max(1, math.ceil(len(ordered) / PAGE_SIZE))
     page = min(st["page"], pages)
+    st = {**st, "page": page}   # clamp: Refresh/Chart buttons must never carry an out-of-range page
     page_rows = ordered[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
 
     # ---- rows (grouped by day, with daily subtotals, when sorted by time)
@@ -561,13 +595,16 @@ def _render(st, view):
 
     footer = []
     if rows:
-        footer.append(f"📄 `{page}/{pages}` · `{len(rows)}` trade(s) · times UTC")
+        tz_name = datetime.now().astimezone().strftime("%Z") or "local"
+        footer.append(f"📄 `{page}/{pages}` · `{len(rows)}` trade(s) · times {tz_name}")
         if any(t["source"] == "dry" for t in page_rows):
             footer.append("🧪 _Dry-run P&L is simulated (no spread/slippage)._")
 
     head_txt = "\n".join(lines)
     while body and len(head_txt) + sum(len(b) + 1 for b in body) + sum(len(f) + 1 for f in footer) + 4 > _MSG_BUDGET:
         body.pop()   # safety net for Telegram's 4096-char limit
+        while body and body[-1].startswith("📅"):
+            body.pop()   # never leave a day header with no rows under it
     text = head_txt + ("\n\n" + "\n".join(body) if body else "") + ("\n\n" + "\n".join(footer) if footer else "")
     return text, _keyboard(st, page, pages)
 

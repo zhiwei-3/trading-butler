@@ -105,7 +105,7 @@ ALERT_STATE = {
     "trade_dry_run": False,              # build+log the request, never send it
     "magic_number": 770077,             # bot only ever touches its own positions
     "max_slippage_points": 30,          # 'deviation' passed to order_send
-    "max_daily_trades": 5,              # hard cap on live fills (tickets) per UTC day
+    "max_daily_trades": 5,              # hard cap on live fills (tickets) per local day
     "max_entry_drift_pct": 25.0,        # abort if price drifted >25% of SL dist since signal
     "fixed_lot_size": 0.01,             # flat lot size per leg — NOT scaled by risk_percent
     "dual_entry_score_threshold": 50,   # smc_confluence score >= this -> open 2 legs (TP1 + TP2/BE runner)

@@ -65,7 +65,7 @@ async def build_status_snapshot() -> str:
     mt5_ok = await asyncio.to_thread(check_mt5_alive)
     ALERT_STATE["mt5_connected"] = mt5_ok
     last_hb = ALERT_STATE["last_heartbeat_at"]
-    last_hb_str = last_hb.strftime("%Y-%m-%d %H:%M UTC") if last_hb else "Not sent yet"
+    last_hb_str = last_hb.astimezone().strftime("%Y-%m-%d %H:%M %Z") if last_hb else "Not sent yet"
 
     trade_mode = "🔴 OFF"
     if ALERT_STATE.get("auto_trade_enabled"):

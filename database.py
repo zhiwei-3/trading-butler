@@ -2,7 +2,7 @@
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dtime
 from config import DB_FILE
 from contextlib import contextmanager
 
@@ -168,9 +168,15 @@ def mark_leg2_be_moved(signal_id):
     except Exception as e:
         logging.error(f"⚠️ Failed to mark be_moved2 for signal {signal_id}: {e}")
 
+def _local_day_start_utc_str():
+    """Start of the current LOCAL day (PC timezone), as a UTC 'YYYY-MM-DD HH:MM:SS' string.
+    The DB stores UTC, so local-day filters compare against this converted boundary."""
+    local_midnight = datetime.combine(datetime.now().astimezone().date(), dtime.min).astimezone()
+    return local_midnight.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+
 def count_live_trades_today():
-    """Live fills (tickets) opened since 00:00 UTC."""
-    today_start = datetime.now(timezone.utc).strftime('%Y-%m-%d 00:00:00')
+    """Live fills (tickets) opened since local midnight (PC timezone)."""
+    today_start = _local_day_start_utc_str()
     try:
         with get_db_connection() as conn:
             row = conn.execute(
@@ -199,9 +205,9 @@ def get_signal_stats():
     return counts
 
 def get_daily_performance_stats():
-    """Today's CLOSED trade performance (UTC day). R is computed from each signal's real levels,
+    """Today's CLOSED trade performance (local day, PC timezone). R is computed from each signal's real levels,
     using the same model as the backtester (dual: TP1/2 leg-averages; BE runner = tp1_r/2)."""
-    today_start = datetime.now(timezone.utc).strftime('%Y-%m-%d 00:00:00')
+    today_start = _local_day_start_utc_str()
     with get_db_connection() as conn:
         rows = conn.execute(
             "SELECT status, entry_price, sl_price, tp1_price, tp2_price FROM signals "
