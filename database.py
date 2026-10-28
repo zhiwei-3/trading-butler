@@ -2,8 +2,8 @@
 
 import logging
 import sqlite3
-from datetime import datetime, timezone, time as dtime
-from config import DB_FILE
+from datetime import datetime, timezone, timedelta, time as dtime
+from config import DB_FILE, ALERT_STATE
 from contextlib import contextmanager
 
 @contextmanager
@@ -55,6 +55,7 @@ def init_db():
             ("zone_low", "REAL"),
             ("zone_high", "REAL"),
             ("zone_type", "TEXT"),
+            ("reasoning", "TEXT"),
         ]
         for col_name, col_type in migrations:
             if col_name not in columns:
@@ -113,7 +114,7 @@ def init_db():
         conn.commit()
 
 def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score,
-                     dual_entry=False, near_zone=None):
+                     dual_entry=False, near_zone=None, reasoning=None):
     """Logs generated signal details to SQLite. Returns the new row id (or None)."""
     timestamp = datetime.now(timezone.utc).isoformat()
     zone_low = zone_high = zone_type = None
@@ -124,10 +125,10 @@ def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_pr
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO signals (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price,
-                                     score, status, dual_entry, zone_low, zone_high, zone_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)
+                                     score, status, dual_entry, zone_low, zone_high, zone_type, reasoning)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?)
             ''', (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score,
-                  int(bool(dual_entry)), zone_low, zone_high, zone_type))
+                  int(bool(dual_entry)), zone_low, zone_high, zone_type, reasoning))
             conn.commit()
             return cursor.lastrowid
     except Exception as e:
@@ -345,6 +346,34 @@ def get_recent_trades_for_chart(limit=30, symbol=None):
     with get_db_connection() as conn:
         rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
+
+def get_sl_cooldown_remaining_s():
+    """Seconds left in the post-stop-loss cooldown (0 if none / disabled).
+    Derived from the newest HIT_SL row, so it survives restarts with no extra state."""
+    if not ALERT_STATE.get("sl_cooldown_enabled", True):
+        return 0.0
+    try:
+        mins = float(ALERT_STATE.get("sl_cooldown_minutes", 30))
+    except (TypeError, ValueError):
+        return 0.0
+    if mins <= 0:
+        return 0.0
+    try:
+        with get_db_connection() as conn:
+            row = conn.execute("SELECT MAX(updated_at) AS t FROM signals WHERE status = 'HIT_SL'").fetchone()
+    except Exception as e:
+        logging.warning(f"Cooldown lookup failed: {e}")
+        return 0.0
+    if not row or not row["t"]:
+        return 0.0
+    try:
+        last = datetime.fromisoformat(str(row["t"]).replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    remaining = (last + timedelta(minutes=mins) - datetime.now(timezone.utc)).total_seconds()
+    return max(0.0, remaining)
 
 def log_sweep_run(chat_id, symbol, timeframe_mode, days, rank_mode, swept_flags, min_sample, elapsed_seconds, rows):
     """Persists a completed /optimize sweep run and its detailed results."""

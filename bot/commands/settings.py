@@ -68,6 +68,9 @@ _SPECS = [
     (("cb_enabled", "circuit_breaker", "cb_toggle"), "circuit_breaker_enabled", _bool),
     (("cb_losses", "max_losses", "cb_max_losses"), "max_daily_losses", _num(1, 100, integer=True)),
     (("cb_drawdown", "max_drawdown", "cb_max_drawdown"), "max_daily_drawdown_r", _num(0, 100, lo_open=True)),
+    
+    (("sl_cooldown", "cooldown", "sl_cooldown_enabled"), "sl_cooldown_enabled", _bool),
+    (("cooldown_mins", "sl_cooldown_mins", "sl_cooldown_minutes"), "sl_cooldown_minutes", _num(0, 1440, integer=True)),
 
     (("magic", "magic_number"), "magic_number", _num(1, 2**31 - 1, integer=True)),
     (("slippage", "deviation", "max_slippage_points"), "max_slippage_points", _num(0, 1000, integer=True)),
@@ -121,6 +124,10 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• **Max Consecutive Losses (`cb_losses`):** `{ALERT_STATE.get('max_daily_losses', 3)}`\n"
             f"• **Max Daily Drawdown (`cb_drawdown`):** `-{ALERT_STATE.get('max_daily_drawdown_r', 3.0)}R`\n\n"
 
+            "⏸️ **SL Cooldown:**\n"
+            f"• **Status (`sl_cooldown`):** `{'ON 🟢' if ALERT_STATE.get('sl_cooldown_enabled', True) else 'OFF 🔴'}`\n"
+            f"• **Minutes (`cooldown_mins`):** `{ALERT_STATE.get('sl_cooldown_minutes', 30)}m`\n\n"
+            
             "📰 **News Blockade Settings:**\n"
             f"• **Blockade Status (`news_blockade`):** `{news_status}`\n"
             f"• **Mins Before (`news_before`):** `{ALERT_STATE.get('news_blockade_mins_before', 30)}m`\n"

@@ -473,6 +473,10 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
                    and trade["score"] >= ALERT_STATE.get("dual_entry_score_threshold", 50))
         outcome, close_time = _simulate_trade(df_entry, i, trade, spread_price=spread_price, dual=is_dual)
         blocked_until = close_time
+        if outcome == "HIT_SL" and ALERT_STATE.get("sl_cooldown_enabled", True):
+            cd_mins = int(ALERT_STATE.get("sl_cooldown_minutes", 30))
+            if cd_mins > 0:
+                blocked_until = close_time + np.timedelta64(cd_mins, "m")
 
         tp1_r = trade["tp1_dist"] / trade["sl_dist"] if trade["sl_dist"] > 0 else 0.0
         tp2_r = trade["tp2_dist"] / trade["sl_dist"] if trade["sl_dist"] > 0 else 0.0

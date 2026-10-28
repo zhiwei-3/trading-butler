@@ -3,7 +3,8 @@
 import logging
 import pandas_ta as ta
 from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
-from database import log_signal_to_db, get_recent_trades_for_chart, set_signal_status
+from database import (log_signal_to_db, get_recent_trades_for_chart, set_signal_status,
+                      get_sl_cooldown_remaining_s)
 from mt5_engine import fetch_candles
 from trade_engine import request_execution, trade_slot_blocker
 from strategy.chart import generate_signal_chart
@@ -140,8 +141,15 @@ def _eval_ifvg_sweep(a):
         f"💧 **Swept:** {pool} @ `${setup['level']}` → {extreme_lbl} `${setup['sweep_extreme']}`\n"
         f"⚡ **IFVG Zone:** `${setup['zone_bottom']} – ${setup['zone_top']}`"
     )
+    reasons = [
+        f"{pool} at {setup['level']} was swept (wick to {setup['sweep_extreme']})",
+        f"A {'bearish' if is_buy else 'bullish'} FVG formed during the move, then price closed through it with displacement (inversion)",
+        f"Price is now retesting the inverted gap {setup['zone_bottom']} - {setup['zone_top']} from the {'above' if is_buy else 'below'}",
+        f"SL sits beyond the sweep extreme plus an ATR buffer; TP1 targets {t['tp1_source']}",
+        f"RRR 1:{t['rrr']} (minimum {ALERT_STATE.get('min_rrr', 1.5)})",
+    ]
     return [_package_signal(a, direction, close_price, t["sl_price"], t["tp1_price"],
-                            t["tp2_price"], msg, score=80, zone=setup)], []
+                            t["tp2_price"], msg, score=80, zone=setup, reasons=reasons)], []
 
 def _eval_ema_cross(a):
     df = a["df_entry"]
@@ -154,21 +162,23 @@ def _eval_ema_cross(a):
     bullish_cross = (prev_ema20 <= prev_ema50 and ema20 > ema50)
     bearish_cross = (prev_ema20 >= prev_ema50 and ema20 < ema50)
 
-    if bullish_cross and ALERT_STATE["last_rsi_signal"] != "BUY":
-        targets = calculate_targets("BUY", close_price, atr_val, a["order_block"], a["near_zone"])
+    for direction, crossed, word in (("BUY", bullish_cross, "above"), ("SELL", bearish_cross, "below")):
+        if not crossed or ALERT_STATE["last_rsi_signal"] == direction:
+            continue
+        targets = calculate_targets(direction, close_price, atr_val, a["order_block"], a["near_zone"])
         if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.0):
-            ALERT_STATE["last_rsi_signal"] = "BUY"
-            sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
-            base_msg = f"🏆 **EMA CROSS BUY ALERT** 🟢\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
-            signals.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, base_msg, score=70))
-
-    elif bearish_cross and ALERT_STATE["last_rsi_signal"] != "SELL":
-        targets = calculate_targets("SELL", close_price, atr_val, a["order_block"], a["near_zone"])
-        if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.0):
-            ALERT_STATE["last_rsi_signal"] = "SELL"
-            sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
-            base_msg = f"🏆 **EMA CROSS SELL ALERT** 🔴\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
-            signals.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, base_msg, score=70))
+            ALERT_STATE["last_rsi_signal"] = direction
+            icon = "🟢" if direction == "BUY" else "🔴"
+            base_msg = (f"🏆 **EMA CROSS {direction} ALERT** {icon}\n\n📍 **Entry:** `${close_price}` | "
+                        f"🛡️ **SL:** `${targets['sl_price']}` | 🎯 **TP1:** `${targets['tp1_price']}`")
+            reasons = [
+                f"EMA20 ({ema20:.2f}) crossed {word} EMA50 ({ema50:.2f}) on the entry timeframe",
+                f"Higher-timeframe context: trend {'bullish' if a['trend_bullish'] else 'bearish'}, "
+                f"macro {'bullish' if a['macro_bullish'] else 'bearish'}",
+            ] + _target_reasons(targets)
+            signals.append(_package_signal(a, direction, close_price, targets["sl_price"], targets["tp1_price"],
+                                           targets["tp2_price"], base_msg, score=70, reasons=reasons))
+        break   # a bullish and bearish cross can't both be true
 
     if not (bullish_cross or bearish_cross):
         ALERT_STATE["last_rsi_signal"] = None
@@ -185,35 +195,36 @@ def _eval_rsi_reversion(a):
 
     signals, watches = [], []
 
-    # Oversold + Support Zone Bounce
     bullish_rev = (
-        rsi_val <= buy_th and 
-        near_zone and near_zone["type"] in ("support", "mixed") and 
+        rsi_val <= buy_th and
+        near_zone and near_zone["type"] in ("support", "mixed") and
         close_price >= near_zone["price"]
     )
-
-    # Overbought + Resistance Zone Rejection
     bearish_rev = (
-        rsi_val >= sell_th and 
-        near_zone and near_zone["type"] in ("resistance", "mixed") and 
+        rsi_val >= sell_th and
+        near_zone and near_zone["type"] in ("resistance", "mixed") and
         close_price <= near_zone["price"]
     )
 
-    if bullish_rev and ALERT_STATE["last_rsi_signal"] != "BUY":
-        targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone)
+    for direction, triggered in (("BUY", bullish_rev), ("SELL", bearish_rev)):
+        if not triggered or ALERT_STATE["last_rsi_signal"] == direction:
+            continue
+        targets = calculate_targets(direction, close_price, atr_val, order_block, near_zone)
         if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.0):
-            ALERT_STATE["last_rsi_signal"] = "BUY"
-            sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
-            base_msg = f"🔄 **RSI REVERSION BUY ALERT** 🟢\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
-            signals.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, base_msg, score=75))
-
-    elif bearish_rev and ALERT_STATE["last_rsi_signal"] != "SELL":
-        targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone)
-        if targets["rrr"] >= ALERT_STATE.get("min_rrr", 1.0):
-            ALERT_STATE["last_rsi_signal"] = "SELL"
-            sl_price, tp1_price, tp2_price = targets["sl_price"], targets["tp1_price"], targets["tp2_price"]
-            base_msg = f"🔄 **RSI REVERSION SELL ALERT** 🔴\n\n📍 **Entry:** `${close_price}` | 🛡️ **SL:** `${sl_price}` | 🎯 **TP1:** `${tp1_price}`"
-            signals.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, base_msg, score=75))
+            ALERT_STATE["last_rsi_signal"] = direction
+            is_buy = direction == "BUY"
+            icon = "🟢" if is_buy else "🔴"
+            base_msg = (f"🔄 **RSI REVERSION {direction} ALERT** {icon}\n\n📍 **Entry:** `${close_price}` | "
+                        f"🛡️ **SL:** `${targets['sl_price']}` | 🎯 **TP1:** `${targets['tp1_price']}`")
+            reasons = [
+                f"RSI {rsi_val} is {'oversold' if is_buy else 'overbought'} (trigger {'<=' if is_buy else '>='} "
+                f"{buy_th if is_buy else sell_th})",
+                f"Price is {'holding above' if is_buy else 'rejecting below'} a {near_zone['type']} zone at "
+                f"{near_zone['price']} ({near_zone['touches']} touches)",
+            ] + _target_reasons(targets)
+            signals.append(_package_signal(a, direction, close_price, targets["sl_price"], targets["tp1_price"],
+                                           targets["tp2_price"], base_msg, score=75, reasons=reasons))
+        break
 
     if not (bullish_rev or bearish_rev):
         ALERT_STATE["last_rsi_signal"] = None
@@ -229,7 +240,53 @@ def _is_dual_entry(score):
         return False
     return score >= ALERT_STATE.get("dual_entry_score_threshold", 50)
 
-def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, base_msg, score=0, zone=None):
+_FACTOR_TEXT = {
+    "EMA Trend Align":     "entry-timeframe EMA20/50 trend agrees",
+    "Macro Trend Align":   "macro-timeframe trend agrees",
+    "Structure BOS":       "fresh break of structure in the trade direction",
+    "Liquidity Sweep":     "wick swept recent liquidity and closed back inside",
+    "Fair Value Gap":      "price is reacting from a fresh Fair Value Gap",
+    "Volume/ATR Activity": "volatility and volume are above average",
+    "MACD Confirmation":   "MACD momentum agrees",
+    "Candlestick Pattern": "confirming candlestick pattern on the entry candle",
+    "RSI Divergence":      "RSI divergence supports the reversal",
+    "Support/Resistance":  "price is at a support/resistance zone",
+}
+
+
+def _target_reasons(t):
+    return [f"SL set by {t['sl_source']} ({t['sl_dist']} pts); TP1 by {t['tp1_source']}; RRR 1:{t['rrr']}"]
+
+
+def build_smc_reasons(direction, a, score, breakdown, targets):
+    is_buy = direction == "BUY"
+    th = ALERT_STATE["rsi_buy_threshold"] if is_buy else ALERT_STATE["rsi_sell_threshold"]
+    reasons = [f"RSI {a['rsi_val']} is {'oversold' if is_buy else 'overbought'} (trigger {'<=' if is_buy else '>='} {th})"]
+    missing = []
+    for label, earned, possible in breakdown:
+        if label == "RSI Zone":
+            continue
+        if possible > 0 and earned == possible:
+            text = _FACTOR_TEXT.get(label, label)
+            if label == "Candlestick Pattern" and a.get("candle_pattern"):
+                text = f"{a['candle_pattern'].replace('_', ' ').title()} candle on entry"
+            reasons.append(text)
+        elif earned == 0:
+            missing.append(label)
+    reasons.append(f"Confluence {score}/100 (minimum {ALERT_STATE['min_confluence_score']})")
+    if missing:
+        reasons.append("Not confirmed: " + ", ".join(missing))
+    reasons += _target_reasons(targets)
+    return reasons
+
+
+def format_reasons(reasons):
+    if not reasons:
+        return ""
+    return "🧠 **Why this trade:**\n" + "\n".join(f"  • {r}" for r in reasons)
+
+def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, base_msg, score=0, zone=None,
+                    reasons=None):
     """Logs the signal, queues live execution (if armed and the slot is free), and renders the alert."""
     symbol = a.get("symbol", "XAUUSD")
     dual = _is_dual_entry(score)
@@ -239,7 +296,8 @@ def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, b
         blocker = trade_slot_blocker(symbol)
 
     signal_id = log_signal_to_db(symbol, direction, close_price, sl_price, tp1_price, tp2_price, score,
-                                 dual_entry=dual, near_zone=a.get("near_zone"))
+                                 dual_entry=dual, near_zone=a.get("near_zone"),
+                                 reasoning="\n".join(reasons) if reasons else None)
 
     if signal_id is None and ALERT_STATE.get("auto_trade_enabled") and not blocker:
         blocker = "the signal could not be logged to the database, so no untracked trade will be opened."
@@ -276,7 +334,8 @@ def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, b
             f"• **Legs:** {'2 — TP1 full close + TP2/BE runner 🎯🎯' if dual else '1 — TP1 only 🎯'}\n\n"
         )
 
-    full_msg = base_msg + "\n" + pos_info + exec_note
+    reasons_block = format_reasons(reasons)
+    full_msg = base_msg + "\n\n" + (reasons_block + "\n\n" if reasons_block else "") + pos_info + exec_note
 
     try:
         trades_hist = get_recent_trades_for_chart(limit=30, symbol=symbol)
@@ -461,6 +520,12 @@ def evaluate_signals(a):
     """Dispatches market evaluation to the active strategy module."""
     watches = _eval_setup_forming(a)   # independent of active_strategy
 
+    # Post-stop-loss cooldown: heads-up pings still work, new trade signals don't.
+    cooldown_s = get_sl_cooldown_remaining_s()
+    if cooldown_s > 0:
+        logging.info(f"⏸️ SL cooldown active — {cooldown_s / 60:.1f} min remaining, signals suppressed.")
+        return [], watches
+
     if ALERT_STATE.get("require_volume_atr_filter", False) and not a.get("vol_filter_ok", True):
         return [], watches
 
@@ -516,7 +581,9 @@ def evaluate_smc_confluence(a):
                     f"⚡ **FVG:** {'Bullish FVG ✅' if a['fvg']['bullish_fvg'] else 'None'}\n"
                     f"🧱 **Order Block:** {'Bullish OB ✅ @ $' + str(a['order_block']['ob_level']) if a['order_block']['bullish_ob'] else 'None'}"
                 )
-                signals_found.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, msg, score=score))
+                reasons = build_smc_reasons("BUY", a, score, breakdown, targets)
+                signals_found.append(_package_signal(a, "BUY", close_price, sl_price, tp1_price, tp2_price, msg,
+                                                     score=score, reasons=reasons))
 
     # 2. Evaluate SELL Signal
     elif is_overbought and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok and vol_filter_hard_ok:
@@ -544,7 +611,9 @@ def evaluate_smc_confluence(a):
                     f"⚡ **FVG:** {'Bearish FVG ✅' if a['fvg']['bearish_fvg'] else 'None'}\n"
                     f"🧱 **Order Block:** {'Bearish OB ✅ @ $' + str(a['order_block']['ob_level']) if a['order_block']['bearish_ob'] else 'None'}"
                 )
-                signals_found.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, msg, score=score))
+                reasons = build_smc_reasons("SELL", a, score, breakdown, targets)
+                signals_found.append(_package_signal(a, "SELL", close_price, sl_price, tp1_price, tp2_price, msg,
+                                                     score=score, reasons=reasons))
 
     # Reset signal deduplication state once price exits extreme zones
     if not (is_oversold or is_overbought):

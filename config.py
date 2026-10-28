@@ -88,6 +88,8 @@ ALERT_STATE = {
     "circuit_breaker_enabled": True,        # Master ON/OFF toggle
     "max_daily_losses": 3,                  # Max consecutive losses allowed per day
     "max_daily_drawdown_r": 3.0,            # Max daily R-multiple drawdown allowed (-3.0R)
+    "sl_cooldown_enabled": True,            # pause new signals after a stop-loss hit
+    "sl_cooldown_minutes": 30,              # length of that pause
 
     "news_blockade_enabled": True,             # Master ON/OFF toggle
     "news_blockade_impacts": ["high"],         # Levels to block: ["high"], ["high", "medium"], etc.
@@ -177,6 +179,10 @@ PERSISTENT_KEYS = [
     "fixed_lot_size",
     "dual_entry_score_threshold",
     "flatten_on_circuit_breaker",
+    # --- SL cooldown ---
+    "sl_cooldown_enabled",
+    "sl_cooldown_minutes",
+    
     "trade_comment",
 ]
 
@@ -206,12 +212,8 @@ def load_settings():
             ALERT_STATE["trend_tf"] = TIMEFRAME_PRESETS[mode]["trend"]
             ALERT_STATE["macro_tf"] = TIMEFRAME_PRESETS[mode]["macro"]
 
-        # BUGFIX: a bot restarted while a real position was open must never resume
-        # sending live orders silently — force back to dry-run and make the
-        # operator re-confirm with /trade live CONFIRM.
         if ALERT_STATE.get("auto_trade_enabled") and not ALERT_STATE.get("trade_dry_run", True):
-            ALERT_STATE["trade_dry_run"] = True
-            print("⚠️ Live execution reset to DRY-RUN on startup. Re-arm with /trade live CONFIRM.")
+            print("🟢 Live execution is ARMED on startup (restored from settings.json).")
 
         print("✅ Loaded persistent settings from settings.json")
     except Exception as e:

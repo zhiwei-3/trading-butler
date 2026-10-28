@@ -13,10 +13,11 @@ from database import (
     get_daily_performance_stats,
     mark_leg2_be_moved,
     get_recent_trades_for_chart,
+    get_sl_cooldown_remaining_s,
 )
 from trade_engine import (
     execute_pending_intents, trail_leg_to_breakeven, force_close_leg, reconcile_exit,
-    close_all_managed, list_managed_positions, enforce_single_trade,
+    close_all_managed, list_managed_positions, enforce_single_trade, summarize_outcome_pnl,
 )
 from mt5_engine import get_gold_symbol, check_mt5_alive, fetch_candles, get_tick
 from news_engine import news_guard_check, check_news_blockade, check_news_post_release
@@ -75,6 +76,9 @@ async def build_status_snapshot() -> str:
     except Exception:
         open_managed = 0
 
+    cd_s = await asyncio.to_thread(get_sl_cooldown_remaining_s)
+    cooldown_str = f"⏸️ {cd_s / 60:.0f}m left" if cd_s > 0 else "Clear"
+
     return (
         f"• **Uptime:** `{uptime}`\n"
         f"• **MT5 Connection:** {'🟢 Connected' if mt5_ok else '🔴 Disconnected'}\n"
@@ -87,6 +91,7 @@ async def build_status_snapshot() -> str:
         f"• **Structure Filter:** {'ON' if ALERT_STATE['require_structure_break'] else 'OFF'}\n"
         f"• **Volume/ATR Filter:** {'ON' if ALERT_STATE['require_volume_atr_filter'] else 'OFF'}\n"
         f"• **News Lockout:** {'🔒 Active' if ALERT_STATE['news_lockout'] else 'Clear'}\n"
+        f"• **SL Cooldown:** {cooldown_str}\n"
         f"• **Last Signal:** `{ALERT_STATE['last_rsi_signal'] or 'None'}`\n"
         f"• **Heartbeat Pings:** {'🟢 ON' if ALERT_STATE['heartbeat_enabled'] else '🔴 OFF'} every `{ALERT_STATE['heartbeat_interval_hours']}h`\n"
         f"• **Last Heartbeat Sent:** `{last_hb_str}`"
@@ -254,8 +259,9 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
 
     with get_db_connection() as conn:
         active_signals = conn.execute(
-            "SELECT id, timestamp, status, direction, entry_price, sl_price, tp1_price, tp2_price, dual_entry, "
-            "ticket, exec_mode, ticket2, exec_mode2, be_moved2, zone_low, zone_high, zone_type "
+            "SELECT id, timestamp, symbol, status, direction, entry_price, sl_price, tp1_price, tp2_price, dual_entry, "
+            "ticket, exec_mode, lots, fill_price, ticket2, exec_mode2, lots2, fill_price2, be_moved2, "
+            "zone_low, zone_high, zone_type "
             "FROM signals WHERE status IN ('PENDING', 'HIT_TP1')"
         ).fetchall()
 
@@ -388,7 +394,27 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
         entry, sl, tp1, tp2 = sig["entry_price"], sig["sl_price"], sig["tp1_price"], sig["tp2_price"]
         if not (chat_id and msg):
             continue
-        full_msg = msg + (f"\n\n🤖 {extra_note}" if extra_note else "")
+
+        full_msg = msg
+
+        # Outcome P&L (real MT5 deals for live legs, simulated for dry-run/paper).
+        try:
+            pnl_block = await asyncio.to_thread(summarize_outcome_pnl, sig, new_status)
+            if pnl_block:
+                full_msg += f"\n\n{pnl_block}"
+        except Exception:
+            logging.exception(f"Outcome P&L failed for signal {sig['id']}")
+
+        # Cooldown notice on stop-outs.
+        if new_status == "HIT_SL" and ALERT_STATE.get("sl_cooldown_enabled", True):
+            cd_mins = int(ALERT_STATE.get("sl_cooldown_minutes", 30))
+            if cd_mins > 0:
+                until = (datetime.now().astimezone() + timedelta(minutes=cd_mins)).strftime("%H:%M")
+                full_msg += f"\n\n⏸️ **SL cooldown:** no new signals for `{cd_mins}m` (until `{until}` local)."
+
+        if extra_note:
+            full_msg += f"\n\n🤖 {extra_note}"
+
         try:
             chart_buf = None
             if df_chart is not None and not df_chart.empty:
@@ -397,8 +423,8 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
                     df=df_chart, entry_p=entry, sl_p=sl, tp1_p=tp1, tp2_p=tp2,
                     outcome_status=new_status, symbol=symbol,
                     direction=sig["direction"],
-                    entry_time=sig["timestamp"],      # true UTC, ISO
-                    exit_time=closed_at,              # true UTC, 'YYYY-MM-DD HH:MM:SS'
+                    entry_time=sig["timestamp"],
+                    exit_time=closed_at,
                     dual=bool(sig["dual_entry"]),
                     trades=trades_hist, exclude_id=sig["id"],
                     near_zone=_zone_from_sig(sig),
