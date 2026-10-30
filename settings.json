@@ -41,10 +41,12 @@
     "trade_dry_run": false,
     "magic_number": 770077,
     "max_slippage_points": 30,
-    "max_daily_trades": 10,
+    "max_daily_trades": 5,
     "max_entry_drift_pct": 25.0,
     "fixed_lot_size": 0.01,
     "dual_entry_score_threshold": 50,
     "flatten_on_circuit_breaker": true,
+    "sl_cooldown_enabled": true,
+    "sl_cooldown_minutes": 30,
     "trade_comment": "TradingButler"
 }

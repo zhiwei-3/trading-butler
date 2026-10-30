@@ -188,6 +188,58 @@ async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⚠️ Unknown option. Send `/trade` for usage.", parse_mode="Markdown")
 
 
+def _project_sltp(symbol, direction, volume, entry, sl, tp):
+    """
+    BLOCKING (touches MT5 via _calc_pnl). Returns (tp_pnl, sl_pnl) in account
+    currency, measured from the ENTRY price. A missing level (0 / None) gives None.
+    """
+    def at(level):
+        if not level:
+            return None
+        return _calc_pnl(symbol, direction, volume, entry, float(level))
+    return at(tp), at(sl)
+
+
+def _projection_line(tp_pnl, sl_pnl, curr):
+    tp_str = f"`{_money(tp_pnl, curr)}`" if tp_pnl is not None else "`no TP`"
+    if sl_pnl is None:
+        sl_str = "`no SL ⚠️`"
+    elif abs(sl_pnl) < 0.005:
+        sl_str = "`0.00 (break-even)` 🔒"
+    else:
+        sl_str = f"`{_money(sl_pnl, curr)}`"
+    return f"   🎯 If TP: {tp_str} | 🛡️ If SL: {sl_str}"
+
+
+def _live_projections(live_positions):
+    """BLOCKING. One (tp_pnl, sl_pnl) tuple per live position, same order."""
+    out = []
+    for p in live_positions:
+        direction = "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL"
+        out.append(_project_sltp(p.symbol, direction, p.volume, p.price_open, p.sl, p.tp))
+    return out
+
+
+def _dry_projections(dry_positions):
+    """BLOCKING. One (tp_pnl, sl_pnl) tuple per dry-run position, same order."""
+    return [
+        _project_sltp(dp["symbol"], dp["direction"], dp["volume"], dp["price_open"], dp["sl"], dp["tp"])
+        for dp in dry_positions
+    ]
+
+
+def _totals_line(projections, curr):
+    """Sum of potential profit if every TP hits / potential loss if every SL hits."""
+    tps = [t for t, _ in projections if t is not None]
+    sls = [s for _, s in projections if s is not None]
+    parts = []
+    if tps:
+        parts.append(f"All TP: `{_money(sum(tps), curr)}`")
+    if sls:
+        parts.append(f"All SL: `{_money(sum(sls), curr)}`")
+    return ("   └ **Potential:** " + " | ".join(parts)) if parts else None
+
+
 @admin_only
 async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Shows ONLY currently open/running positions: live MT5 + dry-run. No filters, no history."""
@@ -195,29 +247,40 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     magic = int(ALERT_STATE.get("magic_number", 770077))
     dry_positions = await asyncio.to_thread(_fetch_dry_run_positions, curr)
 
+    # Capped to the rows actually displayed so totals match what's on screen.
+    live_shown = live_positions[:_MAX_POSITION_ROWS]
+    dry_shown = dry_positions[:_MAX_POSITION_ROWS]
+    live_proj = await asyncio.to_thread(_live_projections, live_shown)
+    dry_proj = await asyncio.to_thread(_dry_projections, dry_shown)
+
     mt5_warning = f"⚠️ *MT5 Offline:* `{md_safe(err)}` — live positions unavailable.\n\n" if err else ""
     total = len(live_positions) + len(dry_positions)
 
     sections = []
     if live_positions:
         lines = [f"🟢 **Live MT5 Positions ({len(live_positions)}):**"]
-        for p in live_positions[:_MAX_POSITION_ROWS]:
+        for p, (tp_pnl, sl_pnl) in zip(live_shown, live_proj):
             side = "BUY 🟢" if p.type == mt5.POSITION_TYPE_BUY else "SELL 🔴"
             src = "🤖" if p.magic == magic else "🖐️"
             comment = f" `{md_safe(p.comment)}`" if p.comment else ""
             lines.append(
                 f"• {src} `#{p.ticket}` {side} `{p.volume}` lots **{p.symbol}**{comment}\n"
                 f"   Entry `${p.price_open:.2f}` ➔ Now `${p.price_current:.2f}` | "
-                f"SL `${p.sl:.2f}` | TP `${p.tp:.2f}` | PnL: `{_money(p.profit, curr)}`"
+                f"SL `${p.sl:.2f}` | TP `${p.tp:.2f}` | PnL: `{_money(p.profit, curr)}`\n"
+                f"{_projection_line(tp_pnl, sl_pnl, curr)}"
             )
         if len(live_positions) > _MAX_POSITION_ROWS:
             lines.append(f"   … and `{len(live_positions) - _MAX_POSITION_ROWS}` more")
-        lines.append(f"   └ **Live Floating PnL:** `{_money(sum(p.profit for p in live_positions), curr)}`")
+        if len(live_positions) > 1:
+            lines.append(f"   └ **Live Floating PnL:** `{_money(sum(p.profit for p in live_positions), curr)}`")
+            totals = _totals_line(live_proj, curr)
+            if totals:
+                lines.append(totals)
         sections.append("\n".join(lines))
 
     if dry_positions:
         lines = [f"🧪 **Dry-Run Positions ({len(dry_positions)}):**"]
-        for dp in dry_positions[:_MAX_POSITION_ROWS]:
+        for dp, (tp_pnl, sl_pnl) in zip(dry_shown, dry_proj):
             side = "BUY 🟢" if dp["direction"] == "BUY" else "SELL 🔴"
             be_note = " 🔒[BE]" if dp.get("is_be") else ""
             has_px = dp.get("price_current") is not None
@@ -227,18 +290,24 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• `[DRY] #{dp['signal_id']} Leg {dp['leg']} ({dp['label']})` {side} "
                 f"`{dp['volume']}` lots **{dp['symbol']}**{be_note}\n"
                 f"   Entry `${dp['price_open']:.2f}` ➔ Now `{now_str}` | "
-                f"SL `${dp['sl']:.2f}` | TP `${dp['tp']:.2f}` | PnL: `{pnl_str}`"
+                f"SL `${dp['sl']:.2f}` | TP `${dp['tp']:.2f}` | PnL: `{pnl_str}`\n"
+                f"{_projection_line(tp_pnl, sl_pnl, curr)}"
             )
         if len(dry_positions) > _MAX_POSITION_ROWS:
             lines.append(f"   … and `{len(dry_positions) - _MAX_POSITION_ROWS}` more")
-        dry_float = sum(dp["profit"] for dp in dry_positions if dp.get("price_current") is not None)
-        lines.append(f"   └ **Dry-Run Floating PnL:** `{_money(dry_float, curr)}`")
+        if len(dry_positions) > 1:
+            dry_float = sum(dp["profit"] for dp in dry_positions if dp.get("price_current") is not None)
+            lines.append(f"   └ **Dry-Run Floating PnL:** `{_money(dry_float, curr)}`")
+            totals = _totals_line(dry_proj, curr)
+            if totals:
+                lines.append(totals)
         sections.append("\n".join(lines))
 
     body = "\n\n".join(sections) if sections else "_No open or running positions (live or dry-run)._"
 
     await update.effective_message.reply_text(
-        f"💼 **OPEN & RUNNING POSITIONS ({total})**\n\n{mt5_warning}{body}",
+        f"💼 **OPEN & RUNNING POSITIONS ({total})**\n\n{mt5_warning}{body}\n\n"
+        "_TP/SL figures are estimates from entry price (before spread, swap, commission)._",
         parse_mode="Markdown"
     )
 
