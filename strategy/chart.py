@@ -32,6 +32,7 @@ STATUS_STYLE = {
     "HIT_TP2":           ("#1E9E4A", "TP2 HIT — FULL TARGET"),
     "CLOSED_BE":         ("#17A2B8", "RUNNER CLOSED AT BREAK-EVEN"),
     "CLOSED_RUNNER_SL":  ("#FD7E14", "RUNNER CLOSED AT SL"),
+    "CLOSED_MANUAL":     ("#9E9E9E", "CLOSED MANUALLY"),
     "HIT_SL":            ("#DC3545", "STOP LOSS HIT"),
 }
 

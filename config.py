@@ -33,6 +33,7 @@ STRATEGY_PRESETS = {
     "ema_cross": "Triple EMA Trend Crossover + Volatility Filter",
     "rsi_reversion": "RSI Overbought/Oversold S/R Zone Reversion",
     "ifvg_sweep": "Liquidity Sweep + Inverted FVG Retest (IFVG)",
+    "trend_breakout": "H1 Trend/ADX Regime + Asian Range Breakout / Sweep+BOS (ATR-risk sizing)",
 }
 
 ALERT_STATE = {
@@ -80,6 +81,28 @@ ALERT_STATE = {
     "ifvg_max_sl_atr": 3.0,             # skip setups whose structural SL is wider than this
     "ifvg_fallback_rr": 3.0,            # fixed RR target when no BSL/SSL clears min_rrr
 
+    # --- Trend / Volatility Breakout ---
+    "tb_adx_min": 22.0,             # H1 ADX(14) must exceed this (trending market)
+    "tb_london_start": 8.0,         # UTC hour of the London window start
+    "tb_ny_start": 13.0,            # UTC hour of the NY window start
+    "tb_window_hours": 2.0,         # how long each window stays open
+    "tb_use_breakout": True,        # candle close beyond the Asian range
+    "tb_use_sweep_bos": True,       # Asian sweep + BOS
+    "tb_sweep_max_bars": 20,        # max bars between the sweep and the BOS
+    "tb_bos_pre_bars": 6,           # bars before the sweep used to find the BOS level
+    "tb_sl_buffer_atr": 0.25,       # SL buffer beyond the structural level
+    "tb_min_sl_atr": 0.8,           # SL floor (spread/wick protection)
+    "tb_max_sl_atr": 3.0,           # skip setups whose stop is wider than this
+    "tb_tp1_rr": 1.5,
+    "tb_tp2_rr": 3.0,
+    "tb_dual_entry": True,          # 2 legs: TP1 full close + TP2/BE runner
+    "tb_fired": set(),              # runtime dedup (intentionally NOT persisted)
+
+    # --- ATR / risk based position sizing (trend_breakout only) ---
+    "dynamic_lots_enabled": True,
+    "risk_percent": 0.5,            # % of balance risked per trade (split across legs)
+    "max_lot_size": 1.0,            # hard cap per leg
+
     "setup_forming_enabled": True,
     "last_watch_signal": None,
     "watch_rsi_margin": 5,
@@ -94,7 +117,7 @@ ALERT_STATE = {
     "news_blockade_enabled": True,             # Master ON/OFF toggle
     "news_blockade_impacts": ["high"],         # Levels to block: ["high"], ["high", "medium"], etc.
     "news_blockade_mins_before": 30,           # Pause scanner N minutes BEFORE news release
-    "news_blockade_mins_after": 15,            # Keep scanner paused N minutes AFTER news release
+    "news_blockade_mins_after": 30,            # Keep scanner paused N minutes AFTER news release
 
     "heartbeat_enabled": True,
     "heartbeat_interval_hours": 1,
@@ -154,6 +177,14 @@ PERSISTENT_KEYS = [
     "ifvg_sl_buffer_atr",
     "ifvg_max_sl_atr",
     "ifvg_fallback_rr",
+
+    # --- trend breakout ---
+    "tb_adx_min", "tb_london_start", "tb_ny_start", "tb_window_hours",
+    "tb_use_breakout", "tb_use_sweep_bos", "tb_sweep_max_bars", "tb_bos_pre_bars",
+    "tb_sl_buffer_atr", "tb_min_sl_atr", "tb_max_sl_atr", "tb_tp1_rr", "tb_tp2_rr",
+    "tb_dual_entry",
+    # --- dynamic sizing ---
+    "dynamic_lots_enabled", "risk_percent", "max_lot_size",
 
     "broker_utc_offset_hours",
     "setup_forming_enabled",

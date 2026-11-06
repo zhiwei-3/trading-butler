@@ -329,6 +329,17 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
                         logging.exception(f"Leg2 force-close failed for ticket {sig['ticket2']}: {e}")
                         extra_note = f"Leg 2 force-close: ⚠️ error ({e})"
 
+            elif leg1_outcome == "MANUAL":
+                new_status = "CLOSED_MANUAL"
+                msg = (f"🖐️ **XAUUSD {direction} — POSITION CLOSED EARLY**\n"
+                       f"*Closed manually (or by flatten) — not an SL/TP exit.*")
+                if dual and sig["exec_mode2"] == "LIVE" and sig["ticket2"]:
+                    try:
+                        extra_note = await asyncio.to_thread(force_close_leg, sig["ticket2"], "leg 1 closed manually")
+                    except Exception as e:
+                        logging.exception(f"Leg2 force-close failed for ticket {sig['ticket2']}: {e}")
+                        extra_note = f"Leg 2 force-close: ⚠️ error ({e})"
+
         elif status == "HIT_TP1":
             # Dual-entry only: leg 1 already won, leg 2 is running with SL at BE.
             leg2_outcome = None
@@ -366,7 +377,9 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
             elif leg2_outcome == "CLOSED_BE":
                 new_status = "CLOSED_BE"
                 msg = f"🔒 **XAUUSD {direction} — LEG 2 CLOSED AT BREAK-EVEN** (${entry:.2f})"
-
+            elif leg2_outcome == "MANUAL":
+                new_status = "CLOSED_MANUAL"
+                msg = f"🖐️ **XAUUSD {direction} — RUNNER CLOSED EARLY** (manual / flatten, not SL/TP)"
         if new_status:
             status_writes.append((new_status, now_str, sig_id))
             updates_to_send.append((sig, new_status, msg, extra_note, now_str))

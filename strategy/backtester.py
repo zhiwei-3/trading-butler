@@ -10,6 +10,10 @@ from datetime import datetime, timezone, timedelta
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
 from mt5_engine import MT5_LOCK, get_broker_utc_offset_seconds
+from strategy.trend_breakout import (
+    add_regime_columns, regime_codes, compute_asian_levels,
+    session_of, find_trend_breakout, TB_TAIL,
+)
 from strategy.smc import (
     find_swing_points, detect_market_structure,
     detect_liquidity_sweeps, detect_fvg, detect_order_block,
@@ -141,6 +145,15 @@ def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, m
             return None
         state["last_ifvg_key"] = found["setup"]["key"]
         return {"direction": found["direction"], "entry": close_price, "score": 80,
+                "breakdown": [], **found["targets"]}
+
+    # 0b. TREND / VOLATILITY BREAKOUT
+    elif strategy_name == "trend_breakout":
+        found = find_trend_breakout(full.get("tb"), close_price, atr_val, min_rrr, state["tb_fired"])
+        if not found:
+            return None
+        state["tb_fired"].add(found["setup"]["key"])
+        return {"direction": found["direction"], "entry": close_price, "score": 70,
                 "breakdown": [], **found["targets"]}
 
     # 1. TRIPLE EMA CROSSOVER STRATEGY
@@ -310,7 +323,12 @@ def _prepare_history(symbol, days, timeframe_mode):
     if df_trend['EMA_50'].notna().sum() == 0 or df_macro['EMA_50'].notna().sum() == 0:
         return {"error": "Not enough historical bars on the trend/macro timeframe to compute a 50-period EMA."}
 
-    return {"mode": mode, "preset": preset, "start": start, "df_entry": df_entry, "df_trend": df_trend, "df_macro": df_macro}
+    # H1 regime frame (EMA50/200 + ADX) — 30 days of warmup so the 200 EMA is settled.
+    df_regime_raw = _fetch_history(symbol, mt5.TIMEFRAME_H1, start - timedelta(days=30), end)
+    df_regime = add_regime_columns(df_regime_raw) if df_regime_raw is not None else None
+
+    return {"mode": mode, "preset": preset, "start": start, "df_entry": df_entry, "df_trend": df_trend,
+            "df_macro": df_macro, "df_regime": df_regime}
 
 def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None, min_rrr=None,
                   spread_pips=2.0, progress_callback=None, strategy_name=None,
@@ -343,6 +361,7 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         "last_ifvg_key": None,
         "prev_ema_bearish": False,
         "prev_ema_bullish": False,
+        "tb_fired": set(),
     }
     atr_multiplier = ALERT_STATE["atr_multiplier"]
     volume_multiplier = ALERT_STATE["volume_multiplier"]
@@ -376,6 +395,25 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
 
     trend_cursor = max(0, int(np.searchsorted(trend_close_arr, time_arr[test_start_idx] + entry_td, side='right')) - 1)
     macro_cursor = max(0, int(np.searchsorted(macro_close_arr, time_arr[test_start_idx] + entry_td, side='right')) - 1)
+
+    tb_ready = False
+    if active_strat == "trend_breakout":
+        df_regime = prepared.get("df_regime")
+        if df_regime is None or df_regime["EMA_S"].notna().sum() == 0:
+            return {"error": "Not enough H1 history to compute the 200 EMA / ADX regime filter."}
+        tb_off = pd.Timedelta(seconds=int(get_broker_utc_offset_seconds()))
+        t_utc = pd.DatetimeIndex(df_entry["time"] - tb_off)          # broker time -> true UTC
+        tb_bar_min = _TF_MINUTES[preset["entry"]]
+        high_arr = df_entry["high"].to_numpy(float)
+        low_arr = df_entry["low"].to_numpy(float)
+        ah_arr, al_arr = compute_asian_levels(t_utc, high_arr, low_arr, tb_bar_min)
+        hour_arr = np.asarray(t_utc.hour + t_utc.minute / 60.0, dtype=float)
+        day_arr = np.asarray(t_utc.strftime("%Y-%m-%d"))
+        reg_code = regime_codes(df_regime)
+        reg_close_arr = df_regime["time"].values + np.timedelta64(60, "m")
+        regime_cursor = max(0, int(np.searchsorted(reg_close_arr, time_arr[test_start_idx] + entry_td,
+                                                    side="right")) - 1)
+        tb_ready = True
 
     cached_sr_macro_cursor = -1
     cached_sr_zones = []
@@ -423,6 +461,13 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
             state["prev_ema_bearish"] = bool(ema20_arr[i-1] <= ema50_arr[i-1])
             state["prev_ema_bullish"] = bool(ema20_arr[i-1] >= ema50_arr[i-1])
 
+        tb_code = 0
+        if tb_ready:
+            regime_cursor = _advance_cursor(reg_close_arr, regime_cursor, ts + entry_td)
+            tb_code = int(reg_code[regime_cursor])
+            if tb_code == 0 or session_of(hour_arr[i]) is None:
+                continue
+
         if active_strat in ("smc_confluence", "rsi_reversion"):
             buy_th, sell_th = state["rsi_buy_threshold"], state["rsi_sell_threshold"]
             buy_gate = rsi_val <= (buy_th + 5)
@@ -452,7 +497,15 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
             cached_macro_gaps = find_unmitigated_fvgs(macro_slice)
             cached_sr_macro_cursor = macro_cursor
 
-        if active_strat == "ifvg_sweep":
+        if tb_ready:
+            lo_i = max(0, i - TB_TAIL + 1)
+            full = {"tb": {
+                "trend": "UP" if tb_code > 0 else "DOWN",
+                "ah": ah_arr[i], "al": al_arr[i], "hour": hour_arr[i], "day_key": day_arr[i],
+                "bar_minutes": tb_bar_min,
+                "h": high_arr[lo_i:i + 1], "l": low_arr[lo_i:i + 1], "c": close_arr[lo_i:i + 1],
+            }, "vol_filter_ok": vol_filter_ok}
+        elif active_strat == "ifvg_sweep":
             full = {"entry_slice": entry_slice, "vol_filter_ok": vol_filter_ok}
         else:
             full = _full_analysis_with_memory(entry_slice, state)
@@ -469,8 +522,11 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         if trade is None:
             continue
 
-        is_dual = (active_strat == "smc_confluence" 
-                   and trade["score"] >= ALERT_STATE.get("dual_entry_score_threshold", 50))
+        is_dual = (
+            (active_strat == "smc_confluence"
+             and trade["score"] >= ALERT_STATE.get("dual_entry_score_threshold", 50))
+            or (active_strat == "trend_breakout" and bool(ALERT_STATE.get("tb_dual_entry", True)))
+        )
         outcome, close_time = _simulate_trade(df_entry, i, trade, spread_price=spread_price, dual=is_dual)
         blocked_until = close_time
         if outcome == "HIT_SL" and ALERT_STATE.get("sl_cooldown_enabled", True):

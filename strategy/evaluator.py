@@ -6,7 +6,8 @@ from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
 from database import (log_signal_to_db, get_recent_trades_for_chart, set_signal_status,
                       get_sl_cooldown_remaining_s)
 from mt5_engine import fetch_candles
-from trade_engine import request_execution, trade_slot_blocker
+from trade_engine import request_execution, trade_slot_blocker, calc_risk_lots
+from strategy.trend_breakout import find_trend_breakout, build_live_context
 from strategy.chart import generate_signal_chart
 from strategy.smc import (
     find_swing_points, detect_market_structure,
@@ -151,6 +152,55 @@ def _eval_ifvg_sweep(a):
     return [_package_signal(a, direction, close_price, t["sl_price"], t["tp1_price"],
                             t["tp2_price"], msg, score=80, zone=setup, reasons=reasons)], []
 
+def _eval_trend_breakout(a):
+    """H1 trend/ADX regime + Asian-range breakout or sweep+BOS in the London/NY window."""
+    tb = a.get("tb")
+    if not tb:
+        return [], []
+
+    # Dedup keys are per-day; drop yesterday's.
+    ALERT_STATE["tb_fired"] = {k for k in ALERT_STATE.get("tb_fired", set()) if k.startswith(tb["day_key"])}
+    found = find_trend_breakout(tb, a["close_price"], a["atr_val"],
+                                ALERT_STATE.get("min_rrr", 1.5), ALERT_STATE["tb_fired"])
+    if not found:
+        return [], []
+
+    direction, setup, t = found["direction"], found["setup"], found["targets"]
+    ALERT_STATE["tb_fired"].add(setup["key"])
+
+    is_buy = direction == "BUY"
+    icon = "🟢" if is_buy else "🔴"
+    side_word = "above" if is_buy else "below"
+    mode_txt = "Sweep + BOS" if setup["mode"] == "SWEEP_BOS" else "Range Breakout"
+    close_price = a["close_price"]
+
+    msg = (
+        f"🌅 **TREND BREAKOUT {direction} ALERT** {icon}\n\n"
+        f"📍 **Entry:** `${close_price}` | 📊 **14-ATR:** `${a['atr_val']}`\n"
+        f"🛡️ **SL:** `${t['sl_price']}` ({t['sl_source']}, {t['sl_dist']} pts)\n"
+        f"🎯 **TP1:** `${t['tp1_price']}` | 🎯 **TP2:** `${t['tp2_price']}` (RRR: `1:{t['rrr']}`)\n\n"
+        f"🧭 **H1 Regime:** {'Uptrend' if is_buy else 'Downtrend'} (ADX `{tb['adx']:.1f}`)\n"
+        f"🌏 **Asian Range:** `${setup['al']} – ${setup['ah']}` | **Setup:** {mode_txt} | **Session:** {setup['session']}"
+    )
+
+    swept = "Asian low" if is_buy else "Asian high"
+    brk = "Asian high" if is_buy else "Asian low"
+    reasons = [
+        f"H1 {'uptrend' if is_buy else 'downtrend'}: EMA50 {'>' if is_buy else '<'} EMA200 "
+        f"({tb['ema_f']:.2f} / {tb['ema_s']:.2f}), ADX {tb['adx']:.1f} > {ALERT_STATE['tb_adx_min']}",
+        f"{setup['session']} open window, Asian range {setup['al']} - {setup['ah']}",
+    ]
+    if setup["mode"] == "SWEEP_BOS":
+        reasons.append(f"{swept} was swept (wick to {setup['sweep_extreme']}) and price closed back inside")
+        reasons.append(f"Break of structure: closed {side_word} {setup['level']} in the H1 trend direction")
+    else:
+        reasons.append(f"Candle closed {side_word} the {brk} ({setup['level']}) in the H1 trend direction")
+    reasons += _target_reasons(t)
+
+    return [_package_signal(a, direction, close_price, t["sl_price"], t["tp1_price"], t["tp2_price"], msg,
+                            score=70, zone={"fvg_top": setup["ah"], "fvg_bottom": setup["al"]},
+                            reasons=reasons, dynamic_sizing=True)], []
+
 def _eval_ema_cross(a):
     df = a["df_entry"]
     close_price, atr_val = a["close_price"], a["atr_val"]
@@ -233,25 +283,15 @@ def _eval_rsi_reversion(a):
 
 def _is_dual_entry(score):
     """
-    Dual-entry (2 fixed-lot legs) only applies to smc_confluence strategy's graded
-    confluence score.
+    Dual-entry (2 legs): smc_confluence above its score threshold, or trend_breakout
+    when tb_dual_entry is on. Every other strategy trades a single TP1-only leg.
     """
-    if ALERT_STATE.get("active_strategy", "smc_confluence") != "smc_confluence":
+    strat = ALERT_STATE.get("active_strategy", "smc_confluence")
+    if strat == "trend_breakout":
+        return bool(ALERT_STATE.get("tb_dual_entry", True))
+    if strat != "smc_confluence":
         return False
     return score >= ALERT_STATE.get("dual_entry_score_threshold", 50)
-
-_FACTOR_TEXT = {
-    "EMA Trend Align":     "entry-timeframe EMA20/50 trend agrees",
-    "Macro Trend Align":   "macro-timeframe trend agrees",
-    "Structure BOS":       "fresh break of structure in the trade direction",
-    "Liquidity Sweep":     "wick swept recent liquidity and closed back inside",
-    "Fair Value Gap":      "price is reacting from a fresh Fair Value Gap",
-    "Volume/ATR Activity": "volatility and volume are above average",
-    "MACD Confirmation":   "MACD momentum agrees",
-    "Candlestick Pattern": "confirming candlestick pattern on the entry candle",
-    "RSI Divergence":      "RSI divergence supports the reversal",
-    "Support/Resistance":  "price is at a support/resistance zone",
-}
 
 
 def _target_reasons(t):
@@ -286,14 +326,27 @@ def format_reasons(reasons):
     return "🧠 **Why this trade:**\n" + "\n".join(f"  • {r}" for r in reasons)
 
 def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, base_msg, score=0, zone=None,
-                    reasons=None):
+                    reasons=None, dynamic_sizing=False):
     """Logs the signal, queues live execution (if armed and the slot is free), and renders the alert."""
     symbol = a.get("symbol", "XAUUSD")
     dual = _is_dual_entry(score)
 
+    # ATR/risk-based sizing (only for strategies that opt in).
+    lots_leg, sizing_text, sizing_blocker = None, "", None
+    if dynamic_sizing and ALERT_STATE.get("dynamic_lots_enabled", True):
+        sz = calc_risk_lots(symbol, abs(close_price - sl_price), legs=2 if dual else 1)
+        if sz["ok"]:
+            lots_leg = sz["lots"]
+            sizing_text = (f"`{lots_leg}` lots per leg — risk `{sz['risk_money']:,.2f}` "
+                           f"(`{ALERT_STATE.get('risk_percent')}%` of `{sz['balance']:,.2f}` balance, "
+                           f"stop `{abs(close_price - sl_price):.2f}` pts)")
+        else:
+            sizing_blocker = sz["reason"]
+            sizing_text = f"⚠️ unavailable — {sizing_blocker}"
+
     blocker = None
     if ALERT_STATE.get("auto_trade_enabled"):
-        blocker = trade_slot_blocker(symbol)
+        blocker = trade_slot_blocker(symbol) or sizing_blocker
 
     signal_id = log_signal_to_db(symbol, direction, close_price, sl_price, tp1_price, tp2_price, score,
                                  dual_entry=dual, near_zone=a.get("near_zone"),
@@ -308,9 +361,9 @@ def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, b
             set_signal_status(signal_id, "SKIPPED")
     else:
         request_execution(signal_id, symbol, direction, close_price, sl_price, tp1_price, tp2_price,
-                          score, dual_entry=dual)
+                          score, dual_entry=dual, lots=lots_leg)
 
-    fixed_lot = ALERT_STATE.get("fixed_lot_size", 0.01)
+    lot_disp = lots_leg if lots_leg else ALERT_STATE.get("fixed_lot_size", 0.01)
     exec_note = ""
     pos_info = ""
     if blocker:
@@ -320,17 +373,18 @@ def _package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, b
             mode_lbl = "DRY-RUN" if ALERT_STATE.get("trade_dry_run", True) else "LIVE"
             if dual:
                 exec_note = (
-                    f"🤖 *Auto-trade {mode_lbl}* — 2 legs of `{fixed_lot}` lots each: Leg 1 closes fully "
+                    f"🤖 *Auto-trade {mode_lbl}* — 2 legs of `{lot_disp}` lots each: Leg 1 closes fully "
                     f"at TP1, Leg 2's SL trails to break-even the moment TP1 hits and runs for TP2.\n\n"
                 )
             else:
                 exec_note = (
-                    f"🤖 *Auto-trade {mode_lbl}* — 1 leg of `{fixed_lot}` lots, targeting **TP1 only** "
+                    f"🤖 *Auto-trade {mode_lbl}* — 1 leg of `{lot_disp}` lots, targeting **TP1 only** "
                     f"(below the dual-entry score threshold, or a non-confluence strategy).\n\n"
                 )
+        sizing_line = sizing_text if sizing_text else f"`{lot_disp}` lots per leg (fixed)"
         pos_info = (
             f"💼 **Position Plan:**\n"
-            f"• **Sizing:** `{fixed_lot}` lots per leg (fixed)\n"
+            f"• **Sizing:** {sizing_line}\n"
             f"• **Legs:** {'2 — TP1 full close + TP2/BE runner 🎯🎯' if dual else '1 — TP1 only 🎯'}\n\n"
         )
 
@@ -461,7 +515,8 @@ def calculate_targets(direction, close_price, atr_val, order_block, near_zone,
 
 def analyze_market(symbol):
     entry_tf, trend_tf, macro_tf = ALERT_STATE["entry_tf"], ALERT_STATE["trend_tf"], ALERT_STATE["macro_tf"]
-    df_entry = fetch_candles(symbol, entry_tf, 200)
+    tb_active = ALERT_STATE.get("active_strategy") == "trend_breakout"
+    df_entry = fetch_candles(symbol, entry_tf, 400 if tb_active else 200)
     df_trend = fetch_candles(symbol, trend_tf, 200)
     df_macro = fetch_candles(symbol, macro_tf, 200)
     if df_entry is None or df_trend is None or df_macro is None:
@@ -493,6 +548,7 @@ def analyze_market(symbol):
     vol_filter_ok, _ = passes_volatility_filter(df_entry,
                             atr_multiplier=ALERT_STATE["atr_multiplier"],
                             volume_multiplier=ALERT_STATE["volume_multiplier"])
+    tb = build_live_context(symbol, df_entry) if tb_active else None
 
     return {
         "symbol": symbol,
@@ -514,6 +570,7 @@ def analyze_market(symbol):
         "candle_pattern": detect_candlestick_pattern(df_entry),
         "divergence": detect_divergence(df_entry),
         "near_zone": near_zone,
+        "tb": tb,
     }
 
 def evaluate_signals(a):
@@ -536,6 +593,8 @@ def evaluate_signals(a):
         signals, _ = _eval_rsi_reversion(a)
     elif strat == "ifvg_sweep":
         signals, _ = _eval_ifvg_sweep(a)
+    elif strat == "trend_breakout":
+        signals, _ = _eval_trend_breakout(a)
     else:
         signals, _ = evaluate_smc_confluence(a)
 

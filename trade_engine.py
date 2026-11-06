@@ -90,10 +90,55 @@ def _deviation():
 def _fixed_lot():
     return float(ALERT_STATE.get("fixed_lot_size", 0.01))
 
+def calc_risk_lots(symbol, sl_dist, legs=1):
+    """
+    BLOCKING. Volatility-scaled lot size per leg:
+
+        lots = (balance * risk% / legs) / ((stop_distance / tick_size) * tick_value)
+
+    stop_distance = ATR x multiplier (the strategy's actual stop), so higher ATR ->
+    wider stop -> fewer lots, lower ATR -> more lots, and the money at risk stays
+    constant. Returns {"ok", "lots", "risk_money", "balance", "reason"}.
+    """
+    fail = lambda why: {"ok": False, "lots": None, "reason": why}
+    try:
+        if not sl_dist or sl_dist <= 0:
+            return fail("Stop distance is zero.")
+        if not init_mt5():
+            return fail("MT5 terminal unreachable - cannot size the position.")
+        with MT5_LOCK:
+            acc = mt5.account_info()
+            info = mt5.symbol_info(symbol)
+        if acc is None or info is None:
+            return fail("Account or symbol info unavailable for sizing.")
+
+        tick_size = float(info.trade_tick_size or info.point or 0)
+        tick_value = float(getattr(info, "trade_tick_value_loss", 0) or info.trade_tick_value or 0)
+        if tick_size <= 0 or tick_value <= 0:
+            return fail("Broker reports no tick size/value for this symbol.")
+
+        risk_pct = float(ALERT_STATE.get("risk_percent", 0.5))
+        budget = float(acc.balance) * risk_pct / 100.0 / max(1, legs)
+        loss_per_lot = (float(sl_dist) / tick_size) * tick_value
+        raw = budget / loss_per_lot
+
+        step = info.volume_step or 0.01
+        lots = math.floor(raw / step + 1e-9) * step
+        lots = round(min(lots, float(ALERT_STATE.get("max_lot_size", 1.0)), info.volume_max), 2)
+        if lots < info.volume_min - 1e-9:
+            return fail(f"Risk budget too small: {risk_pct}% of balance gives {raw:.4f} lots "
+                        f"(broker minimum {info.volume_min}).")
+        return {"ok": True, "lots": lots, "balance": float(acc.balance),
+                "risk_money": round(lots * loss_per_lot * legs, 2), "reason": ""}
+    except Exception as e:
+        logging.exception("calc_risk_lots failed")
+        return fail(f"Sizing error: {e}")
+
 
 # ---------------------------------------------------------------- intents
 
-def request_execution(signal_id, symbol, direction, entry, sl_price, tp1_price, tp2_price, score, dual_entry=False):
+def request_execution(signal_id, symbol, direction, entry, sl_price, tp1_price, tp2_price, score,
+                      dual_entry=False, lots=None):
     """Called by the strategy layer. Queues an intent; never touches MT5 itself."""
     if not ALERT_STATE.get("auto_trade_enabled", False):
         return False
@@ -106,6 +151,7 @@ def request_execution(signal_id, symbol, direction, entry, sl_price, tp1_price, 
             "entry": float(entry), "sl": float(sl_price),
             "tp1": float(tp1_price), "tp2": float(tp2_price),
             "score": score, "dual_entry": bool(dual_entry),
+            "lots": float(lots) if lots else None,      # None -> fixed_lot_size
             "queued_at": datetime.now(timezone.utc),
         })
     return True
@@ -505,11 +551,15 @@ def force_close_leg(ticket, reason_label="invalidated"):
 
 def reconcile_exit(ticket, candidates):
     """
-    If `ticket`'s position is closed, classify the outcome by which known price
-    level (candidates: {label: price}) the FINAL exit deal landed closest to.
+    If `ticket`'s position is closed, classify HOW it closed.
 
-    Returns the matching label, or None if the position is still open or no
-    deal history is available yet.
+    Returns:
+      * a label from `candidates` ONLY when the broker closed it at SL/TP
+        (deal.reason), or - if the build exposes no reason - when the exit price
+        sits near one of the levels;
+      * "MANUAL" when it was closed by something else (/close, terminal click,
+        flatten, stop-out) - never forced into SL/TP;
+      * None if still open or no deal history yet.
     """
     if position_by_ticket(ticket) is not None:
         return None
@@ -517,9 +567,6 @@ def reconcile_exit(ticket, candidates):
         with MT5_LOCK:
             deals = mt5.history_deals_get(position=int(ticket))
         if not deals:
-            # history_deals_get() can't combine a date range with position=, so
-            # pull a date window and filter. The window ends +1 day so it covers
-            # broker-server timestamps that run ahead of UTC.
             now = datetime.now(timezone.utc)
             with MT5_LOCK:
                 window = mt5.history_deals_get(now - timedelta(days=8), now + timedelta(days=1))
@@ -539,7 +586,17 @@ def reconcile_exit(ticket, candidates):
     scored = {k: v for k, v in candidates.items() if v is not None}
     if not scored:
         return None
-    return min(scored, key=lambda k: abs(exit_price - scored[k]))
+    nearest = min(scored, key=lambda k: abs(exit_price - scored[k]))
+
+    reason = getattr(last_deal, "reason", None)
+    if reason is not None:
+        broker_levels = (getattr(mt5, "DEAL_REASON_SL", 4), getattr(mt5, "DEAL_REASON_TP", 5))
+        return nearest if reason in broker_levels else "MANUAL"
+
+    # Fallback (no deal.reason): require the exit to be close to a level.
+    span = max(scored.values()) - min(scored.values())
+    tol = span * 0.25 if span > 0 else 0.0
+    return nearest if abs(exit_price - scored[nearest]) <= tol else "MANUAL"
 
 
 # ---------------------------------------------------------------- outcome P&L
@@ -574,6 +631,35 @@ def _sim_leg_pnl(symbol, direction, lots, entry, exit_price):
     return round(diff * float(lots) * size, 2)
 
 
+def _manual_close_pnl(sig):
+    """Real realised P&L of the legs that were closed outside SL/TP."""
+    curr = "USD"
+    try:
+        with MT5_LOCK:
+            acc = mt5.account_info()
+        if acc is not None and acc.currency:
+            curr = acc.currency
+    except Exception:
+        pass
+
+    lines, total = [], 0.0
+    for leg_no, k in ((1, ""), (2, "2")):
+        ticket = sig.get("ticket" + k)
+        if sig.get("exec_mode" + k) != "LIVE" or not ticket:
+            continue
+        pnl = position_realized_pnl(ticket)
+        if pnl is None:
+            continue
+        total += pnl
+        icon = "✅" if pnl > 0.005 else ("❌" if pnl < -0.005 else "🔒")
+        lines.append(f"• Leg {leg_no} {icon}: `{pnl:+,.2f} {curr}`")
+    if not lines:
+        return ""
+    if len(lines) > 1:
+        lines.append(f"• **Trade net:** `{total:+,.2f} {curr}`")
+    return "💰 **Trade P&L (manual close)**\n" + "\n".join(lines)
+
+
 def summarize_outcome_pnl(sig, new_status):
     """
     BLOCKING. Telegram-ready P&L block for the legs a status transition closed
@@ -583,6 +669,10 @@ def summarize_outcome_pnl(sig, new_status):
       NONE     -> paper (fixed lot at the signal levels)
     """
     sig = dict(sig)
+
+    if new_status == "CLOSED_MANUAL":
+        return _manual_close_pnl(sig)
+
     direction = sig["direction"]
     symbol = sig.get("symbol") or "XAUUSD"
     entry, sl, tp1, tp2 = (float(sig[k]) for k in ("entry_price", "sl_price", "tp1_price", "tp2_price"))
@@ -674,14 +764,13 @@ def _drain_batch(batch):
 
     for intent in batch:
         symbol, direction, dual = intent["symbol"], intent["direction"], intent["dual_entry"]
+        leg_lots = float(intent.get("lots") or fixed_lot)
         sl_dist = abs(intent["entry"] - intent["sl"])
         if sl_dist <= 1e-9:
             _skip_intent(intent, dual)
             reports.append(f"❌ **Execution skipped** — zero SL distance on {direction} {symbol}.")
             continue
 
-        # One trade idea at a time (fail-closed). A dual-entry signal's two legs are
-        # opened below, after this gate, so they never count against each other.
         blocker = None
         if symbol in handled_symbols:
             blocker = "another signal on this symbol was already handled this cycle."
@@ -692,7 +781,6 @@ def _drain_batch(batch):
             reports.append(f"⏭️ **Execution skipped** — {direction} {symbol} signal ignored, {blocker}")
             continue
 
-        # Abort if the market ran away from the signal price while we were queueing.
         tick = get_tick(symbol)
         if tick is not None:
             live = tick.ask if direction == "BUY" else tick.bid
@@ -717,20 +805,20 @@ def _drain_batch(batch):
         leg1_ok = False
         for leg_no, label, tp_price, bypass_cap in legs:
             if leg_no == 2 and not leg1_ok:
-                attach_trade_execution(intent["signal_id"], 2, None, fixed_lot, "NONE", None)
+                attach_trade_execution(intent["signal_id"], 2, None, leg_lots, "NONE", None)
                 leg_lines.append("⏭️ Leg 2 (TP2) skipped — leg 1 did not open.")
                 continue
 
-            res = open_position(symbol, direction, fixed_lot, intent["sl"], tp_price,
+            res = open_position(symbol, direction, leg_lots, intent["sl"], tp_price,
                                 tag=f"TB-{label}", bypass_position_cap=bypass_cap)
 
             if leg_no == 1:
                 leg1_ok = res["ok"]
 
             if res["ok"] and res.get("dry_run"):
-                attach_trade_execution(intent["signal_id"], leg_no, None, fixed_lot, "DRY", res.get("price"))
+                attach_trade_execution(intent["signal_id"], leg_no, None, leg_lots, "DRY", res.get("price"))
                 leg_lines.append(
-                    f"🧪 Leg {leg_no} ({label}) DRY-RUN — `{fixed_lot}` lots @ ~`${res['price']:.2f}`, "
+                    f"🧪 Leg {leg_no} ({label}) DRY-RUN — `{leg_lots}` lots @ ~`${res['price']:.2f}`, "
                     f"SL `${res['sl']}`, TP `${res['tp']}`"
                 )
             elif res["ok"]:
@@ -740,11 +828,9 @@ def _drain_batch(batch):
                     f"SL `${res['sl']}`, TP `${res['tp']}`"
                 )
             else:
-                attach_trade_execution(intent["signal_id"], leg_no, None, fixed_lot, "NONE", None)
+                attach_trade_execution(intent["signal_id"], leg_no, None, leg_lots, "NONE", None)
                 leg_lines.append(f"❌ Leg {leg_no} ({label}) failed — {res['reason']}")
 
-        # Leg 1 never opened -> no trade exists. Stop the tracker from reporting
-        # fake TP/SL outcomes for it.
         if not leg1_ok:
             set_signal_status(intent["signal_id"], "SKIPPED")
 
