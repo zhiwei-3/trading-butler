@@ -1,8 +1,6 @@
-# strategy/trend_breakout.py
+# strategies/trend_breakout.py
 """
-Systematic Trend Following / Volatility Breakout.
-
-Shared by the live evaluator and the backtester so the two cannot drift apart.
+Systematic Trend Following / Volatility Breakout — self-contained, PURE rules.
 
 Regime  : H1 EMA50 vs EMA200 + ADX(14) > tb_adx_min  (last CLOSED H1 bar)
 Entry   : inside the London / NY open window, in the regime direction
@@ -11,20 +9,28 @@ Entry   : inside the London / NY open window, in the regime direction
 Targets : structural SL (+ fractional ATR buffer, ATR floor/cap) and fixed-RR TPs
 
 All time logic is TRUE UTC (broker-server time minus the detected offset).
+No data fetching here: core.evaluator / core.backtester fetch H1 candles and the broker
+offset and pass them in.
 """
 
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
-import MetaTrader5 as mt5
 
 from config import ALERT_STATE
-from mt5_engine import fetch_candles, get_broker_utc_offset_seconds
+from utils.common import signal_spec, target_reasons
+
+LABEL = "H1 Trend/ADX Regime + Asian Range Breakout / Sweep+BOS (ATR-risk sizing)"
+LIVE_ENTRY_BARS = 400      # analyze_market fetches this many entry-TF candles for this strategy
 
 ASIAN_START_H = 0.0
 ASIAN_END_H = 7.0
 TB_TAIL = 60                       # closed bars handed to the entry logic
 REGIME_EMA_FAST, REGIME_EMA_SLOW, REGIME_ADX_LEN = 50, 200, 14
+
+
+def is_dual(score):
+    return bool(ALERT_STATE.get("tb_dual_entry", True))
 
 
 # ---------------------------------------------------------------- regime
@@ -204,20 +210,19 @@ def find_trend_breakout(tb, entry, atr_val, min_rrr, fired):
     return {"direction": direction, "setup": setup, "targets": targets}
 
 
-# ---------------------------------------------------------------- live context
+# ---------------------------------------------------------------- live context (hook; data passed in by core.evaluator)
 
-def build_live_context(symbol, df_entry):
-    """Builds the `tb` dict for the live evaluator (BLOCKING - fetches H1 from MT5)."""
+def build_live_context(df_entry, df_h1, broker_offset_s):
+    """Builds the `tb` dict for the live evaluator. Pure: candles + broker offset come in as arguments."""
     if df_entry is None or len(df_entry) < TB_TAIL + 5:
         return None
-    df_h1 = fetch_candles(symbol, mt5.TIMEFRAME_H1, 400)
     if df_h1 is None or len(df_h1) < REGIME_EMA_SLOW + 30:
         return None
 
     reg = add_regime_columns(df_h1).iloc[-2]             # last CLOSED H1 bar
     trend = regime_trend(reg["EMA_F"], reg["EMA_S"], reg["ADX"])
 
-    off = pd.Timedelta(seconds=int(get_broker_utc_offset_seconds()))
+    off = pd.Timedelta(seconds=int(broker_offset_s))
     t_utc = pd.DatetimeIndex(df_entry["time"] - off)     # broker time -> true UTC
     step = pd.Series(t_utc).diff().median()
     bar_min = max(1, int(round(step.total_seconds() / 60))) if pd.notna(step) else 5
@@ -239,3 +244,66 @@ def build_live_context(symbol, df_entry):
         "bar_minutes": bar_min,
         "h": h[:-1][-TB_TAIL:], "l": l[:-1][-TB_TAIL:], "c": c[:-1][-TB_TAIL:],
     }
+
+
+# ---------------------------------------------------------------- live strategy
+
+def evaluate(a):
+    tb = a.get("tb")
+    if not tb:
+        return [], []
+
+    # Dedup keys are per-day; drop yesterday's.
+    ALERT_STATE["tb_fired"] = {k for k in ALERT_STATE.get("tb_fired", set()) if k.startswith(tb["day_key"])}
+    found = find_trend_breakout(tb, a["close_price"], a["atr_val"],
+                                ALERT_STATE.get("min_rrr", 1.5), ALERT_STATE["tb_fired"])
+    if not found:
+        return [], []
+
+    direction, setup, t = found["direction"], found["setup"], found["targets"]
+    ALERT_STATE["tb_fired"].add(setup["key"])
+
+    is_buy = direction == "BUY"
+    icon = "🟢" if is_buy else "🔴"
+    side_word = "above" if is_buy else "below"
+    mode_txt = "Sweep + BOS" if setup["mode"] == "SWEEP_BOS" else "Range Breakout"
+    close_price = a["close_price"]
+
+    msg = (
+        f"🌅 **TREND BREAKOUT {direction} ALERT** {icon}\n\n"
+        f"📍 **Entry:** `${close_price}` | 📊 **14-ATR:** `${a['atr_val']}`\n"
+        f"🛡️ **SL:** `${t['sl_price']}` ({t['sl_source']}, {t['sl_dist']} pts)\n"
+        f"🎯 **TP1:** `${t['tp1_price']}` | 🎯 **TP2:** `${t['tp2_price']}` (RRR: `1:{t['rrr']}`)\n\n"
+        f"🧭 **H1 Regime:** {'Uptrend' if is_buy else 'Downtrend'} (ADX `{tb['adx']:.1f}`)\n"
+        f"🌏 **Asian Range:** `${setup['al']} – ${setup['ah']}` | **Setup:** {mode_txt} | **Session:** {setup['session']}"
+    )
+
+    swept = "Asian low" if is_buy else "Asian high"
+    brk = "Asian high" if is_buy else "Asian low"
+    reasons = [
+        f"H1 {'uptrend' if is_buy else 'downtrend'}: EMA50 {'>' if is_buy else '<'} EMA200 "
+        f"({tb['ema_f']:.2f} / {tb['ema_s']:.2f}), ADX {tb['adx']:.1f} > {ALERT_STATE['tb_adx_min']}",
+        f"{setup['session']} open window, Asian range {setup['al']} - {setup['ah']}",
+    ]
+    if setup["mode"] == "SWEEP_BOS":
+        reasons.append(f"{swept} was swept (wick to {setup['sweep_extreme']}) and price closed back inside")
+        reasons.append(f"Break of structure: closed {side_word} {setup['level']} in the H1 trend direction")
+    else:
+        reasons.append(f"Candle closed {side_word} the {brk} ({setup['level']}) in the H1 trend direction")
+    reasons += target_reasons(t)
+
+    return [signal_spec(direction, close_price, t["sl_price"], t["tp1_price"], t["tp2_price"], msg,
+                        score=70, zone={"fvg_top": setup["ah"], "fvg_bottom": setup["al"]},
+                        reasons=reasons, dynamic_sizing=True, dual=is_dual(70))], []
+
+
+# ---------------------------------------------------------------- backtest
+
+def decide(c):
+    state, full = c["state"], c["full"]
+    found = find_trend_breakout(full.get("tb"), c["close_price"], c["atr_val"], c["min_rrr"], state["tb_fired"])
+    if not found:
+        return None
+    state["tb_fired"].add(found["setup"]["key"])
+    return {"direction": found["direction"], "entry": c["close_price"], "score": 70,
+            "breakdown": [], **found["targets"]}

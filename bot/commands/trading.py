@@ -7,14 +7,14 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, save_settings
-from mt5_engine import check_mt5_alive, get_tick, MT5_LOCK
-from database import get_open_dry_run_signals
-from trade_engine import (
+from core.mt5_engine import check_mt5_alive, get_tick, MT5_LOCK
+from core.database import get_open_dry_run_signals
+from core.trade_engine import (
     list_managed_positions, close_position, close_all_managed,
     modify_position_sltp, pending_intent_count,
 )
 from ._common import admin_only, md_safe
-from .core import _money
+from .general import _money
 
 
 _MAX_POSITION_ROWS = 12

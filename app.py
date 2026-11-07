@@ -5,10 +5,10 @@ from telegram import BotCommand
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from config import ALERT_STATE, TELEGRAM_TOKEN, USER_ID, save_settings
-from database import init_db
-from mt5_engine import init_mt5
+from core.database import init_db
+from core.mt5_engine import init_mt5
 from bot.commands import (
-    start_cmd, menu_cmd, handle_callback_query,
+    start_cmd, menu_cmd,
     enable_scanner, disable_scanner, account_cmd, journal_cmd,
     news_calendar_cmd, spread_check_cmd, gold_snapshot, market_session,
     set_cmd, set_timeframe, set_strategy_cmd, filters_cmd, watchlist_cmd,
@@ -16,10 +16,11 @@ from bot.commands import (
     status_cmd, heartbeat_cmd, diagnose_cmd,
     backtest_cmd, optimize_cmd,
 )
+from bot.callbacks import handle_callback_query
 from bot.jobs import (
-    market_scanner_job, 
-    signal_outcome_tracker_job, 
-    restart_heartbeat_job, 
+    market_scanner_job,
+    signal_outcome_tracker_job,
+    restart_heartbeat_job,
     ensure_watchdog_running
 )
 

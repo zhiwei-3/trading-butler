@@ -4,9 +4,10 @@ import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS
-from mt5_engine import get_gold_symbol
-from strategy.backtester import run_backtest, generate_equity_chart
+from config import ALERT_STATE, TIMEFRAME_PRESETS
+from strategies import STRATEGY_PRESETS
+from core.mt5_engine import get_gold_symbol
+from core.backtester import run_backtest, generate_equity_chart
 from ._common import admin_only
 
 

@@ -6,14 +6,15 @@ import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, save_settings
-from database import (
+from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings
+from strategies import STRATEGY_PRESETS
+from core.database import (
     get_sweep_run, get_latest_sweep_run, get_sweep_results,
     count_sweep_runs, get_sweep_history, get_sweep_history_ranked,
     log_sweep_run,
 )
-from mt5_engine import get_gold_symbol
-from strategy.backtester import run_backtest_sweep, MIN_SWEEP_SAMPLE
+from core.mt5_engine import get_gold_symbol
+from core.backtester import run_backtest_sweep, MIN_SWEEP_SAMPLE
 from ._common import admin_only
 
 # Shared by /optimize view and /optimize history. "column" feeds the DB query

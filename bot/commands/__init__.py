@@ -1,4 +1,4 @@
-from .core import (
+from .general import (
     start_cmd, menu_cmd, enable_scanner, disable_scanner,
     account_cmd, status_cmd, heartbeat_cmd,
 )
@@ -16,7 +16,6 @@ from .settings import (
 from .journal import journal_cmd
 from .backtest import backtest_cmd
 from .optimize import optimize_cmd
-from .callbacks import handle_callback_query
 
 __all__ = [
     "start_cmd", "menu_cmd", "enable_scanner", "disable_scanner",
@@ -26,5 +25,5 @@ __all__ = [
     "diagnose_cmd", "news_calendar_cmd",
     "set_cmd", "set_timeframe", "set_strategy_cmd",
     "filters_cmd", "watchlist_cmd",
-    "journal_cmd", "backtest_cmd", "optimize_cmd", "handle_callback_query",
+    "journal_cmd", "backtest_cmd", "optimize_cmd",
 ]

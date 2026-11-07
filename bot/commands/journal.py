@@ -13,11 +13,11 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE
-from database import get_dry_run_journal_signals, get_live_signal_links
-from mt5_engine import check_mt5_alive, MT5_LOCK, get_broker_utc_offset_seconds
-from strategy.chart import generate_journal_chart
+from core.database import get_dry_run_journal_signals, get_live_signal_links
+from core.mt5_engine import check_mt5_alive, MT5_LOCK, get_broker_utc_offset_seconds
+from utils.chart import generate_journal_chart
 from ._common import admin_only, md_safe
-from .core import _HISTORY_START, _deal_stats, _money, _pf_text
+from .general import _HISTORY_START, _deal_stats, _money, _pf_text
 
 PAGE_SIZE = 6
 MAX_PAGE = 9999          # keeps callback_data well under Telegram's 64-byte limit

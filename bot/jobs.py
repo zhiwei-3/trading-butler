@@ -8,21 +8,21 @@ from telegram.ext import ContextTypes
 from telegram.error import NetworkError, TelegramError, TimedOut, BadRequest
 
 from config import ALERT_STATE, USER_ID, BOT_START_TIME, save_settings
-from database import (
+from core.database import (
     get_db_connection,
     get_daily_performance_stats,
     mark_leg2_be_moved,
     get_recent_trades_for_chart,
     get_sl_cooldown_remaining_s,
 )
-from trade_engine import (
+from core.trade_engine import (
     execute_pending_intents, trail_leg_to_breakeven, force_close_leg, reconcile_exit,
     close_all_managed, list_managed_positions, enforce_single_trade, summarize_outcome_pnl,
 )
-from mt5_engine import get_gold_symbol, check_mt5_alive, fetch_candles, get_tick
-from news_engine import news_guard_check, check_news_blockade, check_news_post_release
-from strategy.evaluator import analyze_market, evaluate_signals
-from strategy.chart import generate_chart_snapshot, generate_outcome_chart
+from core.mt5_engine import get_gold_symbol, check_mt5_alive, fetch_candles, get_tick
+from core.news_engine import news_guard_check, check_news_blockade, check_news_post_release
+from core.evaluator import analyze_market, evaluate_signals
+from utils.chart import generate_chart_snapshot, generate_outcome_chart
 
 def format_uptime(delta: timedelta) -> str:
     total_seconds = int(delta.total_seconds())

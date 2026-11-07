@@ -1,6 +1,6 @@
 import pandas as pd
 import pandas_ta as ta
-from strategy.smc import find_swing_points
+from utils.smc import find_swing_points
 
 def passes_volatility_filter(df, atr_multiplier=1.0, volume_multiplier=1.2, atr_period=14, avg_period=20):
     df = df.copy()

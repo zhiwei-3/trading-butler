@@ -6,11 +6,11 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TF_LABELS
-from database import get_recent_trades_for_chart
-from mt5_engine import get_gold_symbol, get_tick
-from news_engine import fetch_economic_events
-from strategy.evaluator import analyze_market
-from strategy.chart import generate_chart_snapshot
+from core.database import get_recent_trades_for_chart
+from core.mt5_engine import get_gold_symbol, get_tick
+from core.news_engine import fetch_economic_events
+from core.evaluator import analyze_market
+from utils.chart import generate_chart_snapshot
 from ._common import admin_only, md_safe
 
 

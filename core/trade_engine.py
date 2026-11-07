@@ -38,10 +38,10 @@ from datetime import datetime, timezone, timedelta
 import MetaTrader5 as mt5
 
 from config import ALERT_STATE
-from database import (attach_trade_execution, count_live_trades_today,
-                      set_signal_status, get_active_live_signals,
-                      get_open_executed_signals)
-from mt5_engine import MT5_LOCK, init_mt5, get_tick
+from core.database import (attach_trade_execution, count_live_trades_today,
+                           set_signal_status, get_active_live_signals,
+                           get_open_executed_signals)
+from core.mt5_engine import MT5_LOCK, init_mt5, get_tick
 
 MAX_SEND_RETRIES = 3
 

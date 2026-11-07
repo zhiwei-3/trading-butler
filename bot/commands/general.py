@@ -10,8 +10,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from config import USER_ID, ALERT_STATE, save_settings
-from database import get_signal_stats
-from mt5_engine import check_mt5_alive, MT5_LOCK, get_broker_utc_offset_seconds
+from core.database import get_signal_stats
+from core.mt5_engine import check_mt5_alive, MT5_LOCK, get_broker_utc_offset_seconds
 from bot.jobs import (
     build_status_snapshot,
     market_scanner_job,

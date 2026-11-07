@@ -2,7 +2,8 @@ import math
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, save_settings
+from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings
+from strategies import STRATEGY_PRESETS
 from ._common import admin_only
 
 

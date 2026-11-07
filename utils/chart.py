@@ -13,7 +13,7 @@ from matplotlib.patches import Rectangle
 from matplotlib.lines import Line2D
 
 from config import ALERT_STATE, TF_LABELS
-from mt5_engine import get_broker_utc_offset_seconds
+from core.mt5_engine import get_broker_utc_offset_seconds
 
 # ------------------------------------------------------------------ theme
 BG, GRID, FG = "#121212", "#262626", "#e0e0e0"

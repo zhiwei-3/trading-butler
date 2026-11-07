@@ -1,5 +1,3 @@
-# strategy/backtester.py
-
 import io
 import math
 import numpy as np
@@ -8,22 +6,18 @@ import pandas_ta as ta
 import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS, CONFLUENCE_WEIGHTS
-from mt5_engine import MT5_LOCK, get_broker_utc_offset_seconds
-from strategy.trend_breakout import (
-    add_regime_columns, regime_codes, compute_asian_levels,
-    session_of, find_trend_breakout, TB_TAIL,
-)
-from strategy.smc import (
+from config import ALERT_STATE, TIMEFRAME_PRESETS
+from core.mt5_engine import MT5_LOCK, get_broker_utc_offset_seconds
+from strategies import get_strategy, STRATEGIES
+from utils.smc import (
     find_swing_points, detect_market_structure,
     detect_liquidity_sweeps, detect_fvg, detect_order_block,
     find_unmitigated_fvgs, fvg_snapshot_from_gaps,
 )
-from strategy.indicators import (
+from utils.indicators import (
     detect_candlestick_pattern, detect_divergence, find_sr_zones, nearest_sr_zone
 )
-from strategy.evaluator import compute_confluence_score, calculate_targets, find_ifvg_trade
-from strategy.chart import CHART_LOCK
+from utils.chart import CHART_LOCK
 
 MIN_WARMUP_BARS = 210
 MAX_BARS_FORWARD = 200
@@ -114,129 +108,18 @@ def _full_analysis_with_memory(entry_slice, state, lookback_bars=10):
 def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, macro_bullish,
                    full, state, min_confluence_score, min_rrr, strategy_name="smc_confluence",
                    sl_mult=None, tp1_mult=None, tp2_mult=None):
-    buy_th, sell_th = state["rsi_buy_threshold"], state["rsi_sell_threshold"]
-    structure = full.get("structure", "NEUTRAL")
-    near_zone = nearest_sr_zone(full.get("sr_zones", []), close_price,
-                                 max_distance_pct=ALERT_STATE["sr_max_distance_pct"])
-    fvg = full.get("fvg", {})
-    sweeps = full.get("sweeps", {})
-    order_block = full.get("order_block", {})
-    macro_fvg = full.get("macro_fvg", {})
-
-    def make_breakdown(is_bullish):
-        sr_ok = bool(
-            near_zone and (
-                (is_bullish and near_zone["type"] in ("support", "mixed") and close_price >= near_zone["price"]) or
-                ((not is_bullish) and near_zone["type"] in ("resistance", "mixed") and close_price <= near_zone["price"])
-            )
-        )
-        return [
-            ("EMA Trend Align", CONFLUENCE_WEIGHTS["ema_trend"] if (is_bullish == entry_bullish) else 0, CONFLUENCE_WEIGHTS["ema_trend"]),
-            ("Macro Trend Align", CONFLUENCE_WEIGHTS["macro_trend"] if (is_bullish == macro_bullish) else 0, CONFLUENCE_WEIGHTS["macro_trend"]),
-            ("Structure BOS", CONFLUENCE_WEIGHTS["structure_bos"] if (structure == ("BULLISH_BOS" if is_bullish else "BEARISH_BOS")) else 0, CONFLUENCE_WEIGHTS["structure_bos"]),
-            ("Support/Resistance", CONFLUENCE_WEIGHTS["sr_zone"] if sr_ok else 0, CONFLUENCE_WEIGHTS["sr_zone"]),
-        ]
-
-    # 0. IFVG LIQUIDITY SWEEP STRATEGY
-    if strategy_name == "ifvg_sweep":
-        found = find_ifvg_trade(full.get("entry_slice"), close_price, atr_val, min_rrr,
-                                state.get("last_ifvg_key"))
-        if not found:
-            return None
-        state["last_ifvg_key"] = found["setup"]["key"]
-        return {"direction": found["direction"], "entry": close_price, "score": 80,
-                "breakdown": [], **found["targets"]}
-
-    # 0b. TREND / VOLATILITY BREAKOUT
-    elif strategy_name == "trend_breakout":
-        found = find_trend_breakout(full.get("tb"), close_price, atr_val, min_rrr, state["tb_fired"])
-        if not found:
-            return None
-        state["tb_fired"].add(found["setup"]["key"])
-        return {"direction": found["direction"], "entry": close_price, "score": 70,
-                "breakdown": [], **found["targets"]}
-
-    # 1. TRIPLE EMA CROSSOVER STRATEGY
-    elif strategy_name == "ema_cross":
-        prev_bearish = state.get("prev_ema_bearish", False)
-        prev_bullish = state.get("prev_ema_bullish", False)
-
-        if entry_bullish and prev_bearish and state.get("last_signal") != "BUY":
-            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone,
-                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
-            if targets["rrr"] >= min_rrr:
-                state["last_signal"] = "BUY"
-                return {"direction": "BUY", "entry": close_price, "score": 70, "breakdown": make_breakdown(True), **targets}
-
-        elif (not entry_bullish) and prev_bullish and state.get("last_signal") != "SELL":
-            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone,
-                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
-            if targets["rrr"] >= min_rrr:
-                state["last_signal"] = "SELL"
-                return {"direction": "SELL", "entry": close_price, "score": 70, "breakdown": make_breakdown(False), **targets}
-
-        state["last_signal"] = None
-        return None
-
-    # 2. RSI REVERSION STRATEGY
-    elif strategy_name == "rsi_reversion":
-        bullish_rev = (rsi_val <= buy_th and near_zone and near_zone["type"] in ("support", "mixed") and close_price >= near_zone["price"])
-        bearish_rev = (rsi_val >= sell_th and near_zone and near_zone["type"] in ("resistance", "mixed") and close_price <= near_zone["price"])
-
-        if bullish_rev and state.get("last_signal") != "BUY":
-            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone,
-                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
-            if targets["rrr"] >= min_rrr:
-                state["last_signal"] = "BUY"
-                return {"direction": "BUY", "entry": close_price, "score": 75, "breakdown": make_breakdown(True), **targets}
-
-        elif bearish_rev and state.get("last_signal") != "SELL":
-            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone,
-                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
-            if targets["rrr"] >= min_rrr:
-                state["last_signal"] = "SELL"
-                return {"direction": "SELL", "entry": close_price, "score": 75, "breakdown": make_breakdown(False), **targets}
-
-        if not (bullish_rev or bearish_rev):
-            state["last_signal"] = None
-        return None
-
-    # 3. DEFAULT: SMC MULTI-TF CONFLUENCE STRATEGY
-    buy_structure_ok = (not state["require_structure_break"]) or (structure == "BULLISH_BOS")
-    sell_structure_ok = (not state["require_structure_break"]) or (structure == "BEARISH_BOS")
-
-    if rsi_val <= buy_th and (trend_bullish or macro_bullish) and buy_structure_ok:
-        sr_confluence = bool(near_zone and near_zone["type"] in ("support", "mixed") and close_price >= near_zone["price"])
-        score, breakdown = compute_confluence_score(
-            "BUY", rsi_val, structure, sweeps, fvg, full["vol_filter_ok"],
-            full["macd_bias"], full["candle_pattern"], full["divergence"], sr_confluence,
-            entry_bullish, macro_bullish
-        )
-        if score >= min_confluence_score and state.get("last_signal") != "BUY":
-            targets = calculate_targets("BUY", close_price, atr_val, order_block, near_zone,
-                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
-            if targets["rrr"] >= min_rrr:
-                state["last_signal"] = "BUY"
-                return {"direction": "BUY", "entry": close_price, "score": score, "breakdown": breakdown, **targets}
-
-    elif rsi_val >= sell_th and ((not trend_bullish) or (not macro_bullish)) and sell_structure_ok:
-        sr_confluence = bool(near_zone and near_zone["type"] in ("resistance", "mixed") and close_price <= near_zone["price"])
-        score, breakdown = compute_confluence_score(
-            "SELL", rsi_val, structure, sweeps, fvg, full["vol_filter_ok"],
-            full["macd_bias"], full["candle_pattern"], full["divergence"], sr_confluence,
-            entry_bullish, not macro_bullish
-        )
-        if score >= min_confluence_score and state.get("last_signal") != "SELL":
-            targets = calculate_targets("SELL", close_price, atr_val, order_block, near_zone,
-                             sl_mult=sl_mult, tp1_mult=tp1_mult, tp2_mult=tp2_mult)
-            if targets["rrr"] >= min_rrr:
-                state["last_signal"] = "SELL"
-                return {"direction": "SELL", "entry": close_price, "score": score, "breakdown": breakdown, **targets}
-
-    # Mirror live: only clear dedup once RSI has left the extreme zone
-    if not (rsi_val <= buy_th or rsi_val >= sell_th):
-        state["last_signal"] = None
-    return None
+    """Builds the shared context once and hands it to the strategy module's decide()."""
+    ctx = {
+        "close_price": close_price, "rsi_val": rsi_val, "atr_val": atr_val,
+        "entry_bullish": entry_bullish, "trend_bullish": trend_bullish, "macro_bullish": macro_bullish,
+        "full": full, "state": state,
+        "min_confluence_score": min_confluence_score, "min_rrr": min_rrr,
+        "sl_mult": sl_mult, "tp1_mult": tp1_mult, "tp2_mult": tp2_mult,
+        "structure": full.get("structure", "NEUTRAL"),
+        "near_zone": nearest_sr_zone(full.get("sr_zones", []), close_price,
+                                     max_distance_pct=ALERT_STATE["sr_max_distance_pct"]),
+    }
+    return get_strategy(strategy_name).decide(ctx)
 
 def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forward=MAX_BARS_FORWARD, dual=True):
     direction = trade["direction"]
@@ -323,9 +206,12 @@ def _prepare_history(symbol, days, timeframe_mode):
     if df_trend['EMA_50'].notna().sum() == 0 or df_macro['EMA_50'].notna().sum() == 0:
         return {"error": "Not enough historical bars on the trend/macro timeframe to compute a 50-period EMA."}
 
-    # H1 regime frame (EMA50/200 + ADX) — 30 days of warmup so the 200 EMA is settled.
-    df_regime_raw = _fetch_history(symbol, mt5.TIMEFRAME_H1, start - timedelta(days=30), end)
-    df_regime = add_regime_columns(df_regime_raw) if df_regime_raw is not None else None
+    # H1 regime frame (EMA50/200 + ADX) — only if the trend_breakout strategy exists.
+    tbm = STRATEGIES.get("trend_breakout")
+    df_regime = None
+    if tbm is not None:
+        df_regime_raw = _fetch_history(symbol, mt5.TIMEFRAME_H1, start - timedelta(days=30), end)
+        df_regime = tbm.add_regime_columns(df_regime_raw) if df_regime_raw is not None else None
 
     return {"mode": mode, "preset": preset, "start": start, "df_entry": df_entry, "df_trend": df_trend,
             "df_macro": df_macro, "df_regime": df_regime}
@@ -397,7 +283,9 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
     macro_cursor = max(0, int(np.searchsorted(macro_close_arr, time_arr[test_start_idx] + entry_td, side='right')) - 1)
 
     tb_ready = False
+    tbm = None
     if active_strat == "trend_breakout":
+        tbm = get_strategy(active_strat)
         df_regime = prepared.get("df_regime")
         if df_regime is None or df_regime["EMA_S"].notna().sum() == 0:
             return {"error": "Not enough H1 history to compute the 200 EMA / ADX regime filter."}
@@ -406,10 +294,10 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         tb_bar_min = _TF_MINUTES[preset["entry"]]
         high_arr = df_entry["high"].to_numpy(float)
         low_arr = df_entry["low"].to_numpy(float)
-        ah_arr, al_arr = compute_asian_levels(t_utc, high_arr, low_arr, tb_bar_min)
+        ah_arr, al_arr = tbm.compute_asian_levels(t_utc, high_arr, low_arr, tb_bar_min)
         hour_arr = np.asarray(t_utc.hour + t_utc.minute / 60.0, dtype=float)
         day_arr = np.asarray(t_utc.strftime("%Y-%m-%d"))
-        reg_code = regime_codes(df_regime)
+        reg_code = tbm.regime_codes(df_regime)
         reg_close_arr = df_regime["time"].values + np.timedelta64(60, "m")
         regime_cursor = max(0, int(np.searchsorted(reg_close_arr, time_arr[test_start_idx] + entry_td,
                                                     side="right")) - 1)
@@ -465,7 +353,7 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         if tb_ready:
             regime_cursor = _advance_cursor(reg_close_arr, regime_cursor, ts + entry_td)
             tb_code = int(reg_code[regime_cursor])
-            if tb_code == 0 or session_of(hour_arr[i]) is None:
+            if tb_code == 0 or tbm.session_of(hour_arr[i]) is None:
                 continue
 
         if active_strat in ("smc_confluence", "rsi_reversion"):
@@ -498,7 +386,7 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
             cached_sr_macro_cursor = macro_cursor
 
         if tb_ready:
-            lo_i = max(0, i - TB_TAIL + 1)
+            lo_i = max(0, i - tbm.TB_TAIL + 1)
             full = {"tb": {
                 "trend": "UP" if tb_code > 0 else "DOWN",
                 "ah": ah_arr[i], "al": al_arr[i], "hour": hour_arr[i], "day_key": day_arr[i],
@@ -522,11 +410,7 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
         if trade is None:
             continue
 
-        is_dual = (
-            (active_strat == "smc_confluence"
-             and trade["score"] >= ALERT_STATE.get("dual_entry_score_threshold", 50))
-            or (active_strat == "trend_breakout" and bool(ALERT_STATE.get("tb_dual_entry", True)))
-        )
+        is_dual = get_strategy(active_strat).is_dual(trade["score"])
         outcome, close_time = _simulate_trade(df_entry, i, trade, spread_price=spread_price, dual=is_dual)
         blocked_until = close_time
         if outcome == "HIT_SL" and ALERT_STATE.get("sl_cooldown_enabled", True):

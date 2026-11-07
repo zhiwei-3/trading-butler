@@ -28,14 +28,6 @@ TF_LABELS = {
     mt5.TIMEFRAME_D1: "1D",
 }
 
-STRATEGY_PRESETS = {
-    "smc_confluence": "Smart Money Concepts + Multi-TF Confluence (Default)",
-    "ema_cross": "Triple EMA Trend Crossover + Volatility Filter",
-    "rsi_reversion": "RSI Overbought/Oversold S/R Zone Reversion",
-    "ifvg_sweep": "Liquidity Sweep + Inverted FVG Retest (IFVG)",
-    "trend_breakout": "H1 Trend/ADX Regime + Asian Range Breakout / Sweep+BOS (ATR-risk sizing)",
-}
-
 ALERT_STATE = {
     "last_rsi_signal": None,
     "scanner_enabled": True,

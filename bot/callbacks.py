@@ -2,12 +2,13 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS, STRATEGY_PRESETS, save_settings
-from ._common import admin_only
-from .core import menu_cmd, enable_scanner, disable_scanner, account_cmd
-from .trading import positions_cmd
-from .journal import journal_cmd, journal_callback
-from .market import gold_snapshot, spread_check_cmd
+from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings
+from strategies import STRATEGY_PRESETS
+from bot.commands._common import admin_only
+from bot.commands.general import menu_cmd, enable_scanner, disable_scanner, account_cmd
+from bot.commands.trading import positions_cmd
+from bot.commands.journal import journal_cmd, journal_callback
+from bot.commands.market import gold_snapshot, spread_check_cmd
 
 
 def _reset_dedup():
