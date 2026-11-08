@@ -58,14 +58,6 @@ _SPECS = [
     (("tp2_mult", "tp2_atr"), "tp2_atr_mult", _num(0, 20, lo_open=True)),
     (("spread", "max_spread"), "max_allowed_spread_pips", _num(0, 500, lo_open=True)),
 
-    (("ifvg_lookback", "ifvg_look"), "ifvg_lookback", _num(30, 200, integer=True)),
-    (("ifvg_tol", "ifvg_eq_tol"), "ifvg_eq_tolerance_atr", _num(0, 5, lo_open=True)),
-    (("ifvg_bars", "ifvg_max_bars"), "ifvg_max_setup_bars", _num(1, 200, integer=True)),
-    (("ifvg_body", "ifvg_min_body"), "ifvg_min_body_atr", _num(0, 5)),
-    (("ifvg_buffer", "ifvg_sl_buffer"), "ifvg_sl_buffer_atr", _num(0, 5)),
-    (("ifvg_max_sl",), "ifvg_max_sl_atr", _num(0, 10, lo_open=True)),
-    (("ifvg_rr", "ifvg_fallback_rr"), "ifvg_fallback_rr", _num(0, 20, lo_open=True)),
-
     (("risk", "risk_pct", "risk_percent"), "risk_percent", _num(0, 10, lo_open=True)),
     (("max_lot", "max_lot_size"), "max_lot_size", _num(0, 100, lo_open=True)),
     (("dyn_lots", "dynamic_lots"), "dynamic_lots_enabled", _bool),

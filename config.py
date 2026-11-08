@@ -64,15 +64,6 @@ ALERT_STATE = {
     "sr_min_touches": 2,
     "sr_max_distance_pct": 0.004,
 
-    "last_ifvg_signal": None,           # runtime dedup key (intentionally NOT persisted)
-    "ifvg_lookback": 100,               # bars scanned for pool -> sweep -> FVG -> inversion
-    "ifvg_eq_tolerance_atr": 0.3,       # two swing lows within this many ATR = "equal lows"
-    "ifvg_max_setup_bars": 40,          # max age (bars since sweep) before a setup goes stale
-    "ifvg_min_body_atr": 0.4,           # inversion candle body must be >= this many ATR
-    "ifvg_sl_buffer_atr": 0.25,         # SL buffer beyond the sweep extreme (wick/spread protection)
-    "ifvg_max_sl_atr": 3.0,             # skip setups whose structural SL is wider than this
-    "ifvg_fallback_rr": 3.0,            # fixed RR target when no BSL/SSL clears min_rrr
-
     # --- Trend / Volatility Breakout ---
     "tb_adx_min": 22.0,             # H1 ADX(14) must exceed this (trending market)
     "tb_london_start": 8.0,         # UTC hour of the London window start
@@ -160,15 +151,6 @@ PERSISTENT_KEYS = [
     "tp2_atr_mult",
     "min_rrr",
     "min_confluence_score",
-
-    # --- IFVG strategy ---
-    "ifvg_lookback",
-    "ifvg_eq_tolerance_atr",
-    "ifvg_max_setup_bars",
-    "ifvg_min_body_atr",
-    "ifvg_sl_buffer_atr",
-    "ifvg_max_sl_atr",
-    "ifvg_fallback_rr",
 
     # --- trend breakout ---
     "tb_adx_min", "tb_london_start", "tb_ny_start", "tb_window_hours",
