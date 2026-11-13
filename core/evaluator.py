@@ -6,15 +6,14 @@ Strategy RULES live in strategies/ (pure); everything with side effects lives he
 
 import logging
 import pandas_ta as ta
-import MetaTrader5 as mt5
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS
+from config import ALERT_STATE, TIMEFRAME_PRESETS, TF_BY_NAME
+from strategies import get_strategy, get_params, get_runtime, MarketData
 from core.database import (
     log_signal_to_db, get_recent_trades_for_chart, set_signal_status, get_sl_cooldown_remaining_s,
 )
 from core.mt5_engine import fetch_candles, get_broker_utc_offset_seconds
 from core.trade_engine import request_execution, trade_slot_blocker, calc_risk_lots
-from strategies import get_strategy
 from utils.chart import generate_signal_chart
 from utils.common import format_reasons
 from utils.smc import (
@@ -117,7 +116,7 @@ def package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, ba
             else:
                 exec_note = (
                     f"🤖 *Auto-trade {mode_lbl}* — 1 leg of `{lot_disp}` lots, targeting **TP1 only** "
-                    f"(below the dual-entry score threshold, or a non-confluence strategy).\n\n"
+                    f"(this setup is single-leg).\n\n"
                 )
         sizing_line = sizing_text if sizing_text else f"`{lot_disp}` lots per leg (fixed)"
         pos_info = (
@@ -147,9 +146,9 @@ def package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, ba
 
 def analyze_market(symbol):
     entry_tf, trend_tf, macro_tf = ALERT_STATE["entry_tf"], ALERT_STATE["trend_tf"], ALERT_STATE["macro_tf"]
-    strat = get_strategy(ALERT_STATE.get("active_strategy", "smc_confluence"))
+    strat = get_strategy(ALERT_STATE.get("active_strategy"))
 
-    df_entry = fetch_candles(symbol, entry_tf, getattr(strat, "LIVE_ENTRY_BARS", 200))
+    df_entry = fetch_candles(symbol, entry_tf, strat.needs.entry_bars if strat else 200)
     df_trend = fetch_candles(symbol, trend_tf, 200)
     df_macro = fetch_candles(symbol, macro_tf, 200)
     if df_entry is None or df_trend is None or df_macro is None:
@@ -181,12 +180,16 @@ def analyze_market(symbol):
                                                 atr_multiplier=ALERT_STATE["atr_multiplier"],
                                                 volume_multiplier=ALERT_STATE["volume_multiplier"])
 
-    # Optional strategy hook: the strategy is pure, so WE fetch what it needs and pass it in.
-    tb = None
-    build_ctx = getattr(strat, "build_live_context", None)
-    if build_ctx:
-        df_h1 = fetch_candles(symbol, mt5.TIMEFRAME_H1, 400)
-        tb = build_ctx(df_entry, df_h1, get_broker_utc_offset_seconds())
+    # Strategy connector: the strategy is pure, so WE fetch what it declared in `needs` and pass it in.
+    ctx = None
+    if strat is not None:
+        try:
+            extra = {name: fetch_candles(symbol, TF_BY_NAME[name], bars) for name, bars in strat.needs.extra}
+            md = MarketData(symbol=symbol, entry=df_entry, trend=df_trend, macro=df_macro, extra=extra,
+                            broker_offset_s=int(get_broker_utc_offset_seconds()))
+            ctx = strat.build_live_context(md, get_params(strat.key))
+        except Exception:
+            logging.exception(f"Strategy '{strat.key}' build_live_context() failed — continuing without ctx.")
 
     return {
         "symbol": symbol,
@@ -208,13 +211,24 @@ def analyze_market(symbol):
         "candle_pattern": detect_candlestick_pattern(df_entry),
         "divergence": detect_divergence(df_entry),
         "near_zone": near_zone,
-        "tb": tb,
+        "ctx": ctx,
     }
 
 
 def evaluate_signals(a):
     """Runs the active strategy's pure rules, then packages each resulting signal spec."""
-    watches = _eval_setup_forming(a)   # independent of active_strategy
+    strat = get_strategy(ALERT_STATE.get("active_strategy"))
+    if strat is None:
+        return [], []          # nothing selected/installed -> no signals, no heads-up pings
+
+    p, mem = get_params(strat.key), get_runtime(strat.key)
+
+    watches = []
+    if ALERT_STATE.get("setup_forming_enabled", True):
+        try:
+            watches = strat.watch(a, p, mem) or []
+        except Exception:
+            logging.exception(f"Strategy '{strat.key}' watch() crashed — no heads-up this tick.")
 
     # Post-stop-loss cooldown: heads-up pings still work, new trade signals don't.
     cooldown_s = get_sl_cooldown_remaining_s()
@@ -225,6 +239,9 @@ def evaluate_signals(a):
     if ALERT_STATE.get("require_volume_atr_filter", False) and not a.get("vol_filter_ok", True):
         return [], watches
 
-    strat = get_strategy(ALERT_STATE.get("active_strategy", "smc_confluence"))
-    specs, _ = strat.evaluate(a)
+    try:
+        specs = strat.evaluate(a, p, mem) or []
+    except Exception:
+        logging.exception(f"Strategy '{strat.key}' evaluate() crashed — no signals this tick.")
+        return [], watches
     return [package_signal(a, **spec) for spec in specs], watches

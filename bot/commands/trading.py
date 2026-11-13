@@ -131,8 +131,6 @@ async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• **Status:** `{mode}`\n"
             f"• **Magic Number:** `{ALERT_STATE.get('magic_number')}`\n"
             f"• **Sizing:** `{ALERT_STATE.get('fixed_lot_size')}` lots per leg (fixed — not scaled by account size)\n"
-            f"• **Dual-Entry Threshold:** SMC Confluence score `≥ {ALERT_STATE.get('dual_entry_score_threshold')}` "
-            f"→ 2 legs (TP1 full close + TP2/BE runner). Below that, or any other strategy, → 1 leg (TP1-only).\n"
             f"• **Max Trades / Day:** `{ALERT_STATE.get('max_daily_trades')}` *(counts tickets, so a dual entry uses 2)*\n"
             f"• **Slippage Allowance:** `{ALERT_STATE.get('max_slippage_points')}` points\n"
             f"• **Entry Drift Abort:** `{ALERT_STATE.get('max_entry_drift_pct')}%` of SL\n"
@@ -178,7 +176,7 @@ async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(
             "🟢 **LIVE EXECUTION ENABLED.**\n\n"
             f"• Fixed `{ALERT_STATE.get('fixed_lot_size')}` lots per leg\n"
-            f"• Dual-entry (2 legs) above SMC Confluence score `{ALERT_STATE.get('dual_entry_score_threshold')}`\n"
+            f"• Each strategy decides single-leg or dual-leg entries\n"
             f"• Max `{ALERT_STATE.get('max_daily_trades')}` fills/day (one trade idea open at a time)\n"
             f"• Circuit breaker: `{ALERT_STATE.get('max_daily_losses')}` losses / "
             f"`-{ALERT_STATE.get('max_daily_drawdown_r')}R`\n\n"

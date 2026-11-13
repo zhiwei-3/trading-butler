@@ -1,89 +1,58 @@
-import math
 import logging
 import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS
-from strategies import STRATEGY_PRESETS
+from strategies import STRATEGIES, STRATEGY_PRESETS, find_param, get_params, Params
 from core.mt5_engine import get_gold_symbol
 from core.backtester import run_backtest, generate_equity_chart
 from ._common import admin_only
 
-
-def _finite(val_str, lo=None, hi=None, lo_open=False):
-    v = float(val_str)
-    if not math.isfinite(v):
-        raise ValueError("not finite")
-    if lo is not None and (v < lo or (lo_open and v == lo)):
-        raise ValueError(f"must be above {lo}")
-    if hi is not None and v > hi:
-        raise ValueError(f"must be at most {hi}")
-    return v
-
-
-def _parse_rsi_pair(val_str):
-    """Accepts '30/65' or '30,65'. Returns (buy, sell) floats or raises ValueError."""
-    sep = "/" if "/" in val_str else ","
-    parts = [p.strip() for p in val_str.split(sep) if p.strip()]
-    if len(parts) != 2:
-        raise ValueError("RSI override needs two numbers, e.g. rsi=30/65")
-    buy, sell = _finite(parts[0], 1, 99), _finite(parts[1], 1, 99)
-    if buy >= sell:
-        raise ValueError("buy RSI must be lower than sell RSI")
-    return buy, sell
+_STRAT_KEYS = ("strategy", "strat")
 
 
 def _parse_backtest_overrides(tokens):
     """
-    Parses key=value override tokens for a one-off /backtest run. These are NEVER
-    written to ALERT_STATE/settings.json — they exist only for this single call.
-
-    Returns (overrides_dict, display_dict, error_str_or_None).
+    key=value tokens for a ONE-OFF /backtest run (never written to settings). `strategy=<key>` picks the
+    strategy; every other key is one of THAT strategy's params (key, alias or 'strategy.key').
+    Returns (strategy_key, param_overrides, display, error).
     """
-    ALIASES = {
-        "score": "min_confluence_score", "min_score": "min_confluence_score",
-        "rrr": "min_rrr", "min_rrr": "min_rrr",
-        "sl": "sl_atr_mult", "sl_mult": "sl_atr_mult",
-        "tp1": "tp1_atr_mult", "tp1_mult": "tp1_atr_mult",
-        "tp2": "tp2_atr_mult", "tp2_mult": "tp2_atr_mult",
-        "strategy": "strategy_name", "strat": "strategy_name",
-        "rsi": "rsi_pair",
-    }
-    overrides = {}
-    display = {}
-
+    pairs = []
     for tok in tokens:
         if "=" not in tok:
-            return None, None, f"`{tok}` isn't a `key=value` override."
-        raw_key, raw_val = tok.split("=", 1)
-        key = ALIASES.get(raw_key.strip().lower())
-        if key is None:
-            return None, None, (
-                f"Unknown override key `{raw_key}`. Valid keys: "
-                "`score`, `rrr`, `sl`, `tp1`, `tp2`, `strategy`, `rsi`."
-            )
-        val_str = raw_val.strip()
-        try:
-            if key == "min_confluence_score":
-                overrides["min_confluence_score"] = int(_finite(val_str, 0, 100))
-            elif key == "min_rrr":
-                overrides["min_rrr"] = _finite(val_str, 0, 20, lo_open=True)
-            elif key in ("sl_atr_mult", "tp1_atr_mult", "tp2_atr_mult"):
-                overrides[key] = _finite(val_str, 0, 20, lo_open=True)
-            elif key == "strategy_name":
-                strat = val_str.lower()
-                if strat not in STRATEGY_PRESETS:
-                    return None, None, f"Unknown strategy `{val_str}`. Valid: `{'`, `'.join(STRATEGY_PRESETS)}`."
-                overrides["strategy_name"] = strat
-            elif key == "rsi_pair":
-                buy, sell = _parse_rsi_pair(val_str)
-                overrides["rsi_buy_threshold"], overrides["rsi_sell_threshold"] = buy, sell
-        except ValueError as e:
-            return None, None, f"Invalid value `{val_str}` for `{raw_key}` ({e})."
-        display[raw_key.lower()] = val_str
+            return None, None, None, f"`{tok}` isn't a `key=value` override."
+        k, v = tok.split("=", 1)
+        pairs.append((k.strip().lower(), v.strip()))
 
-    return overrides, display, None
+    strat_key = ALERT_STATE.get("active_strategy")
+    for k, v in pairs:
+        if k in _STRAT_KEYS:
+            if v.lower() not in STRATEGY_PRESETS:
+                return None, None, None, f"Unknown strategy `{v}`. Valid: `{'`, `'.join(STRATEGY_PRESETS) or 'none installed'}`."
+            strat_key = v.lower()
+
+    overrides, display = {}, {}
+    for k, v in pairs:
+        if k in _STRAT_KEYS:
+            display[k] = v
+            continue
+        prm = find_param(strat_key, k)
+        if prm is None:
+            valid = [p.key for p in STRATEGIES[strat_key].params] if strat_key in STRATEGIES else []
+            return None, None, None, (f"`{k}` isn't a parameter of `{strat_key}`. "
+                                      f"Valid: `strategy`, `{'`, `'.join(valid)}`.")
+        try:
+            overrides[prm.key] = prm.parse(v)
+        except ValueError as e:
+            return None, None, None, f"Invalid value `{v}` for `{k}` ({e})."
+        display[k] = v
+
+    if strat_key in STRATEGIES and overrides:
+        merged = Params({**get_params(strat_key), **overrides})
+        if not STRATEGIES[strat_key].valid_params(merged):
+            return None, None, None, "Those overrides are inconsistent with each other (e.g. buy RSI must be below sell RSI)."
+    return strat_key, overrides, display, None
 
 
 @admin_only
@@ -91,6 +60,7 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     days = 30
     mode = None
+    strat_key, overrides, display = None, {}, {}
 
     if args:
         remaining = list(args)
@@ -98,7 +68,7 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             days = int(remaining[0])
             remaining.pop(0)
         except ValueError:
-            pass  # first token wasn't a day count — leave default, keep parsing
+            pass
 
         override_tokens = []
         for tok in remaining:
@@ -109,24 +79,18 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text(
                     "⚠️ **Usage:** `/backtest <days> [mode] [overrides...]`\n\n"
-                    "**Overrides (never touch live settings — one-off for this run only):**\n"
-                    "• `score=35` — min confluence score\n"
-                    "• `rrr=2.0` — min reward:risk\n"
-                    "• `sl=1.5` — SL ATR multiplier\n"
-                    "• `tp1=2.0` / `tp2=3.5` — TP ATR multipliers\n"
-                    "• `strategy=ema_cross` — override active strategy for this run\n"
-                    "• `rsi=30/65` — RSI buy/sell thresholds\n\n"
-                    "**Example:** `/backtest 30 scalp score=35 rrr=2.0 sl=1.5`",
+                    "**Overrides (one-off, never touch live settings):**\n"
+                    "• `strategy=<key>` — run a different strategy\n"
+                    "• `<param>=<value>` — any parameter of that strategy (see `/set strategies`)\n\n"
+                    "**Example:** `/backtest 30 scalp rrr=2.0 sl=1.5`",
                     parse_mode="Markdown"
                 )
                 return
 
-        overrides, display, err = _parse_backtest_overrides(override_tokens)
+        strat_key, overrides, display, err = _parse_backtest_overrides(override_tokens)
         if err:
             await update.message.reply_text(f"❌ {err}", parse_mode="Markdown")
             return
-    else:
-        overrides, display = {}, {}
 
     days = max(1, min(days, 180))
 
@@ -155,7 +119,8 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         result = await asyncio.to_thread(
-            run_backtest, symbol, days, mode, progress_callback=progress_callback, **overrides
+            run_backtest, symbol, days, mode, progress_callback=progress_callback,
+            strategy_name=strat_key, param_overrides=overrides
         )
     except Exception as e:
         logging.exception("Backtest crashed")
@@ -166,30 +131,25 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ **Backtest failed:** {result['error']}", parse_mode="Markdown")
         return
 
+    strat = STRATEGIES[result["strategy"]]
+    summary = strat.summary(Params(result["params"]))
+
     if result["total_trades"] == 0:
         await update.message.reply_text(
             f"📭 **No signals fired** over the last `{result['days']}d` on `{result['mode']}` "
-            f"(min score `{result['min_confluence_score']}`, min RRR `1:{result['min_rrr']}`).",
+            f"for `{result['strategy']}` (`{summary}`).",
             parse_mode="Markdown"
         )
         return
 
     factor_lines = "\n".join(
-        f"  • {label}: `{wr}%` win rate ({n} occurrences)"
-        for label, wr, n in result["factor_summary"][:6]
+        f"  • {name}: `{wr}%` win rate ({n} occurrences)"
+        for name, wr, n in result["factor_summary"][:6]
     ) or "  • Not enough closed trades yet for a factor breakdown."
 
-    # Effective parameters actually used: overrides win, otherwise fall back to
-    # live ALERT_STATE — same resolution order run_backtest() itself applies.
-    strat = (overrides.get("strategy_name") or ALERT_STATE.get("active_strategy", "smc_confluence")).replace("_", " ").upper()
-    rsi_buy = overrides.get("rsi_buy_threshold", ALERT_STATE.get("rsi_buy_threshold", 30))
-    rsi_sell = overrides.get("rsi_sell_threshold", ALERT_STATE.get("rsi_sell_threshold", 70))
-    sl_mult = overrides.get("sl_atr_mult", ALERT_STATE.get("sl_atr_mult", 1.5))
-    tp1_mult = overrides.get("tp1_atr_mult", ALERT_STATE.get("tp1_atr_mult", 1.0))
-    tp2_mult = overrides.get("tp2_atr_mult", ALERT_STATE.get("tp2_atr_mult", 2.0))
+    param_lines = "\n".join(f"  • `{k}` = `{v}`" for k, v in list(result["params"].items())[:12])
     struct_gate = "ON ✅" if ALERT_STATE.get("require_structure_break") else "OFF ❌"
     vol_gate = "ON ✅" if ALERT_STATE.get("require_volume_atr_filter") else "OFF ❌"
-
     override_note = (
         f"\n🧪 **One-off overrides (live settings untouched):** `{', '.join(f'{k}={v}' for k, v in display.items())}`\n"
         if display else ""
@@ -197,11 +157,8 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = (
         f"🧪 **BACKTEST RESULTS — {result['mode'].upper()}** ({result['days']}d)\n"
-        f"⚙️ **Strategy:** `{strat}`{override_note}\n"
-        f"**--- Parameters Used ---**\n"
-        f"• **RSI Thresholds:** Buy `<= {rsi_buy}` | Sell `>= {rsi_sell}`\n"
-        f"• **ATR Multipliers:** SL `{sl_mult}x` | TP1 `{tp1_mult}x` | TP2 `{tp2_mult}x`\n"
-        f"• **Score & RRR:** Min Score `{result['min_confluence_score']}/100` | Min RRR `1:{result['min_rrr']}`\n"
+        f"⚙️ **Strategy:** `{result['strategy'].replace('_', ' ').upper()}`{override_note}\n"
+        f"**--- Parameters Used ---**\n{param_lines}\n"
         f"• **Hard Gates:** Structure: {struct_gate} | Vol/ATR: {vol_gate}\n\n"
         f"**--- Performance ---**\n"
         f"• **Trades:** `{result['total_trades']}` | **Wins:** `{result['wins']}` | **Losses:** `{result['losses']}` | **Open:** `{result['open']}`\n"

@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes
 
 from config import USER_ID, ALERT_STATE, save_settings
 from core.database import get_signal_stats
+from strategies import get_strategy, get_params
 from core.mt5_engine import check_mt5_alive, MT5_LOCK, get_broker_utc_offset_seconds
 from bot.jobs import (
     build_status_snapshot,
@@ -211,18 +212,18 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     scanner_status = "🔴 OFF" if not ALERT_STATE.get("scanner_enabled") else "🟢 ON"
-    strat = ALERT_STATE.get("active_strategy", "smc_confluence").replace("_", " ").upper()
     tf_mode = ALERT_STATE.get("timeframe_mode", "scalp").upper()
+    strat = get_strategy(ALERT_STATE.get("active_strategy"))
+    strat_name = strat.key.replace("_", " ").upper() if strat else "NONE"
+    strat_summary = strat.summary(get_params(strat.key)) if strat else "—"
 
     text = (
         "🎛️ **TRADING BUTLER CONTROL DASHBOARD**\n\n"
         f"• **Scanner:** `{scanner_status}`\n"
-        f"• **Active Strategy:** `{strat}`\n"
+        f"• **Active Strategy:** `{strat_name}`\n"
+        f"• **Settings:** `{strat_summary}`\n"
         f"• **Timeframe Preset:** `{tf_mode}`\n"
-        f"• **Min Confluence Score:** `{ALERT_STATE.get('min_confluence_score')}/100`\n"
-        f"• **Min RRR:** `1:{ALERT_STATE.get('min_rrr')}`\n"
-        f"• **Sizing:** `{ALERT_STATE.get('fixed_lot_size', 0.01)}` lots/leg | "
-        f"**Dual-Entry ≥** `{ALERT_STATE.get('dual_entry_score_threshold', 50)}`\n\n"
+        f"• **Sizing:** `{ALERT_STATE.get('fixed_lot_size', 0.01)}` lots/leg\n\n"
         "Tap a button below for instant quick actions:"
     )
 

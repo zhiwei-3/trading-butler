@@ -3,7 +3,7 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings
-from strategies import STRATEGY_PRESETS
+from strategies import STRATEGY_PRESETS, reset_runtime
 from bot.commands._common import admin_only
 from bot.commands.general import menu_cmd, enable_scanner, disable_scanner, account_cmd
 from bot.commands.trading import positions_cmd
@@ -12,11 +12,7 @@ from bot.commands.market import gold_snapshot, spread_check_cmd
 
 
 def _reset_dedup():
-    """Switching strategy/timeframe must clear every dedup key, or the first signal
-    on the new configuration can be silently suppressed."""
-    ALERT_STATE["last_rsi_signal"] = None
-    ALERT_STATE["last_ifvg_signal"] = None
-    ALERT_STATE["last_watch_signal"] = None
+    reset_runtime()
 
 
 @admin_only
@@ -47,9 +43,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         elif data == "btn_positions":
             await positions_cmd(update, context)
         elif data == "btn_strat_menu":
-            keyboard = [[InlineKeyboardButton(v, callback_data=f"set_strat_{k}")] for k, v in STRATEGY_PRESETS.items()]
+            if STRATEGY_PRESETS:
+                title = "⚙️ **Select Active Strategy:**"
+                keyboard = [[InlineKeyboardButton(v, callback_data=f"set_strat_{k}")] for k, v in STRATEGY_PRESETS.items()]
+            else:
+                title = "⚙️ **No strategies installed.**\nAdd a package to `strategies/` and restart."
+                keyboard = []
             keyboard.append([InlineKeyboardButton("« Back to Menu", callback_data="btn_main_menu")])
-            await query.edit_message_text("⚙️ **Select Active Strategy:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            await query.edit_message_text(title, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         elif data.startswith("set_strat_"):
             new_strat = data.replace("set_strat_", "", 1)
             if new_strat in STRATEGY_PRESETS:

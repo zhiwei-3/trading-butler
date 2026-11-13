@@ -1,14 +1,16 @@
 import io
 import math
+import logging
+import itertools
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
 import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS
+from config import ALERT_STATE, TIMEFRAME_PRESETS, TF_BY_NAME
+from strategies import get_strategy, get_params, STRATEGIES, Params, BacktestData
 from core.mt5_engine import MT5_LOCK, get_broker_utc_offset_seconds
-from strategies import get_strategy, STRATEGIES
 from utils.smc import (
     find_swing_points, detect_market_structure,
     detect_liquidity_sweeps, detect_fvg, detect_order_block,
@@ -105,21 +107,6 @@ def _full_analysis_with_memory(entry_slice, state, lookback_bars=10):
         "open_price": float(entry_slice['open'].iloc[-1]),
     }
 
-def _decide_trade(close_price, rsi_val, atr_val, entry_bullish, trend_bullish, macro_bullish,
-                   full, state, min_confluence_score, min_rrr, strategy_name="smc_confluence",
-                   sl_mult=None, tp1_mult=None, tp2_mult=None):
-    """Builds the shared context once and hands it to the strategy module's decide()."""
-    ctx = {
-        "close_price": close_price, "rsi_val": rsi_val, "atr_val": atr_val,
-        "entry_bullish": entry_bullish, "trend_bullish": trend_bullish, "macro_bullish": macro_bullish,
-        "full": full, "state": state,
-        "min_confluence_score": min_confluence_score, "min_rrr": min_rrr,
-        "sl_mult": sl_mult, "tp1_mult": tp1_mult, "tp2_mult": tp2_mult,
-        "structure": full.get("structure", "NEUTRAL"),
-        "near_zone": nearest_sr_zone(full.get("sr_zones", []), close_price,
-                                     max_distance_pct=ALERT_STATE["sr_max_distance_pct"]),
-    }
-    return get_strategy(strategy_name).decide(ctx)
 
 def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forward=MAX_BARS_FORWARD, dual=True):
     direction = trade["direction"]
@@ -180,8 +167,7 @@ def _prepare_history(symbol, days, timeframe_mode):
     preset = TIMEFRAME_PRESETS[mode]
 
     # MT5 candle timestamps are broker-SERVER time (epoch labelled as UTC), so the
-    # request window must be expressed in server time too. Using true UTC here cut
-    # the most recent <offset> hours off every backtest.
+    # request window must be expressed in server time too.
     offset = timedelta(seconds=get_broker_utc_offset_seconds())
     end = datetime.now(timezone.utc) + offset
     start = end - timedelta(days=days)
@@ -206,20 +192,31 @@ def _prepare_history(symbol, days, timeframe_mode):
     if df_trend['EMA_50'].notna().sum() == 0 or df_macro['EMA_50'].notna().sum() == 0:
         return {"error": "Not enough historical bars on the trend/macro timeframe to compute a 50-period EMA."}
 
-    # H1 regime frame (EMA50/200 + ADX) — only if the trend_breakout strategy exists.
-    tbm = STRATEGIES.get("trend_breakout")
-    df_regime = None
-    if tbm is not None:
-        df_regime_raw = _fetch_history(symbol, mt5.TIMEFRAME_H1, start - timedelta(days=30), end)
-        df_regime = tbm.add_regime_columns(df_regime_raw) if df_regime_raw is not None else None
+    return {"mode": mode, "preset": preset, "symbol": symbol, "start": start, "end": end,
+            "df_entry": df_entry, "df_trend": df_trend, "df_macro": df_macro,
+            "extra": {},     # lazily filled with the extra timeframes strategies declare in needs.extra
+            "memo": {}}      # shared across the runs of one sweep (BacktestData.memo)
 
-    return {"mode": mode, "preset": preset, "start": start, "df_entry": df_entry, "df_trend": df_trend,
-            "df_macro": df_macro, "df_regime": df_regime}
 
-def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None, min_rrr=None,
-                  spread_pips=2.0, progress_callback=None, strategy_name=None,
-                  sl_atr_mult=None, tp1_atr_mult=None, tp2_atr_mult=None,
-                  rsi_buy_threshold=None, rsi_sell_threshold=None, _prepared=None):
+def _extra_frame(prepared, name):
+    """Raw history for a strategy-requested timeframe (e.g. 'H1'), fetched once and cached."""
+    cache = prepared["extra"]
+    if name not in cache:
+        tf = TF_BY_NAME.get(name)
+        if tf is None:
+            cache[name] = None
+        else:
+            warm = max(30, _min_warmup_days_for(tf, 300))
+            cache[name] = _fetch_history(prepared["symbol"], tf,
+                                         prepared["start"] - timedelta(days=warm), prepared["end"])
+    return cache[name]
+
+def run_backtest(symbol, days=30, timeframe_mode=None, spread_pips=2.0, progress_callback=None,
+                 strategy_name=None, param_overrides=None, _prepared=None):
+    strat = get_strategy(strategy_name or ALERT_STATE.get("active_strategy"))
+    if strat is None:
+        return {"error": "No strategy selected or installed — add a package to `strategies/` and pick it with `/strategy`."}
+
     prepared = _prepared or _prepare_history(symbol, days, timeframe_mode)
     if "error" in prepared:
         return prepared
@@ -230,29 +227,20 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
     df_entry = prepared["df_entry"]
     df_trend = prepared["df_trend"]
     df_macro = prepared["df_macro"]
-
-    active_strat = strategy_name or ALERT_STATE.get("active_strategy", "smc_confluence")
-
-    resolved_sl_mult = sl_atr_mult if sl_atr_mult is not None else ALERT_STATE["sl_atr_mult"]
-    resolved_tp1_mult = tp1_atr_mult if tp1_atr_mult is not None else ALERT_STATE["tp1_atr_mult"]
-    resolved_tp2_mult = tp2_atr_mult if tp2_atr_mult is not None else ALERT_STATE["tp2_atr_mult"]
+    needs = strat.needs
+    p = Params({**get_params(strat.key), **(param_overrides or {})})     # one-off overrides never touch live settings
 
     state = {
-        "rsi_buy_threshold": rsi_buy_threshold if rsi_buy_threshold is not None else ALERT_STATE["rsi_buy_threshold"],
-        "rsi_sell_threshold": rsi_sell_threshold if rsi_sell_threshold is not None else ALERT_STATE["rsi_sell_threshold"],
         "require_structure_break": ALERT_STATE["require_structure_break"],
         "require_volume_atr_filter": ALERT_STATE["require_volume_atr_filter"],
         "fractal_window": ALERT_STATE["fractal_window"],
-        "last_signal": None,
-        "last_ifvg_key": None,
         "prev_ema_bearish": False,
         "prev_ema_bullish": False,
-        "tb_fired": set(),
     }
+    state.update(strat.init_state(p))          # the strategy's own dedup/memory keys
+
     atr_multiplier = ALERT_STATE["atr_multiplier"]
     volume_multiplier = ALERT_STATE["volume_multiplier"]
-    min_confluence_score = min_confluence_score if min_confluence_score is not None else ALERT_STATE["min_confluence_score"]
-    min_rrr = min_rrr if min_rrr is not None else ALERT_STATE["min_rrr"]
     spread_price = spread_pips / 10.0
 
     first_valid_idx = df_entry['ATR_AVG'].first_valid_index() or 0
@@ -275,33 +263,26 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
     macro_ema20_arr = df_macro['EMA_20'].values
     macro_ema50_arr = df_macro['EMA_50'].values
 
-    entry_td = np.timedelta64(_TF_MINUTES[preset["entry"]], "m")
+    entry_minutes = _TF_MINUTES[preset["entry"]]
+    entry_td = np.timedelta64(entry_minutes, "m")
     trend_close_arr = trend_time_arr + np.timedelta64(_TF_MINUTES[preset["trend"]], "m")
     macro_close_arr = macro_time_arr + np.timedelta64(_TF_MINUTES[preset["macro"]], "m")
 
     trend_cursor = max(0, int(np.searchsorted(trend_close_arr, time_arr[test_start_idx] + entry_td, side='right')) - 1)
     macro_cursor = max(0, int(np.searchsorted(macro_close_arr, time_arr[test_start_idx] + entry_td, side='right')) - 1)
 
-    tb_ready = False
-    tbm = None
-    if active_strat == "trend_breakout":
-        tbm = get_strategy(active_strat)
-        df_regime = prepared.get("df_regime")
-        if df_regime is None or df_regime["EMA_S"].notna().sum() == 0:
-            return {"error": "Not enough H1 history to compute the 200 EMA / ADX regime filter."}
-        tb_off = pd.Timedelta(seconds=int(get_broker_utc_offset_seconds()))
-        t_utc = pd.DatetimeIndex(df_entry["time"] - tb_off)          # broker time -> true UTC
-        tb_bar_min = _TF_MINUTES[preset["entry"]]
-        high_arr = df_entry["high"].to_numpy(float)
-        low_arr = df_entry["low"].to_numpy(float)
-        ah_arr, al_arr = tbm.compute_asian_levels(t_utc, high_arr, low_arr, tb_bar_min)
-        hour_arr = np.asarray(t_utc.hour + t_utc.minute / 60.0, dtype=float)
-        day_arr = np.asarray(t_utc.strftime("%Y-%m-%d"))
-        reg_code = tbm.regime_codes(df_regime)
-        reg_close_arr = df_regime["time"].values + np.timedelta64(60, "m")
-        regime_cursor = max(0, int(np.searchsorted(reg_close_arr, time_arr[test_start_idx] + entry_td,
-                                                    side="right")) - 1)
-        tb_ready = True
+    # ---- strategy connector: precompute whatever the strategy needs, once per run
+    bt = BacktestData(
+        symbol=symbol, entry=df_entry, trend=df_trend, macro=df_macro,
+        extra={name: _extra_frame(prepared, name) for name, _bars in needs.extra},
+        entry_minutes=entry_minutes, broker_offset_s=int(get_broker_utc_offset_seconds()),
+        memo=prepared["memo"],
+    )
+    try:
+        prep = strat.prepare_backtest(bt, p)
+    except Exception as e:
+        logging.exception(f"Strategy '{strat.key}' prepare_backtest() failed")
+        return {"error": f"Strategy `{strat.key}` could not prepare its backtest data: {e}"}
 
     cached_sr_macro_cursor = -1
     cached_sr_zones = []
@@ -349,68 +330,51 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
             state["prev_ema_bearish"] = bool(ema20_arr[i-1] <= ema50_arr[i-1])
             state["prev_ema_bullish"] = bool(ema20_arr[i-1] >= ema50_arr[i-1])
 
-        tb_code = 0
-        if tb_ready:
-            regime_cursor = _advance_cursor(reg_close_arr, regime_cursor, ts + entry_td)
-            tb_code = int(reg_code[regime_cursor])
-            if tb_code == 0 or tbm.session_of(hour_arr[i]) is None:
-                continue
+        # ---- strategy connector: build this bar's ctx, or skip the bar cheaply (regime/session/RSI gates live here)
+        ctx_bar = strat.bar_context(prep, i, p, state)
+        if ctx_bar is None:
+            continue
 
-        if active_strat in ("smc_confluence", "rsi_reversion"):
-            buy_th, sell_th = state["rsi_buy_threshold"], state["rsi_sell_threshold"]
-            buy_gate = rsi_val <= (buy_th + 5)
-            sell_gate = rsi_val >= (sell_th - 5)
-            if not (buy_gate or sell_gate):
-                state["last_signal"] = None
-                continue
-
-        # run_backtest loop — always compute the real flag, gate only if required
         vol_filter_ok = True
-        if state["require_volume_atr_filter"] or active_strat == "smc_confluence":
+        if state["require_volume_atr_filter"] or needs.vol_filter:
             vol_filter_ok = _vol_filter_ok(df_entry.iloc[i], atr_multiplier, volume_multiplier)
             if state["require_volume_atr_filter"] and not vol_filter_ok:
-                state["last_signal"] = None
                 continue
 
-        entry_slice = df_entry.iloc[max(0, i - (ENTRY_WINDOW - 1)):i + 1]
-
-        if macro_cursor != cached_sr_macro_cursor:
-            macro_slice = df_macro.iloc[max(0, macro_cursor - (HTF_WINDOW - 1)):macro_cursor + 1].reset_index(drop=True)
-            cached_sr_zones = find_sr_zones(
-                macro_slice,
-                lookback=ALERT_STATE["sr_lookback"],
-                cluster_pct=ALERT_STATE["sr_cluster_pct"],
-                min_touches=ALERT_STATE["sr_min_touches"],
-            )
-            cached_macro_gaps = find_unmitigated_fvgs(macro_slice)
-            cached_sr_macro_cursor = macro_cursor
-
-        if tb_ready:
-            lo_i = max(0, i - tbm.TB_TAIL + 1)
-            full = {"tb": {
-                "trend": "UP" if tb_code > 0 else "DOWN",
-                "ah": ah_arr[i], "al": al_arr[i], "hour": hour_arr[i], "day_key": day_arr[i],
-                "bar_minutes": tb_bar_min,
-                "h": high_arr[lo_i:i + 1], "l": low_arr[lo_i:i + 1], "c": close_arr[lo_i:i + 1],
-            }, "vol_filter_ok": vol_filter_ok}
-        elif active_strat == "ifvg_sweep":
-            full = {"entry_slice": entry_slice, "vol_filter_ok": vol_filter_ok}
-        else:
+        if needs.standard_analysis:
+            entry_slice = df_entry.iloc[max(0, i - (ENTRY_WINDOW - 1)):i + 1]
+            if macro_cursor != cached_sr_macro_cursor:
+                macro_slice = df_macro.iloc[max(0, macro_cursor - (HTF_WINDOW - 1)):macro_cursor + 1].reset_index(drop=True)
+                cached_sr_zones = find_sr_zones(
+                    macro_slice,
+                    lookback=ALERT_STATE["sr_lookback"],
+                    cluster_pct=ALERT_STATE["sr_cluster_pct"],
+                    min_touches=ALERT_STATE["sr_min_touches"],
+                )
+                cached_macro_gaps = find_unmitigated_fvgs(macro_slice)
+                cached_sr_macro_cursor = macro_cursor
             full = _full_analysis_with_memory(entry_slice, state)
             full["sr_zones"] = cached_sr_zones
             full["macro_fvg"] = fvg_snapshot_from_gaps(cached_macro_gaps, float(close_price))
-            full["vol_filter_ok"] = vol_filter_ok
+        else:
+            full = {}
+        full["vol_filter_ok"] = vol_filter_ok
+        full["ctx"] = ctx_bar
 
-        trade = _decide_trade(
-            round(float(close_price), 2), round(float(rsi_val), 2), round(float(atr_val), 2),
-            entry_bullish, trend_bullish, macro_bullish, full, state, min_confluence_score, min_rrr,
-            strategy_name=active_strat,
-            sl_mult=resolved_sl_mult, tp1_mult=resolved_tp1_mult, tp2_mult=resolved_tp2_mult
-        )
+        price_r = round(float(close_price), 2)
+        c = {
+            "close_price": price_r, "rsi_val": round(float(rsi_val), 2), "atr_val": round(float(atr_val), 2),
+            "entry_bullish": entry_bullish, "trend_bullish": trend_bullish, "macro_bullish": macro_bullish,
+            "full": full, "ctx": ctx_bar, "state": state, "p": p,
+            "structure": full.get("structure", "NEUTRAL"),
+            "near_zone": nearest_sr_zone(full.get("sr_zones", []), price_r,
+                                         max_distance_pct=ALERT_STATE["sr_max_distance_pct"]),
+        }
+        trade = strat.decide(c)
         if trade is None:
             continue
 
-        is_dual = get_strategy(active_strat).is_dual(trade["score"])
+        is_dual = strat.is_dual(trade["score"], p)
         outcome, close_time = _simulate_trade(df_entry, i, trade, spread_price=spread_price, dual=is_dual)
         blocked_until = close_time
         if outcome == "HIT_SL" and ALERT_STATE.get("sl_cooldown_enabled", True):
@@ -479,8 +443,8 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
     factor_summary.sort(key=lambda x: x[1], reverse=True)
 
     return {
-        "symbol": symbol, "mode": mode, "days": days,
-        "min_confluence_score": min_confluence_score, "min_rrr": min_rrr,
+        "symbol": symbol, "mode": mode, "days": days, "strategy": strat.key,
+        "params": dict(p),
         "total_trades": total, "wins": wins, "losses": losses, "open": still_open,
         "win_rate": win_rate, "avg_r": avg_r, "net_r": net_r, "max_drawdown_r": round(max_dd, 2),
         "equity_curve": equity, "trades": trades, "factor_summary": factor_summary,
@@ -489,64 +453,44 @@ def run_backtest(symbol, days=30, timeframe_mode=None, min_confluence_score=None
 MAX_SWEEP_COMBOS = 150
 MIN_SWEEP_SAMPLE = 5
 
-def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, score_values=None,
-                        strategy_values=None, sl_values=None, rsi_pairs=None,
-                        spread_pips=2.0, progress_callback=None):
-    swept = {
-        "strategies": strategy_values is not None,
-        "sl": sl_values is not None,
-        "rsi": rsi_pairs is not None,
-        "rrr": rrr_values is not None,
-        "score": score_values is not None,
-    }
+def run_backtest_sweep(symbol, days=30, timeframe_mode=None, plan=None, spread_pips=2.0, progress_callback=None):
+    """plan: [(strategy_key, {param_key: [values]})] from strategies.plan_sweep()."""
+    if not STRATEGIES:
+        return {"error": "No strategies installed — add a package to `strategies/` first."}
 
-    strategies = strategy_values or [None]
-    sl_mults = sl_values or [None]
-    rsi_combos = rsi_pairs or [(None, None)]
-    rrr_vals = rrr_values or [None]
-    score_vals = score_values or [None]
+    combos = []
+    for skey, axes in (plan or []):
+        strat = STRATEGIES.get(skey)
+        if strat is None:
+            continue
+        base = get_params(skey)
+        names = list(axes)
+        for vals in itertools.product(*(axes[n] for n in names)):
+            over = dict(zip(names, vals))
+            if strat.valid_params(Params({**base, **over})):
+                combos.append((skey, over))
 
-    total_combos = len(strategies) * len(rrr_vals) * len(score_vals) * len(sl_mults) * len(rsi_combos)
-    if total_combos > MAX_SWEEP_COMBOS:
-        return {"error": f"Sweep would run {total_combos} backtests (cap is {MAX_SWEEP_COMBOS}). "
-                          f"Sweep fewer dimensions at once, or narrow the value lists."}
+    if not combos:
+        return {"error": "The sweep grid is empty (every combination was invalid)."}
+    if len(combos) > MAX_SWEEP_COMBOS:
+        return {"error": f"Sweep would run {len(combos)} backtests (cap is {MAX_SWEEP_COMBOS}). "
+                          f"Sweep fewer dimensions at once."}
 
     prepared = _prepare_history(symbol, days, timeframe_mode)
     if "error" in prepared:
         return {"error": prepared["error"]}
 
-    combos = [
-        (strat, r, s, sl, rsi_pair)
-        for strat in strategies for r in rrr_vals for s in score_vals
-        for sl in sl_mults for rsi_pair in rsi_combos
-    ]
     results = []
-
-    for idx, (strat, rrr, score, sl_mult, (rsi_buy, rsi_sell)) in enumerate(combos):
+    for idx, (skey, over) in enumerate(combos):
         if progress_callback:
             try:
                 progress_callback(int(idx / len(combos) * 100))
             except Exception:
                 pass
 
-        res = run_backtest(symbol, days=days, timeframe_mode=timeframe_mode,
-                            min_confluence_score=score, min_rrr=rrr, spread_pips=spread_pips,
-                            strategy_name=strat, sl_atr_mult=sl_mult,
-                            rsi_buy_threshold=rsi_buy, rsi_sell_threshold=rsi_sell,
-                            _prepared=prepared)
-
-        resolved_strategy = strat or ALERT_STATE.get("active_strategy", "smc_confluence")
-        resolved_sl = sl_mult if sl_mult is not None else ALERT_STATE["sl_atr_mult"]
-        resolved_rrr = rrr if rrr is not None else ALERT_STATE["min_rrr"]
-        resolved_score = score if score is not None else ALERT_STATE["min_confluence_score"]
-        resolved_rsi = (
-            rsi_buy if rsi_buy is not None else ALERT_STATE["rsi_buy_threshold"],
-            rsi_sell if rsi_sell is not None else ALERT_STATE["rsi_sell_threshold"],
-        )
-
-        row = {"strategy": resolved_strategy, "min_rrr": resolved_rrr, "min_confluence_score": resolved_score,
-               "sl_atr_mult": resolved_sl, "rsi_pair": resolved_rsi}
-
+        res = run_backtest(symbol, days=days, timeframe_mode=timeframe_mode, spread_pips=spread_pips,
+                           strategy_name=skey, param_overrides=over, _prepared=prepared)
+        row = {"strategy": skey, "params": {**get_params(skey), **over}}
         if "error" in res:
             row["error"] = res["error"]
         else:
@@ -563,16 +507,18 @@ def run_backtest_sweep(symbol, days=30, timeframe_mode=None, rrr_values=None, sc
         except Exception:
             pass
 
-    effective_min_sample = max(MIN_SWEEP_SAMPLE, math.ceil(days * 0.5))
+    axes_swept = []
+    if len({s for s, _ in plan}) > 1:
+        axes_swept.append("strategies")
+    for _, axes in plan:
+        for k in axes:
+            if k not in axes_swept:
+                axes_swept.append(k)
 
     return {
         "symbol": symbol, "mode": timeframe_mode, "days": days, "grid": results,
-        "swept_strategies": swept["strategies"],
-        "swept_sl": swept["sl"],
-        "swept_rsi": swept["rsi"],
-        "swept_rrr": swept["rrr"],
-        "swept_score": swept["score"],
-        "min_sample": effective_min_sample,
+        "axes": axes_swept,
+        "min_sample": max(MIN_SWEEP_SAMPLE, math.ceil(days * 0.5)),
     }
 
 def generate_equity_chart(equity_curve, title="Backtest Equity Curve"):

@@ -28,8 +28,13 @@ TF_LABELS = {
     mt5.TIMEFRAME_D1: "1D",
 }
 
+TF_BY_NAME = {
+    "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
+    "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4,
+    "D1": mt5.TIMEFRAME_D1,
+}
+
 ALERT_STATE = {
-    "last_rsi_signal": None,
     "scanner_enabled": True,
     "news_lockout": False,
     # BUGFIX: was a set() — sets aren't prunable-by-age without extra bookkeeping
@@ -41,7 +46,9 @@ ALERT_STATE = {
     "entry_tf": TIMEFRAME_PRESETS["scalp"]["entry"],
     "trend_tf": TIMEFRAME_PRESETS["scalp"]["trend"],
     "macro_tf": TIMEFRAME_PRESETS["scalp"]["macro"],
-    "active_strategy": "smc_confluence",
+    "active_strategy": "none",
+    "strategy_params": {}, 
+    "_legacy": {},                  # old global values found in settings.json, used once to seed strategy params
 
     "require_structure_break": False,
     "fractal_window": 2,
@@ -53,33 +60,10 @@ ALERT_STATE = {
     "rsi_buy_threshold": 30.0,
     "rsi_sell_threshold": 70.0,
 
-    "sl_atr_mult": 1.2,
-    "tp1_atr_mult": 2.0,
-    "tp2_atr_mult": 3.5,
-    "min_rrr": 1.5,  # minimum TP1:SL reward-to-risk ratio required to fire a signal
-
-    "min_confluence_score": 35,
     "sr_lookback": 180,
     "sr_cluster_pct": 0.0015,
     "sr_min_touches": 2,
     "sr_max_distance_pct": 0.004,
-
-    # --- Trend / Volatility Breakout ---
-    "tb_adx_min": 22.0,             # H1 ADX(14) must exceed this (trending market)
-    "tb_london_start": 8.0,         # UTC hour of the London window start
-    "tb_ny_start": 13.0,            # UTC hour of the NY window start
-    "tb_window_hours": 2.0,         # how long each window stays open
-    "tb_use_breakout": True,        # candle close beyond the Asian range
-    "tb_use_sweep_bos": True,       # Asian sweep + BOS
-    "tb_sweep_max_bars": 20,        # max bars between the sweep and the BOS
-    "tb_bos_pre_bars": 6,           # bars before the sweep used to find the BOS level
-    "tb_sl_buffer_atr": 0.25,       # SL buffer beyond the structural level
-    "tb_min_sl_atr": 0.8,           # SL floor (spread/wick protection)
-    "tb_max_sl_atr": 3.0,           # skip setups whose stop is wider than this
-    "tb_tp1_rr": 1.5,
-    "tb_tp2_rr": 3.0,
-    "tb_dual_entry": True,          # 2 legs: TP1 full close + TP2/BE runner
-    "tb_fired": set(),              # runtime dedup (intentionally NOT persisted)
 
     # --- ATR / risk based position sizing (trend_breakout only) ---
     "dynamic_lots_enabled": True,
@@ -87,8 +71,6 @@ ALERT_STATE = {
     "max_lot_size": 1.0,            # hard cap per leg
 
     "setup_forming_enabled": True,
-    "last_watch_signal": None,
-    "watch_rsi_margin": 5,
     "broker_utc_offset_hours": None,
 
     "circuit_breaker_enabled": True,        # Master ON/OFF toggle
@@ -116,7 +98,6 @@ ALERT_STATE = {
     "max_daily_trades": 5,              # hard cap on live fills (tickets) per local day
     "max_entry_drift_pct": 25.0,        # abort if price drifted >25% of SL dist since signal
     "fixed_lot_size": 0.01,             # flat lot size per leg — NOT scaled by risk_percent
-    "dual_entry_score_threshold": 50,   # smc_confluence score >= this -> open 2 legs (TP1 + TP2/BE runner)
     "flatten_on_circuit_breaker": True,
     "trade_comment": "TradingButler",
 }
@@ -144,25 +125,16 @@ PERSISTENT_KEYS = [
     "require_volume_atr_filter",
     "atr_multiplier",
     "volume_multiplier",
-    "rsi_buy_threshold",
-    "rsi_sell_threshold",
-    "sl_atr_mult",
-    "tp1_atr_mult",
-    "tp2_atr_mult",
-    "min_rrr",
-    "min_confluence_score",
 
-    # --- trend breakout ---
-    "tb_adx_min", "tb_london_start", "tb_ny_start", "tb_window_hours",
-    "tb_use_breakout", "tb_use_sweep_bos", "tb_sweep_max_bars", "tb_bos_pre_bars",
-    "tb_sl_buffer_atr", "tb_min_sl_atr", "tb_max_sl_atr", "tb_tp1_rr", "tb_tp2_rr",
-    "tb_dual_entry",
+    "strategy_params",
+    "_legacy",
+
     # --- dynamic sizing ---
     "dynamic_lots_enabled", "risk_percent", "max_lot_size",
 
     "broker_utc_offset_hours",
     "setup_forming_enabled",
-    "watch_rsi_margin",
+
     "heartbeat_enabled",
     "heartbeat_interval_hours",
     # --- circuit breaker ---
@@ -182,7 +154,6 @@ PERSISTENT_KEYS = [
     "max_daily_trades",
     "max_entry_drift_pct",
     "fixed_lot_size",
-    "dual_entry_score_threshold",
     "flatten_on_circuit_breaker",
     # --- SL cooldown ---
     "sl_cooldown_enabled",
@@ -207,9 +178,14 @@ def load_settings():
     try:
         with open(SETTINGS_FILE, "r") as f:
             data = json.load(f)
+        legacy = {}
         for k, v in data.items():
             if k in ALERT_STATE:
                 ALERT_STATE[k] = v
+            else:
+                legacy[k] = v            # retired global keys (rsi_*, sl_atr_mult, tb_*, ...)
+        # Kept so tuned values survive until a strategy that owns them is installed.
+        ALERT_STATE["_legacy"] = {**ALERT_STATE.get("_legacy", {}), **legacy}
 
         mode = ALERT_STATE.get("timeframe_mode", "scalp")
         if mode in TIMEFRAME_PRESETS:
@@ -223,5 +199,3 @@ def load_settings():
         print("✅ Loaded persistent settings from settings.json")
     except Exception as e:
         print(f"⚠️ Failed to load settings: {e}")
-
-load_settings()

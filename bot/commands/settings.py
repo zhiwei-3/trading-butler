@@ -3,7 +3,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings
-from strategies import STRATEGY_PRESETS
+from strategies import STRATEGY_PRESETS, reset_runtime, resolve_param, params_overview, STRATEGIES, get_params, Params
 from ._common import admin_only
 
 
@@ -49,29 +49,11 @@ def _impacts(s):
 
 # (aliases, ALERT_STATE key, parser)
 _SPECS = [
-    (("buy_rsi", "rsi_buy", "rsi_buy_threshold"), "rsi_buy_threshold", _num(1, 99)),
-    (("sell_rsi", "rsi_sell", "rsi_sell_threshold"), "rsi_sell_threshold", _num(1, 99)),
-    (("score", "min_score", "min_confluence_score"), "min_confluence_score", _num(0, 100, integer=True)),
-    (("rrr", "min_rrr"), "min_rrr", _num(0, 20, lo_open=True)),
-    (("sl_mult", "sl_atr"), "sl_atr_mult", _num(0, 20, lo_open=True)),
-    (("tp1_mult", "tp1_atr"), "tp1_atr_mult", _num(0, 20, lo_open=True)),
-    (("tp2_mult", "tp2_atr"), "tp2_atr_mult", _num(0, 20, lo_open=True)),
     (("spread", "max_spread"), "max_allowed_spread_pips", _num(0, 500, lo_open=True)),
 
     (("risk", "risk_pct", "risk_percent"), "risk_percent", _num(0, 10, lo_open=True)),
     (("max_lot", "max_lot_size"), "max_lot_size", _num(0, 100, lo_open=True)),
     (("dyn_lots", "dynamic_lots"), "dynamic_lots_enabled", _bool),
-    (("tb_adx", "adx_min"), "tb_adx_min", _num(5, 60)),
-    (("tb_london",), "tb_london_start", _num(0, 23.75)),
-    (("tb_ny",), "tb_ny_start", _num(0, 23.75)),
-    (("tb_window",), "tb_window_hours", _num(0.25, 6)),
-    (("tb_breakout",), "tb_use_breakout", _bool),
-    (("tb_sweep",), "tb_use_sweep_bos", _bool),
-    (("tb_min_sl",), "tb_min_sl_atr", _num(0, 10, lo_open=True)),
-    (("tb_max_sl",), "tb_max_sl_atr", _num(0, 20, lo_open=True)),
-    (("tb_tp1_rr",), "tb_tp1_rr", _num(0, 20, lo_open=True)),
-    (("tb_tp2_rr",), "tb_tp2_rr", _num(0, 50, lo_open=True)),
-    (("tb_dual",), "tb_dual_entry", _bool),
 
     (("cb_enabled", "circuit_breaker", "cb_toggle"), "circuit_breaker_enabled", _bool),
     (("cb_losses", "max_losses", "cb_max_losses"), "max_daily_losses", _num(1, 100, integer=True)),
@@ -85,8 +67,6 @@ _SPECS = [
     (("max_trades", "max_daily_trades"), "max_daily_trades", _num(1, 100, integer=True)),
     (("drift", "max_drift", "max_entry_drift_pct"), "max_entry_drift_pct", _num(0, 500, lo_open=True)),
     (("lot", "fixed_lot", "fixed_lot_size"), "fixed_lot_size", _num(0, 10, lo_open=True)),
-    (("dual_score", "dual_entry_score", "dual_threshold", "dual_entry_score_threshold"),
-     "dual_entry_score_threshold", _num(0, 100, integer=True)),
     (("flatten_cb", "flatten_on_circuit_breaker"), "flatten_on_circuit_breaker", _bool),
 
     (("news_blockade", "news_toggle"), "news_blockade_enabled", _bool),
@@ -98,32 +78,58 @@ _ALIAS_MAP = {alias: (name, parser) for aliases, name, parser in _SPECS for alia
 
 
 def _reset_dedup():
-    ALERT_STATE["last_rsi_signal"] = None
-    ALERT_STATE["last_ifvg_signal"] = None
-    ALERT_STATE["last_watch_signal"] = None
+    reset_runtime()      # every strategy's dedup memory + the watchlist debounce
+
+
+async def _set_strategy_param(update, key, val_str):
+    """`/set <strategy>.<param> <value>` (or a bare alias when it's unambiguous / belongs to the active strategy)."""
+    hits = resolve_param(key)
+    if len(hits) > 1:
+        active = [h for h in hits if h[0] == ALERT_STATE.get("active_strategy")]
+        hits = active if len(active) == 1 else hits
+    if not hits:
+        await update.message.reply_text(f"❌ Unknown setting key `{key}`. Try `/set strategies`.", parse_mode="Markdown")
+        return
+    if len(hits) > 1:
+        opts = ", ".join(f"`{s}.{prm.key}`" for s, prm in hits)
+        await update.message.reply_text(f"⚠️ `{key}` matches several strategies — use one of: {opts}", parse_mode="Markdown")
+        return
+    skey, prm = hits[0]
+    try:
+        val = prm.parse(val_str)
+    except ValueError as e:
+        await update.message.reply_text(f"❌ Invalid value for `{key}`: {e}.", parse_mode="Markdown")
+        return
+
+    params = ALERT_STATE.setdefault("strategy_params", {}).setdefault(skey, {})
+    if not STRATEGIES[skey].valid_params(Params({**params, prm.key: val})):
+        await update.message.reply_text(
+            f"❌ `{prm.key}={val}` conflicts with this strategy's other settings "
+            "(e.g. buy RSI must stay below sell RSI).", parse_mode="Markdown")
+        return
+    old = params.get(prm.key)
+    params[prm.key] = val
+    save_settings()
+    await update.message.reply_text(
+        f"✅ **Strategy Setting Updated**\n\n`{skey}.{prm.key}`: `{old}` ➡️ `{val}`", parse_mode="Markdown")
 
 
 @admin_only
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Dynamically updates bot settings in ALERT_STATE."""
+    """Dynamically updates bot settings (global ones in ALERT_STATE, strategy ones in strategy_params)."""
+    if context.args and context.args[0].lower() in ("strategies", "params"):
+        await update.message.reply_text(params_overview(), parse_mode="Markdown")
+        return
+
     if not context.args or len(context.args) < 2:
         news_status = "ON 🟢" if ALERT_STATE.get("news_blockade_enabled", True) else "OFF 🔴"
         impacts_str = ", ".join(ALERT_STATE.get("news_blockade_impacts", ["high"]))
-
         reply = (
             "⚙️ **DYNAMIC SETTINGS MANAGER**\n\n"
-            f"• **Buy RSI (`buy_rsi`):** `{ALERT_STATE.get('rsi_buy_threshold', 30)}`\n"
-            f"• **Sell RSI (`sell_rsi`):** `{ALERT_STATE.get('rsi_sell_threshold', 70)}`\n"
-            f"• **Min Score (`score`):** `{ALERT_STATE.get('min_confluence_score', 50)}/100`\n"
-            f"• **Min RRR (`rrr`):** `1:{ALERT_STATE.get('min_rrr', 1.3)}`\n"
-            f"• **SL ATR Mult (`sl_mult`):** `{ALERT_STATE.get('sl_atr_mult', 1.5)}x`\n"
-            f"• **TP1 ATR Mult (`tp1_mult`):** `{ALERT_STATE.get('tp1_atr_mult', 1.0)}x`\n"
-            f"• **TP2 ATR Mult (`tp2_mult`):** `{ALERT_STATE.get('tp2_atr_mult', 2.0)}x`\n"
             f"• **Max Spread (`spread`):** `{ALERT_STATE.get('max_allowed_spread_pips', 30)} pips`\n\n"
 
             "🤖 **Trade Execution (see `/trade` for full detail):**\n"
             f"• **Fixed Lot/Leg (`lot`):** `{ALERT_STATE.get('fixed_lot_size', 0.01)}`\n"
-            f"• **Dual-Entry Score (`dual_score`):** `{ALERT_STATE.get('dual_entry_score_threshold', 50)}`\n"
             f"• **Magic (`magic`)**, **Slippage (`slippage`)**, "
             f"**Max Trades/Day (`max_trades`)**, **Entry Drift (`drift`)**, **Flatten on CB (`flatten_cb`)**\n\n"
 
@@ -135,20 +141,21 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏸️ **SL Cooldown:**\n"
             f"• **Status (`sl_cooldown`):** `{'ON 🟢' if ALERT_STATE.get('sl_cooldown_enabled', True) else 'OFF 🔴'}`\n"
             f"• **Minutes (`cooldown_mins`):** `{ALERT_STATE.get('sl_cooldown_minutes', 30)}m`\n\n"
-            
+
             "📰 **News Blockade Settings:**\n"
             f"• **Blockade Status (`news_blockade`):** `{news_status}`\n"
             f"• **Mins Before (`news_before`):** `{ALERT_STATE.get('news_blockade_mins_before', 30)}m`\n"
             f"• **Mins After (`news_after`):** `{ALERT_STATE.get('news_blockade_mins_after', 15)}m`\n"
             f"• **Impact Levels (`news_impact`):** `{impacts_str}`\n\n"
 
-            "**Usage:** `/set <key> <value>`\n"
-            "• `/set tp1_mult 1.5`\n"
-            "• `/set lot 0.02`\n"
-            "• `/set dual_score 60`\n"
-            "• `/set news_impact high, medium`"
+            "**Usage:** `/set <key> <value>` — e.g. `/set lot 0.02`, `/set news_impact high, medium`\n"
+            "**Strategy settings:** `/set strategies` lists them · `/set <strategy>.<param> <value>`"
         )
         await update.message.reply_text(reply, parse_mode="Markdown")
+
+        active = ALERT_STATE.get("active_strategy")
+        if active in STRATEGY_PRESETS:
+            await update.message.reply_text(params_overview(active), parse_mode="Markdown")
         return
 
     key = context.args[0].lower().strip()
@@ -156,7 +163,7 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     spec = _ALIAS_MAP.get(key)
     if spec is None:
-        await update.message.reply_text(f"❌ Unknown setting key `{key}`.", parse_mode="Markdown")
+        await _set_strategy_param(update, key, val_str)
         return
     setting_name, parser = spec
 
@@ -164,14 +171,6 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = parser(val_str)
     except ValueError as e:
         await update.message.reply_text(f"❌ Invalid value for `{key}`: {e}.", parse_mode="Markdown")
-        return
-
-    # Cross-field sanity: buy threshold must stay below sell threshold.
-    if setting_name == "rsi_buy_threshold" and val >= ALERT_STATE.get("rsi_sell_threshold", 70):
-        await update.message.reply_text("❌ Buy RSI must be lower than Sell RSI.", parse_mode="Markdown")
-        return
-    if setting_name == "rsi_sell_threshold" and val <= ALERT_STATE.get("rsi_buy_threshold", 30):
-        await update.message.reply_text("❌ Sell RSI must be higher than Buy RSI.", parse_mode="Markdown")
         return
 
     old_val = ALERT_STATE.get(setting_name, "N/A")
@@ -211,29 +210,40 @@ async def set_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def set_strategy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
-    current = ALERT_STATE.get("active_strategy", "smc_confluence")
+    current = ALERT_STATE.get("active_strategy", "none")
 
-    if not args or args[0].lower() not in STRATEGY_PRESETS:
-        lines = "\n".join(f"• `{k}` — {v}" for k, v in STRATEGY_PRESETS.items())
+    if not STRATEGY_PRESETS:
         await update.message.reply_text(
-            f"⚙️ **ACTIVE STRATEGY:** `{current.upper()}`\n\n"
-            f"**Available Presets:**\n{lines}\n\n"
-            f"**Usage:** `/strategy smc_confluence` or `/strategy ema_cross`\n\n"
-            f"ℹ️ *Dual-entry (2 legs) only applies to `smc_confluence`. Every other strategy always "
-            f"trades a single TP1-only leg.*",
+            "⚙️ **No strategies installed.**\n\n"
+            "The scanner still runs analysis, but no signals are generated. "
+            "Add a package to `strategies/` and restart the bot.",
             parse_mode="Markdown"
         )
         return
 
-    mode = args[0].lower()
-    ALERT_STATE["active_strategy"] = mode
-    _reset_dedup()   # a stale dedup key could silently suppress the first signal of the new strategy
-    save_settings()
+    choice = args[0].lower() if args else None
+    if choice == "none":
+        ALERT_STATE["active_strategy"] = "none"
+        _reset_dedup()
+        save_settings()
+        await update.message.reply_text("⏹️ **Strategy disabled** — scanning continues, no signals will fire.", parse_mode="Markdown")
+        return
 
-    strategy_label = STRATEGY_PRESETS[mode]
+    if choice not in STRATEGY_PRESETS:
+        lines = "\n".join(f"• `{k}` — {v}" for k, v in STRATEGY_PRESETS.items())
+        await update.message.reply_text(
+            f"⚙️ **ACTIVE STRATEGY:** `{current.upper()}`\n\n"
+            f"**Available:**\n{lines}\n\n"
+            f"**Usage:** `/strategy <key>` · `/strategy none` · params: `/set strategies`",
+            parse_mode="Markdown"
+        )
+        return
+
+    ALERT_STATE["active_strategy"] = choice
+    _reset_dedup()
+    save_settings()
     await update.message.reply_text(
-        f"✅ Active strategy updated to `{mode.upper()}`\n"
-        f"📝 `{strategy_label}`",
+        f"✅ Active strategy updated to `{choice.upper()}`\n📝 `{STRATEGY_PRESETS[choice]}`",
         parse_mode="Markdown"
     )
 
@@ -273,8 +283,8 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "👀 **WATCHLIST SETTINGS**\n\n"
             f"• **Status:** {'ON ✅' if ALERT_STATE['setup_forming_enabled'] else 'OFF ❌'}\n"
-            f"• **RSI Margin:** `{ALERT_STATE['watch_rsi_margin']}` pts\n"
-            "**Usage:** `/watchlist on|off` or `/watchlist rsi_margin <val>`",
+            "• **Trigger distance:** set per strategy — `/set <strategy>.watch_margin <val>`\n"
+            "**Usage:** `/watchlist on|off`",
             parse_mode="Markdown"
         )
         return
@@ -283,14 +293,8 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ALERT_STATE["setup_forming_enabled"] = True
     elif sub == "off":
         ALERT_STATE["setup_forming_enabled"] = False
-    elif sub == "rsi_margin" and len(args) >= 2:
-        try:
-            ALERT_STATE["watch_rsi_margin"] = _num(0, 50)(args[1])
-        except ValueError as e:
-            await update.message.reply_text(f"❌ Invalid RSI margin: {e}.", parse_mode="Markdown")
-            return
     else:
-        await update.message.reply_text("⚠️ Unknown option. Use `on`, `off`, or `rsi_margin <val>`.", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Unknown option. Use `on` or `off`.", parse_mode="Markdown")
         return
     save_settings()
     await update.message.reply_text("✅ Watchlist setting updated.", parse_mode="Markdown")

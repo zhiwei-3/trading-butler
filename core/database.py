@@ -1,5 +1,6 @@
 # database.py
 
+import json
 import logging
 import sqlite3
 from datetime import datetime, timezone, timedelta, time as dtime
@@ -110,6 +111,11 @@ def init_db():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sweep_results_run ON sweep_results(run_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sweep_runs_chat ON sweep_runs(chat_id)")
+
+        for table, col, ctype in (("sweep_runs", "axes_json", "TEXT"), ("sweep_results", "params_json", "TEXT")):
+            cols = [c[1] for c in cursor.execute(f"PRAGMA table_info({table})").fetchall()]
+            if col not in cols:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ctype}")
 
         conn.commit()
 
@@ -375,8 +381,9 @@ def get_sl_cooldown_remaining_s():
     remaining = (last + timedelta(minutes=mins) - datetime.now(timezone.utc)).total_seconds()
     return max(0.0, remaining)
 
-def log_sweep_run(chat_id, symbol, timeframe_mode, days, rank_mode, swept_flags, min_sample, elapsed_seconds, rows):
-    """Persists a completed /optimize sweep run and its detailed results."""
+def log_sweep_run(chat_id, symbol, timeframe_mode, days, rank_mode, axes, min_sample, elapsed_seconds, rows):
+    """Persists a completed /optimize sweep run. `axes` = swept axis names; each row carries
+    {"strategy", "params": {...}, metrics...}. Legacy columns are still filled where they apply."""
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -384,36 +391,59 @@ def log_sweep_run(chat_id, symbol, timeframe_mode, days, rank_mode, swept_flags,
                 INSERT INTO sweep_runs
                 (chat_id, symbol, timeframe_mode, days, rank_mode,
                  swept_strategies, swept_sl, swept_rsi, swept_rrr, swept_score,
-                 min_sample, elapsed_seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 min_sample, elapsed_seconds, axes_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 chat_id, symbol, timeframe_mode, days, rank_mode,
-                int(swept_flags.get("strategies", False)), int(swept_flags.get("sl", False)),
-                int(swept_flags.get("rsi", False)), int(swept_flags.get("rrr", False)),
-                int(swept_flags.get("score", False)), min_sample, elapsed_seconds,
+                int("strategies" in axes), int("sl_mult" in axes), int("rsi_buy" in axes or "rsi_sell" in axes),
+                int("min_rrr" in axes), int("min_score" in axes),
+                min_sample, elapsed_seconds, json.dumps(list(axes)),
             ))
             run_id = cursor.lastrowid
 
             for i, row in enumerate(rows, start=1):
-                rsi_pair = row.get("rsi_pair", (None, None))
+                p = row.get("params") or {}
                 cursor.execute("""
                     INSERT INTO sweep_results
                     (run_id, rank, strategy, min_rrr, min_confluence_score, sl_atr_mult,
                      rsi_buy, rsi_sell, total_trades, wins, losses, open_trades,
-                     win_rate, avg_r, net_r, max_drawdown_r, calmar)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     win_rate, avg_r, net_r, max_drawdown_r, calmar, params_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    run_id, i, row.get("strategy"), row.get("min_rrr"), row.get("min_confluence_score"),
-                    row.get("sl_atr_mult"), rsi_pair[0], rsi_pair[1],
+                    run_id, i, row.get("strategy"), p.get("min_rrr"), p.get("min_score"), p.get("sl_mult"),
+                    p.get("rsi_buy"), p.get("rsi_sell"),
                     row.get("total_trades", 0), row.get("wins", 0), row.get("losses", 0), row.get("open", 0),
                     row.get("win_rate"), row.get("avg_r"), row.get("net_r"), row.get("max_drawdown_r"),
-                    row.get("calmar"),
+                    row.get("calmar"), json.dumps(p),
                 ))
             conn.commit()
             return run_id
     except Exception as e:
         logging.error(f"⚠️ Failed to log sweep run to DB: {e}")
         return None
+
+
+def _legacy_params(d):
+    """Pre-modular sweep rows only have fixed columns; map them onto today's param names."""
+    m = {"min_rrr": d.get("min_rrr"), "min_score": d.get("min_confluence_score"),
+         "sl_mult": d.get("sl_atr_mult"), "rsi_buy": d.get("rsi_buy"), "rsi_sell": d.get("rsi_sell")}
+    return {k: v for k, v in m.items() if v is not None}
+
+
+def get_sweep_results(run_id, limit=None):
+    query = "SELECT * FROM sweep_results WHERE run_id = ? ORDER BY rank ASC"
+    params = [run_id]
+    if limit:
+        query += " LIMIT ?"
+        params.append(limit)
+    with get_db_connection() as conn:
+        rows = [dict(r) for r in conn.execute(query, params).fetchall()]
+    for d in rows:
+        try:
+            d["params"] = json.loads(d["params_json"]) if d.get("params_json") else _legacy_params(d)
+        except ValueError:
+            d["params"] = _legacy_params(d)
+    return rows
 
 def get_sweep_run(run_id):
     with get_db_connection() as conn:
@@ -426,15 +456,6 @@ def get_latest_sweep_run(chat_id):
             "SELECT * FROM sweep_runs WHERE chat_id = ? ORDER BY id DESC LIMIT 1", (chat_id,)
         ).fetchone()
         return dict(row) if row else None
-
-def get_sweep_results(run_id, limit=None):
-    query = "SELECT * FROM sweep_results WHERE run_id = ? ORDER BY rank ASC"
-    params = [run_id]
-    if limit:
-        query += " LIMIT ?"
-        params.append(limit)
-    with get_db_connection() as conn:
-        return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 def count_sweep_runs(chat_id):
     with get_db_connection() as conn:

@@ -11,6 +11,7 @@ from core.mt5_engine import get_gold_symbol, get_tick
 from core.news_engine import fetch_economic_events
 from core.evaluator import analyze_market
 from utils.chart import generate_chart_snapshot
+from strategies import get_strategy, get_params
 from ._common import admin_only, md_safe
 
 
@@ -295,10 +296,13 @@ async def diagnose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif ob.get("bearish_ob"):
         ob_status = f"Bearish OB @ ${ob.get('ob_level')}"
 
+    strat = get_strategy(ALERT_STATE.get("active_strategy"))
+    strat_lines = strat.diagnose(analysis, get_params(strat.key)) if strat else "🧩 *No active strategy*"
+
     msg = (
         "🔍 **LIVE TRIGGER DIAGNOSTIC**\n\n"
         f"📍 **Price:** `${analysis['close_price']}` | **14-ATR:** `${analysis['atr_val']}`\n"
-        f"📈 **RSI:** `{analysis['rsi_val']}` (Buy <= `{ALERT_STATE['rsi_buy_threshold']}`, Sell >= `{ALERT_STATE['rsi_sell_threshold']}`)\n\n"
+        f"📈 **RSI:** `{analysis['rsi_val']}`\n\n"
         f"• **{entry_lbl} EMA:** {'🟢 Bull' if analysis['entry_bullish'] else '🔴 Bear'}\n"
         f"• **{trend_lbl} EMA:** {'🟢 Bull' if analysis['trend_bullish'] else '🔴 Bear'}\n"
         f"• **{macro_lbl} EMA:** {'🟢 Bull' if analysis['macro_bullish'] else '🔴 Bear'}\n\n"
@@ -307,4 +311,6 @@ async def diagnose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🧱 **Order Block:** {ob_status}\n"
         f"🎯 **Nearest S/R:** {analysis['near_zone']['type'].title() if analysis['near_zone'] else 'None'} @ ${analysis['near_zone']['price'] if analysis['near_zone'] else 'N/A'}"
     )
+    if strat_lines:
+        msg += f"\n\n{strat_lines}"
     await update.message.reply_text(msg, parse_mode="Markdown")

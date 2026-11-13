@@ -107,10 +107,7 @@ def simple_breakdown(is_bullish, close_price, near_zone, structure, entry_bullis
 # ---------------------------------------------------------------- targets
 
 def calculate_targets(direction, close_price, atr_val, order_block, near_zone,
-                      sl_mult=None, tp1_mult=None, tp2_mult=None):
-    sl_mult = sl_mult if sl_mult is not None else ALERT_STATE["sl_atr_mult"]
-    tp1_mult = tp1_mult if tp1_mult is not None else ALERT_STATE["tp1_atr_mult"]
-    tp2_mult = tp2_mult if tp2_mult is not None else ALERT_STATE["tp2_atr_mult"]
+                      sl_mult, tp1_mult, tp2_mult):
     min_dist = atr_val * 0.5
     ob_buffer = atr_val * 0.25
 
@@ -160,9 +157,9 @@ def target_reasons(t):
     return [f"SL set by {t['sl_source']} ({t['sl_dist']} pts); TP1 by {t['tp1_source']}; RRR 1:{t['rrr']}"]
 
 
-def build_smc_reasons(direction, a, score, breakdown, targets):
+def build_smc_reasons(direction, a, score, breakdown, targets, p):
     is_buy = direction == "BUY"
-    th = ALERT_STATE["rsi_buy_threshold"] if is_buy else ALERT_STATE["rsi_sell_threshold"]
+    th = p["rsi_buy"] if is_buy else p["rsi_sell"]
     reasons = [f"RSI {a['rsi_val']} is {'oversold' if is_buy else 'overbought'} (trigger {'<=' if is_buy else '>='} {th})"]
     missing = []
     for label, earned, possible in breakdown:
@@ -175,7 +172,7 @@ def build_smc_reasons(direction, a, score, breakdown, targets):
             reasons.append(text)
         elif earned == 0:
             missing.append(label)
-    reasons.append(f"Confluence {score}/100 (minimum {ALERT_STATE['min_confluence_score']})")
+    reasons.append(f"Confluence {score}/100 (minimum {p['min_score']})")
     if missing:
         reasons.append("Not confirmed: " + ", ".join(missing))
     reasons += target_reasons(targets)
