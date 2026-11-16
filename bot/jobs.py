@@ -8,6 +8,7 @@ from telegram.ext import ContextTypes
 from telegram.error import NetworkError, TelegramError, TimedOut, BadRequest
 
 from config import ALERT_STATE, USER_ID, BOT_START_TIME, save_settings
+from bot.registry import job, stop_job
 from core.database import (
     get_db_connection,
     get_daily_performance_stats,
@@ -122,9 +123,7 @@ async def evaluate_circuit_breaker(context: ContextTypes.DEFAULT_TYPE) -> bool:
         ALERT_STATE["scanner_enabled"] = False
         save_settings()
 
-        current_jobs = context.job_queue.get_jobs_by_name("xauusd_scanner")
-        for job in current_jobs:
-            job.schedule_removal()
+        stop_job(context.job_queue, "xauusd_scanner")
 
         flatten_note = ""
         if ALERT_STATE.get("flatten_on_circuit_breaker", True):
@@ -146,6 +145,7 @@ async def evaluate_circuit_breaker(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
     return False
 
+@job("xauusd_scanner", interval=60, first=5, enabled=lambda: ALERT_STATE.get("scanner_enabled", True))
 async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
     if not ALERT_STATE["scanner_enabled"]:
         return
@@ -224,6 +224,7 @@ def _zone_from_sig(sig):
     low, high = float(sig["zone_low"]), float(sig["zone_high"])
     return {"type": sig["zone_type"] or "mixed", "low": low, "high": high, "price": (low + high) / 2}
 
+@job("outcome_tracker", interval=30, first=10)
 async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     """
     Tracks each active signal's leg(s) to a terminal outcome.
@@ -445,6 +446,8 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.exception(f"Error sending outcome alert for signal {sig['id']}: {e}")
 
+@job("heartbeat_ping", interval=lambda: ALERT_STATE["heartbeat_interval_hours"] * 3600, first=10,
+     enabled=lambda: ALERT_STATE.get("heartbeat_enabled", False))
 async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE):
     if not ALERT_STATE.get("heartbeat_enabled"):
         return
@@ -454,6 +457,7 @@ async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE):
     ALERT_STATE["last_heartbeat_at"] = datetime.now(timezone.utc)
     await context.bot.send_message(chat_id=chat_id, text=f"💓 **HEARTBEAT — BOT IS ALIVE**\n\n{snapshot}", parse_mode="Markdown")
 
+@job("mt5_watchdog", interval=90, first=15)
 async def mt5_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
     if not chat_id: return
@@ -471,14 +475,3 @@ async def mt5_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
     if was_ok and ALERT_STATE["consecutive_mt5_failures"] >= 2:
         ALERT_STATE["mt5_connected"] = False
         await context.bot.send_message(chat_id=chat_id, text="🚨 **MT5 CONNECTION LOST!**\n\nThe bot can't reach the MT5 terminal. Signal generation is effectively paused.", parse_mode="Markdown")
-
-def ensure_watchdog_running(job_queue, chat_id):
-    if not job_queue.get_jobs_by_name("mt5_watchdog"):
-        job_queue.run_repeating(mt5_watchdog_job, interval=90, first=15, chat_id=chat_id, name="mt5_watchdog", job_kwargs={"misfire_grace_time": 30})
-
-def restart_heartbeat_job(job_queue, chat_id):
-    for job in job_queue.get_jobs_by_name("heartbeat_ping"):
-        job.schedule_removal()
-    if ALERT_STATE["heartbeat_enabled"]:
-        interval_seconds = ALERT_STATE["heartbeat_interval_hours"] * 3600
-        job_queue.run_repeating(heartbeat_job, interval=interval_seconds, first=10, chat_id=chat_id, name="heartbeat_ping", job_kwargs={"misfire_grace_time": 30})

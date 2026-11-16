@@ -1,29 +1,14 @@
-from .general import (
-    start_cmd, menu_cmd, enable_scanner, disable_scanner,
-    account_cmd, status_cmd, heartbeat_cmd,
-)
-from .trading import (
-    trade_cmd, positions_cmd, close_cmd, breakeven_cmd,
-)
-from .market import (
-    gold_snapshot, spread_check_cmd, market_session,
-    diagnose_cmd, news_calendar_cmd,
-)
-from .settings import (
-    set_cmd, set_timeframe, set_strategy_cmd,
-    filters_cmd, watchlist_cmd,
-)
-from .journal import journal_cmd
-from .backtest import backtest_cmd
-from .optimize import optimize_cmd
+"""Every non-underscore module in this package is imported on startup; its @command / @callback
+decorators register it (see bot/registry.py). Add a command = add a file or a decorated function."""
 
-__all__ = [
-    "start_cmd", "menu_cmd", "enable_scanner", "disable_scanner",
-    "account_cmd", "status_cmd", "heartbeat_cmd",
-    "trade_cmd", "positions_cmd", "close_cmd", "breakeven_cmd",
-    "gold_snapshot", "spread_check_cmd", "market_session",
-    "diagnose_cmd", "news_calendar_cmd",
-    "set_cmd", "set_timeframe", "set_strategy_cmd",
-    "filters_cmd", "watchlist_cmd",
-    "journal_cmd", "backtest_cmd", "optimize_cmd",
-]
+import importlib
+import logging
+import pkgutil
+
+for _m in pkgutil.iter_modules(__path__):
+    if _m.name.startswith("_"):
+        continue
+    try:
+        importlib.import_module(f"{__name__}.{_m.name}")
+    except Exception:
+        logging.exception(f"❌ Command module '{_m.name}' failed to import — its commands are unavailable.")

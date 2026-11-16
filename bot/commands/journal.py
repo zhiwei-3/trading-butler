@@ -13,6 +13,7 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE
+from bot.registry import command, callback
 from core.database import get_dry_run_journal_signals, get_live_signal_links
 from core.mt5_engine import check_mt5_alive, MT5_LOCK, get_broker_utc_offset_seconds
 from utils.chart import generate_journal_chart
@@ -629,7 +630,8 @@ async def _safe_edit(query, text, kb):
                 raise
 
 
-@admin_only
+@command("journal", "Trade Journal (Manual, Dry-Run & Live)", icon="📓", group="Trade Execution & History", usage="/journal [filters]", order=3)
+@callback("btn_journal")
 async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/journal [filters] — opens the interactive dashboard."""
     args = context.args or []
@@ -650,6 +652,7 @@ async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(_strip_md(text), reply_markup=kb)
 
 
+@callback("j:", "jc:", "jn", prefix=True, answers=False)      # journal_callback answers the query itself
 async def journal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles every journal button. Routed from callbacks.py BEFORE its own query.answer(),
     because this function answers the query itself."""

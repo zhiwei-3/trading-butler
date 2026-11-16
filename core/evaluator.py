@@ -5,9 +5,9 @@ Strategy RULES live in strategies/ (pure); everything with side effects lives he
 """
 
 import logging
-import pandas_ta as ta
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS, TF_BY_NAME
+from analysis import add_indicators, compute, View, default_config
 from strategies import get_strategy, get_params, get_runtime, MarketData
 from core.database import (
     log_signal_to_db, get_recent_trades_for_chart, set_signal_status, get_sl_cooldown_remaining_s,
@@ -16,14 +16,6 @@ from core.mt5_engine import fetch_candles, get_broker_utc_offset_seconds
 from core.trade_engine import request_execution, trade_slot_blocker, calc_risk_lots
 from utils.chart import generate_signal_chart
 from utils.common import format_reasons
-from utils.smc import (
-    find_swing_points, detect_market_structure,
-    detect_liquidity_sweeps, detect_fvg, detect_order_block, macro_fvg_snapshot,
-)
-from utils.indicators import (
-    passes_volatility_filter, get_macd_bias, detect_candlestick_pattern,
-    detect_divergence, find_sr_zones, nearest_sr_zone,
-)
 
 
 def _eval_setup_forming(a):
@@ -144,9 +136,20 @@ def package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, ba
     return (full_msg, chart_buf)
 
 
-def analyze_market(symbol):
+def analyze_market(symbol, features=None):
+    """
+    features=None  -> compute only what the active strategy declares (+ the volume gate if enabled).  [scanner]
+    features=ALL   -> compute every public feature.                                                   [/gold, /diagnose]
+    """
     entry_tf, trend_tf, macro_tf = ALERT_STATE["entry_tf"], ALERT_STATE["trend_tf"], ALERT_STATE["macro_tf"]
     strat = get_strategy(ALERT_STATE.get("active_strategy"))
+
+    if features is None:
+        wanted = set(strat.needs.features) if strat else set()
+        if ALERT_STATE.get("require_volume_atr_filter"):
+            wanted.add("vol_filter_ok")
+    else:
+        wanted = set(features)
 
     df_entry = fetch_candles(symbol, entry_tf, strat.needs.entry_bars if strat else 200)
     df_trend = fetch_candles(symbol, trend_tf, 200)
@@ -154,44 +157,16 @@ def analyze_market(symbol):
     if df_entry is None or df_trend is None or df_macro is None:
         return None
 
-    df_entry['EMA_20'] = ta.ema(df_entry['close'], length=20)
-    df_entry['EMA_50'] = ta.ema(df_entry['close'], length=50)
-    df_trend['EMA_20'] = ta.ema(df_trend['close'], length=20)
-    df_trend['EMA_50'] = ta.ema(df_trend['close'], length=50)
-    df_macro['EMA_20'] = ta.ema(df_macro['close'], length=20)
-    df_macro['EMA_50'] = ta.ema(df_macro['close'], length=50)
-    df_entry['RSI'] = ta.rsi(df_entry['close'], length=14)
-    df_entry['ATR'] = ta.atr(df_entry['high'], df_entry['low'], df_entry['close'], length=14)
+    df_entry = add_indicators(df_entry, extras=True)
+    df_trend = add_indicators(df_trend)
+    df_macro = add_indicators(df_macro)
 
     close_price = round(df_entry['close'].iloc[-1], 2)
     rsi_val = round(df_entry['RSI'].iloc[-1], 2)
     atr_val = round(df_entry['ATR'].iloc[-1], 2)
 
-    swing_highs, swing_lows = find_swing_points(df_entry, ALERT_STATE["fractal_window"], ALERT_STATE["fractal_window"])
-    sweeps = detect_liquidity_sweeps(df_entry, swing_highs, swing_lows)
-    fvg = detect_fvg(df_entry)
-    macro_fvg = macro_fvg_snapshot(df_macro, close_price, lookback=ALERT_STATE["sr_lookback"])
-    order_block = detect_order_block(df_entry)
-    sr_zones = find_sr_zones(df_macro, lookback=ALERT_STATE["sr_lookback"],
-                             cluster_pct=ALERT_STATE["sr_cluster_pct"],
-                             min_touches=ALERT_STATE["sr_min_touches"])
-    near_zone = nearest_sr_zone(sr_zones, close_price, max_distance_pct=ALERT_STATE["sr_max_distance_pct"])
-    vol_filter_ok, _ = passes_volatility_filter(df_entry,
-                                                atr_multiplier=ALERT_STATE["atr_multiplier"],
-                                                volume_multiplier=ALERT_STATE["volume_multiplier"])
-
-    # Strategy connector: the strategy is pure, so WE fetch what it declared in `needs` and pass it in.
-    ctx = None
-    if strat is not None:
-        try:
-            extra = {name: fetch_candles(symbol, TF_BY_NAME[name], bars) for name, bars in strat.needs.extra}
-            md = MarketData(symbol=symbol, entry=df_entry, trend=df_trend, macro=df_macro, extra=extra,
-                            broker_offset_s=int(get_broker_utc_offset_seconds()))
-            ctx = strat.build_live_context(md, get_params(strat.key))
-        except Exception:
-            logging.exception(f"Strategy '{strat.key}' build_live_context() failed — continuing without ctx.")
-
-    return {
+    view = View(entry=df_entry, price=close_price, atr=atr_val, cfg=default_config(), macro=df_macro)
+    a = {
         "symbol": symbol,
         "df_entry": df_entry,
         "tf_label": TIMEFRAME_PRESETS[ALERT_STATE["timeframe_mode"]]["label"],
@@ -201,18 +176,20 @@ def analyze_market(symbol):
         "entry_bullish": bool(df_entry['EMA_20'].iloc[-1] > df_entry['EMA_50'].iloc[-1]),
         "trend_bullish": bool(df_trend['EMA_20'].iloc[-1] > df_trend['EMA_50'].iloc[-1]),
         "macro_bullish": bool(df_macro['EMA_20'].iloc[-1] > df_macro['EMA_50'].iloc[-1]),
-        "structure": detect_market_structure(df_entry),
-        "sweeps": sweeps,
-        "fvg": fvg,
-        "macro_fvg": macro_fvg,
-        "order_block": order_block,
-        "vol_filter_ok": vol_filter_ok,
-        "macd_bias": get_macd_bias(df_entry),
-        "candle_pattern": detect_candlestick_pattern(df_entry),
-        "divergence": detect_divergence(df_entry),
-        "near_zone": near_zone,
-        "ctx": ctx,
+        **compute(wanted, view),
+        "ctx": None,
     }
+
+    # Strategy connector: the strategy is pure, so WE fetch what it declared in `needs` and pass it in.
+    if strat is not None:
+        try:
+            extra = {name: fetch_candles(symbol, TF_BY_NAME[name], bars) for name, bars in strat.needs.extra}
+            md = MarketData(symbol=symbol, entry=df_entry, trend=df_trend, macro=df_macro, extra=extra,
+                            broker_offset_s=int(get_broker_utc_offset_seconds()))
+            a["ctx"] = strat.build_live_context(md, get_params(strat.key))
+        except Exception:
+            logging.exception(f"Strategy '{strat.key}' build_live_context() failed — continuing without ctx.")
+    return a
 
 
 def evaluate_signals(a):

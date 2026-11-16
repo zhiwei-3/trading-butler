@@ -4,6 +4,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS
+from bot.registry import command, callback
 from strategies import STRATEGIES, STRATEGY_PRESETS, find_param, get_params, Params
 from core.mt5_engine import get_gold_symbol
 from core.backtester import run_backtest, generate_equity_chart
@@ -55,7 +56,7 @@ def _parse_backtest_overrides(tokens):
     return strat_key, overrides, display, None
 
 
-@admin_only
+@command("backtest", "Replay Strategy Over History", icon="🧪", group="Testing & Utility", usage="/backtest <days> [mode] [overrides]", order=1)
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     days = 30

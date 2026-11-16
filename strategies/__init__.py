@@ -16,6 +16,7 @@ import importlib
 import logging
 import pkgutil
 
+from analysis import FEATURES
 from config import ALERT_STATE, TF_BY_NAME
 from .base import Strategy, Param, Needs, Params, MarketData, BacktestData
 
@@ -43,6 +44,9 @@ def _check(strat):
     for name, _bars in strat.needs.extra:
         if name not in TF_BY_NAME:
             return f"needs.extra: unknown timeframe '{name}' (valid: {', '.join(TF_BY_NAME)})"
+    for name in strat.needs.features:
+        if name not in FEATURES:
+            return f"needs.features: unknown analysis feature '{name}' (valid: {', '.join(FEATURES)})"
     return None
 
 

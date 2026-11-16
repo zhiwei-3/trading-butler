@@ -8,6 +8,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings
+from bot.registry import command, callback
 from strategies import STRATEGIES, STRATEGY_PRESETS, get_params, plan_sweep, reset_runtime
 from core.database import (
     get_sweep_run, get_latest_sweep_run, get_sweep_results,
@@ -524,7 +525,7 @@ async def _optimize_run(update: Update, args, chat_id):
 
 # ---------------------------------------------------------------- dispatcher
 
-@admin_only
+@command("optimize", "Parameter Optimization Sweep", icon="⚡", group="Testing & Utility", usage="/optimize [days] [mode] [axes]", order=2)
 async def optimize_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     chat_id = update.effective_chat.id

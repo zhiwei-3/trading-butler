@@ -1,7 +1,7 @@
 """PURE rules for RSI overbought/oversold reversion at S/R zones. Shared by live and backtest."""
 
 SCORE = 75     # fixed score (this strategy has no confluence breakdown); single TP1-only leg
-
+_W = {"EMA Trend Align": 10, "Macro Trend Align": 10, "Structure BOS": 10, "Support/Resistance": 5}
 
 def setup(rsi_val, close_price, near_zone, p):
     """'BUY' | 'SELL' | None.
@@ -25,4 +25,18 @@ def reasons(direction, rsi_val, near_zone, p):
         f"(trigger {'<=' if is_buy else '>='} {p['rsi_buy'] if is_buy else p['rsi_sell']})",
         f"Price is {'holding above' if is_buy else 'rejecting below'} a {near_zone['type']} zone at "
         f"{near_zone['price']} ({near_zone['touches']} touches)",
+    ]
+
+
+def breakdown(is_bullish, close_price, near_zone, structure, entry_bullish, macro_bullish):
+    """Light 4-factor breakdown used only for the backtest's factor win-rate stats."""
+    sr_ok = bool(near_zone and (
+        (is_bullish and near_zone["type"] in ("support", "mixed") and close_price >= near_zone["price"]) or
+        ((not is_bullish) and near_zone["type"] in ("resistance", "mixed") and close_price <= near_zone["price"])))
+    want_bos = "BULLISH_BOS" if is_bullish else "BEARISH_BOS"
+    return [
+        ("EMA Trend Align", _W["EMA Trend Align"] if is_bullish == entry_bullish else 0, _W["EMA Trend Align"]),
+        ("Macro Trend Align", _W["Macro Trend Align"] if is_bullish == macro_bullish else 0, _W["Macro Trend Align"]),
+        ("Structure BOS", _W["Structure BOS"] if structure == want_bos else 0, _W["Structure BOS"]),
+        ("Support/Resistance", _W["Support/Resistance"] if sr_ok else 0, _W["Support/Resistance"]),
     ]

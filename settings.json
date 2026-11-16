@@ -3,12 +3,23 @@
     "max_allowed_spread_pips": 10.0,
     "timeframe_mode": "scalp",
     "active_strategy": "rsi_reversion",
-    "require_structure_break": false,
+    "require_structure_break": true,
     "require_volume_atr_filter": false,
     "atr_multiplier": 1.0,
     "volume_multiplier": 1.2,
     "strategy_params": {
         "rsi_reversion": {
+            "min_rrr": 1.5,
+            "sl_mult": 1.2,
+            "tp1_mult": 2.0,
+            "tp2_mult": 3.5,
+            "rsi_buy": 30.0,
+            "rsi_sell": 70.0,
+            "watch_margin": 5.0
+        },
+        "smc_confluence": {
+            "min_score": 35,
+            "dual_score": 50,
             "min_rrr": 1.5,
             "sl_mult": 1.2,
             "tp1_mult": 2.0,

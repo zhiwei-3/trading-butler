@@ -51,16 +51,13 @@ def rsi_valid(p):
 
 # ---------------------------------------------------------------- targets
 def atr_targets(direction, a, p):
-    """Live: ATR/OB/S&R targets from the analysis dict `a` and the strategy's params."""
-    return calculate_targets(direction, a["close_price"], a["atr_val"], a["order_block"], a["near_zone"],
-                             p["sl_mult"], p["tp1_mult"], p["tp2_mult"])
+    """ATR/OB/S&R targets from an analysis dict (live `a` or backtest `c["a"]`). Missing features degrade gracefully."""
+    return calculate_targets(direction, a["close_price"], a["atr_val"], a.get("order_block") or {},
+                             a.get("near_zone"), p["sl_mult"], p["tp1_mult"], p["tp2_mult"])
 
 
 def atr_targets_bt(direction, c):
-    """Backtest: same thing from the backtester context `c`."""
-    p = c["p"]
-    return calculate_targets(direction, c["close_price"], c["atr_val"], c["full"].get("order_block", {}),
-                             c["near_zone"], p["sl_mult"], p["tp1_mult"], p["tp2_mult"])
+    return atr_targets(direction, c["a"], c["p"])
 
 
 # ---------------------------------------------------------------- heads-up

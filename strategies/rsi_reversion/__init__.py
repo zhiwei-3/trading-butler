@@ -1,4 +1,4 @@
-from utils.common import signal_spec, target_reasons, simple_breakdown
+from utils.common import signal_spec, target_reasons
 
 from ..base import Strategy, Needs
 from .._lib import atr_targets, atr_targets_bt, rsi_watch, rsi_valid
@@ -8,7 +8,7 @@ from .params import PARAMS
 
 class RsiReversion(Strategy):
     label = "RSI Overbought/Oversold S/R Zone Reversion"
-    needs = Needs(entry_bars=200)       # standard analysis (S/R zones, order block, structure) is required
+    needs = Needs(entry_bars=200, features=("near_zone", "order_block", "structure"))       # standard analysis (S/R zones, order block, structure) is required
     params = PARAMS
 
     def is_dual(self, score, p):
@@ -79,8 +79,8 @@ class RsiReversion(Strategy):
         state["last"] = direction
         return {
             "direction": direction, "entry": c["close_price"], "score": rules.SCORE,
-            "breakdown": simple_breakdown(direction == "BUY", c["close_price"], c["near_zone"],
-                                          c["structure"], c["entry_bullish"], c["macro_bullish"]),
+            "breakdown": rules.breakdown(direction == "BUY", c["close_price"], c["near_zone"],
+                                         c["structure"], c["entry_bullish"], c["macro_bullish"]),
             **targets,
         }
 

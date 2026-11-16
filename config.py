@@ -84,7 +84,7 @@ ALERT_STATE = {
     "news_blockade_mins_before": 30,           # Pause scanner N minutes BEFORE news release
     "news_blockade_mins_after": 30,            # Keep scanner paused N minutes AFTER news release
 
-    "heartbeat_enabled": True,
+    "heartbeat_enabled": False,
     "heartbeat_interval_hours": 1,
     "last_heartbeat_at": None,
     "mt5_connected": True,
@@ -100,20 +100,6 @@ ALERT_STATE = {
     "fixed_lot_size": 0.01,             # flat lot size per leg — NOT scaled by risk_percent
     "flatten_on_circuit_breaker": True,
     "trade_comment": "TradingButler",
-}
-
-CONFLUENCE_WEIGHTS = {
-    "rsi_zone": 15,
-    "ema_trend": 10,
-    "macro_trend": 10,
-    "structure_bos": 10,
-    "liquidity_sweep": 10,
-    "fvg": 10,
-    "volume_atr": 10,
-    "macd": 10,
-    "candlestick": 5,
-    "divergence": 5,
-    "sr_zone": 5,
 }
 
 PERSISTENT_KEYS = [

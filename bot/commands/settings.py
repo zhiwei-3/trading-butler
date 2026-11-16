@@ -3,6 +3,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings
+from bot.registry import command, callback
 from strategies import STRATEGY_PRESETS, reset_runtime, resolve_param, params_overview, STRATEGIES, get_params, Params
 from ._common import admin_only
 
@@ -114,7 +115,7 @@ async def _set_strategy_param(update, key, val_str):
         f"✅ **Strategy Setting Updated**\n\n`{skey}.{prm.key}`: `{old}` ➡️ `{val}`", parse_mode="Markdown")
 
 
-@admin_only
+@command("set", "View/Adjust Dynamic Parameters", icon="🔧", group="Strategy & Parameters", usage="/set <key> <val>", order=3)
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Dynamically updates bot settings (global ones in ALERT_STATE, strategy ones in strategy_params)."""
     if context.args and context.args[0].lower() in ("strategies", "params"):
@@ -189,7 +190,7 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@admin_only
+@command("timeframe", "Change Analysis Timeframe Mode", icon="🕒", group="Strategy & Parameters", usage="/timeframe <mode>", order=2)
 async def set_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args or args[0].lower() not in TIMEFRAME_PRESETS:
@@ -207,7 +208,7 @@ async def set_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Timeframe set to `{mode.upper()}` ({preset['label']})", parse_mode="Markdown")
 
 
-@admin_only
+@command("strategy", "Switch Active Trading Strategy", icon="⚙️", group="Strategy & Parameters", usage="/strategy [key|none]", order=1)
 async def set_strategy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     current = ALERT_STATE.get("active_strategy", "none")
@@ -248,7 +249,7 @@ async def set_strategy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@admin_only
+@command("filters", "Adjust Structure/Volume Filters", icon="🎛️", group="Strategy & Parameters", usage="/filters [structure|volume] [on|off]", order=4)
 async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -276,7 +277,7 @@ async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⚠️ Invalid format. Send `/filters` alone to see usage.", parse_mode="Markdown")
 
 
-@admin_only
+@command("watchlist", "Adjust Early Watchlist Pings", icon="👀", group="Strategy & Parameters", usage="/watchlist on|off", order=5)
 async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:

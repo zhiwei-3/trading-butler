@@ -1,28 +1,15 @@
 # app.py
 
 import logging
-from telegram import BotCommand
 from telegram.error import NetworkError, TimedOut
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from config import ALERT_STATE, TELEGRAM_TOKEN, USER_ID, save_settings
+from telegram.ext import Application, ContextTypes
+from config import TELEGRAM_TOKEN, USER_ID
 from core.database import init_db
 from core.mt5_engine import init_mt5
-from bot.commands import (
-    start_cmd, menu_cmd,
-    enable_scanner, disable_scanner, account_cmd, journal_cmd,
-    news_calendar_cmd, spread_check_cmd, gold_snapshot, market_session,
-    set_cmd, set_timeframe, set_strategy_cmd, filters_cmd, watchlist_cmd,
-    trade_cmd, positions_cmd, close_cmd, breakeven_cmd,
-    status_cmd, heartbeat_cmd, diagnose_cmd,
-    backtest_cmd, optimize_cmd,
-)
-from bot.callbacks import handle_callback_query
-from bot.jobs import (
-    market_scanner_job,
-    signal_outcome_tracker_job,
-    restart_heartbeat_job,
-    ensure_watchdog_running
-)
+from bot.registry import install, bot_commands, start_all_jobs
+import bot.commands   # noqa: F401  registers every @command / @callback
+import bot.jobs       # noqa: F401  registers every @job
+
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Logs uncaught exceptions raised by command handlers."""
@@ -31,35 +18,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     logging.error("Exception occurred while handling an update:", exc_info=context.error)
 
+
 async def post_init_setup(application: Application) -> None:
     """Registers bot command auto-completion hints in the Telegram UI."""
-    commands = [
-        BotCommand("start", "🤵‍♂️ Show Quick Command Guide"),
-        BotCommand("menu", "🎛️ Interactive Control Dashboard"),
-        BotCommand("account", "💳 Executive Capital & Margin Health"),
-        BotCommand("journal", "📓 Trade Journal (Manual, Dry-Run & Live)"),
-        BotCommand("scanner_on", "🟢 Activate Market Scanner"),
-        BotCommand("scanner_off", "🔴 Deactivate Market Scanner"),
-        BotCommand("trade", "🤖 Arm / Disarm Live Execution"),
-        BotCommand("positions", "💼 Open Positions (Dry-Run & Live)"),
-        BotCommand("close", "🧯 Close Position or Flatten All"),
-        BotCommand("breakeven", "🔒 Move SL to Break-Even"),
-        BotCommand("gold", "📊 Real-Time Chart & Analysis"),
-        BotCommand("diagnose", "🔍 Live Signal Diagnostic Check"),
-        BotCommand("spread", "🔍 Check Spread & Guard Status"),
-        BotCommand("news", "🗓️ USD Calendar (day + impact)"),
-        BotCommand("session", "🕒 Market Session Clock"),
-        BotCommand("strategy", "⚙️ Switch Active Trading Strategy"),
-        BotCommand("timeframe", "🕒 Change Analysis Timeframe Mode"),
-        BotCommand("set", "🔧 View/Adjust Dynamic Parameters"),
-        BotCommand("filters", "🎛️ Adjust Structure/Volume Filters"),
-        BotCommand("watchlist", "👀 Adjust Early Watchlist Pings"),
-        BotCommand("status", "🩺 Full Bot Health Check"),
-        BotCommand("heartbeat", "💓 Adjust Periodic Status Pings"),
-        BotCommand("backtest", "🧪 Replay Strategy Over History"),
-        BotCommand("optimize", "⚡ Parameter Optimization Sweep"),
-    ]
-    await application.bot.set_my_commands(commands)
+    await application.bot.set_my_commands(bot_commands())
+
 
 def main():
     if not TELEGRAM_TOKEN:
@@ -87,63 +50,16 @@ def main():
     else:
         print("⚠️ Warning: MT5 connection failed — watchdog will keep retrying.")
 
-    boot_chat = int(USER_ID)
-    ensure_watchdog_running(app.job_queue, boot_chat)
-    if ALERT_STATE.get("heartbeat_enabled"):
-        restart_heartbeat_job(app.job_queue, boot_chat)
-
-    # Register Global Error Handler
     app.add_error_handler(error_handler)
+    install(app)                                        # commands + callback dispatcher
 
-    # Register All Command Handlers
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("menu", menu_cmd))
-    app.add_handler(CommandHandler("account", account_cmd))
-    app.add_handler(CommandHandler("journal", journal_cmd))
-    app.add_handler(CallbackQueryHandler(handle_callback_query))
-    app.add_handler(CommandHandler("scanner_on", enable_scanner))
-    app.add_handler(CommandHandler("scanner_off", disable_scanner))
-    app.add_handler(CommandHandler("news", news_calendar_cmd))
-    app.add_handler(CommandHandler("spread", spread_check_cmd))
-    app.add_handler(CommandHandler("gold", gold_snapshot))
-    app.add_handler(CommandHandler("session", market_session))
-    app.add_handler(CommandHandler("set", set_cmd))
-    app.add_handler(CommandHandler("timeframe", set_timeframe))
-    app.add_handler(CommandHandler("strategy", set_strategy_cmd))
-    app.add_handler(CommandHandler("filters", filters_cmd))
-    app.add_handler(CommandHandler("watchlist", watchlist_cmd))
-    app.add_handler(CommandHandler("trade", trade_cmd))
-    app.add_handler(CommandHandler("positions", positions_cmd))
-    app.add_handler(CommandHandler("close", close_cmd))
-    app.add_handler(CommandHandler("breakeven", breakeven_cmd))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("heartbeat", heartbeat_cmd))
-    app.add_handler(CommandHandler("diagnose", diagnose_cmd))
-    app.add_handler(CommandHandler("backtest", backtest_cmd))
-    app.add_handler(CommandHandler("optimize", optimize_cmd))
-
-    # Auto-start Background Jobs
-    if USER_ID:
-        boot_id = int(USER_ID)
-        app.job_queue.run_repeating(
-            market_scanner_job,
-            interval=60,
-            first=5,
-            chat_id=boot_id,
-            name="xauusd_scanner",
-            job_kwargs={"misfire_grace_time": 30}
-        )
-        app.job_queue.run_repeating(
-            signal_outcome_tracker_job, 
-            interval=30, 
-            first=10, 
-            chat_id=boot_id, 
-            job_kwargs={"misfire_grace_time": 30}
-        )
-        print(f"✅ Background jobs running for Chat ID: {boot_id}")
+    boot_id = int(USER_ID)
+    start_all_jobs(app.job_queue, boot_id)              # scanner, outcome tracker, watchdog, heartbeat
+    print(f"✅ Background jobs running for Chat ID: {boot_id}")
 
     print("🚀 Trading Butler running polling loop with error handling active!")
     app.run_polling()
+
 
 if __name__ == '__main__':
     main()

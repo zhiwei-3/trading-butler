@@ -9,7 +9,7 @@ from .rules import find_breakout
 
 class RangeBreakout(Strategy):
     label = "Range (Donchian) Breakout"
-    needs = Needs(entry_bars=200, standard_analysis=False)      # no SMC analysis needed -> fast backtests
+    needs = Needs(entry_bars=200)       # reads only the entry candles -> computes no analysis features
     params = PARAMS
 
     def is_dual(self, score, p):

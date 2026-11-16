@@ -13,12 +13,8 @@ from config import USER_ID, ALERT_STATE, save_settings
 from core.database import get_signal_stats
 from strategies import get_strategy, get_params
 from core.mt5_engine import check_mt5_alive, MT5_LOCK, get_broker_utc_offset_seconds
-from bot.jobs import (
-    build_status_snapshot,
-    market_scanner_job,
-    ensure_watchdog_running,
-    restart_heartbeat_job,
-)
+from bot.jobs import build_status_snapshot
+from bot.registry import command, callback, restart_job, stop_job, help_text
 from ._common import admin_only
 
 
@@ -170,92 +166,13 @@ def _pf_text(st):
     return "∞" if st["wins"] else "—"
 
 
-@admin_only
+@command("start", "Show Quick Command Guide", icon="🤵‍♂️", group="Core & Dashboards", order=0, listed=False)
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    ensure_watchdog_running(context.job_queue, chat_id)
-
-    await update.message.reply_text(
-        "🤵‍♂️ **Trading Butler Online (Full Stack Modular)**\n\n"
-        "**🎛️ Core & Dashboards**\n"
-        "• `/menu` - Interactive Control Dashboard\n"
-        "• `/account [period]` - Executive Capital & Margin Health Snapshot\n"
-        "• `/scanner_on` / `/scanner_off` - Toggle Market Scanner\n"
-        "• `/status` - Full Bot Health Check\n\n"
-        "**🤖 Trade Execution & History**\n"
-        "• `/trade` - Arm/Disarm Live Execution (Dry/Live)\n"
-        "• `/positions` - Open Running Positions (Live + Dry-Run)\n"
-        "• `/journal [period]` - Interactive Trade Journal & Closed Deal Analytics\n"
-        "• `/close <ticket|all>` - Close Position or Flatten All\n"
-        "• `/breakeven <ticket>` - Trail SL to Entry Price\n\n"
-        "**📊 Market Analysis**\n"
-        "• `/gold` - Gold Technical Snapshot\n"
-        "• `/spread` - Live Bid/Ask & Spread Guard Status\n"
-        "• `/news [day] [impact]` - USD Calendar (e.g. `/news today`, `/news tue high`)\n"
-        "• `/session` - Market Session Clock\n"
-        "• `/diagnose` - Live Signal Diagnostic Check\n\n"
-        "**⚙️ Strategy & Parameters**\n"
-        "• `/strategy` - Switch Active Trading Strategy\n"
-        "• `/timeframe <mode>` - Switch Strategy Timeframe\n"
-        "• `/set <key> <val>` - View/Adjust Dynamic Parameters\n"
-        "• `/filters` - View/Adjust Structure & Volume Filters\n"
-        "• `/watchlist` - View/Adjust 'Setup Forming' Pings\n\n"
-        "**🧪 Testing & Utility**\n"
-        "• `/backtest <days> [mode]` - Historical Strategy Replay\n"
-        "• `/optimize [days] [mode] [flags]` - Parameter Sweep\n"
-        "• `/heartbeat` - View/Adjust Periodic Pings\n\n"
-        "💓 24/7 monitoring is active in this chat.",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(help_text(), parse_mode="Markdown")
 
 
-@admin_only
-async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    scanner_status = "🔴 OFF" if not ALERT_STATE.get("scanner_enabled") else "🟢 ON"
-    tf_mode = ALERT_STATE.get("timeframe_mode", "scalp").upper()
-    strat = get_strategy(ALERT_STATE.get("active_strategy"))
-    strat_name = strat.key.replace("_", " ").upper() if strat else "NONE"
-    strat_summary = strat.summary(get_params(strat.key)) if strat else "—"
-
-    text = (
-        "🎛️ **TRADING BUTLER CONTROL DASHBOARD**\n\n"
-        f"• **Scanner:** `{scanner_status}`\n"
-        f"• **Active Strategy:** `{strat_name}`\n"
-        f"• **Settings:** `{strat_summary}`\n"
-        f"• **Timeframe Preset:** `{tf_mode}`\n"
-        f"• **Sizing:** `{ALERT_STATE.get('fixed_lot_size', 0.01)}` lots/leg\n\n"
-        "Tap a button below for instant quick actions:"
-    )
-
-    keyboard = [
-        [
-            InlineKeyboardButton("🟢 Scanner ON", callback_data="btn_scanner_on"),
-            InlineKeyboardButton("🔴 Scanner OFF", callback_data="btn_scanner_off"),
-        ],
-        [
-            InlineKeyboardButton("💳 Account", callback_data="btn_account"),
-            InlineKeyboardButton("💼 Positions", callback_data="btn_positions"),
-            InlineKeyboardButton("📓 Journal", callback_data="btn_journal"),
-        ],
-        [
-            InlineKeyboardButton("📊 Gold Chart", callback_data="btn_gold"),
-            InlineKeyboardButton("⚙️ Strategy Selector", callback_data="btn_strat_menu"),
-            InlineKeyboardButton("🕒 Timeframe Selector", callback_data="btn_tf_menu"),
-        ],
-    ]
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    if update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-        except BadRequest as e:
-            if "not modified" not in str(e).lower():
-                raise
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-
-
-@admin_only
+@command("account", "Executive Capital & Margin Health", icon="💳", group="Core & Dashboards", usage="/account [period]", order=2)
+@callback("btn_account")
 async def account_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Executive view of capital, margin, deposits/withdrawals, net realized PnL, and signal engine stats."""
     since_utc, period_str, is_all = _parse_period(context.args)
@@ -320,44 +237,35 @@ async def account_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(text, parse_mode="Markdown")
 
 
-@admin_only
+@command("scanner_on", "Activate Market Scanner", icon="🟢", group="Core & Dashboards", order=30)
+@callback("btn_scanner_on")
 async def enable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
     ALERT_STATE["scanner_enabled"] = True
     save_settings()
-    current_jobs = context.job_queue.get_jobs_by_name("xauusd_scanner")
-    for job in current_jobs:
-        job.schedule_removal()
-
-    context.job_queue.run_repeating(
-        market_scanner_job, interval=60, first=5, chat_id=chat_id, name="xauusd_scanner",
-        job_kwargs={"misfire_grace_time": 30}
-    )
-    ensure_watchdog_running(context.job_queue, chat_id)
+    restart_job(context.job_queue, "xauusd_scanner", update.effective_chat.id)
     await update.effective_message.reply_text("🟢 **Market Scanner Activated!** Checking XAUUSD every 60 seconds.", parse_mode="Markdown")
 
 
-@admin_only
+@command("scanner_off", "Deactivate Market Scanner", icon="🔴", group="Core & Dashboards", order=31)
+@callback("btn_scanner_off")
 async def disable_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ALERT_STATE["scanner_enabled"] = False
     save_settings()
-    current_jobs = context.job_queue.get_jobs_by_name("xauusd_scanner")
-    for job in current_jobs:
-        job.schedule_removal()
+    stop_job(context.job_queue, "xauusd_scanner")
     await update.effective_message.reply_text("🔴 **Market Scanner Deactivated.**", parse_mode="Markdown")
 
 
-@admin_only
+@command("status", "Full Bot Health Check", icon="🩺", group="Core & Dashboards", order=5)
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     snapshot = await build_status_snapshot()
     await update.message.reply_text(f"🩺 **BOT STATUS CHECK**\n\n{snapshot}", parse_mode="Markdown")
 
 
-@admin_only
+@command("heartbeat", "Adjust Periodic Status Pings", icon="💓", group="Testing & Utility",
+         usage="/heartbeat on|off|test", order=30)
 async def heartbeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     chat_id = update.effective_chat.id
-    ensure_watchdog_running(context.job_queue, chat_id)
     if not args:
         status = "🟢 ON" if ALERT_STATE["heartbeat_enabled"] else "🔴 OFF"
         await update.message.reply_text(f"💓 **HEARTBEAT:** {status} every `{ALERT_STATE['heartbeat_interval_hours']}h`\n\n**Usage:** `/heartbeat on|off|test`", parse_mode="Markdown")
@@ -366,15 +274,10 @@ async def heartbeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if sub == "test":
         snapshot = await build_status_snapshot()
         await update.message.reply_text(f"💓 **TEST HEARTBEAT**\n\n{snapshot}", parse_mode="Markdown")
-    elif sub == "on":
-        ALERT_STATE["heartbeat_enabled"] = True
-        restart_heartbeat_job(context.job_queue, chat_id)
+    elif sub in ("on", "off"):
+        ALERT_STATE["heartbeat_enabled"] = (sub == "on")
         save_settings()
-        await update.message.reply_text("✅ Heartbeat **ON**", parse_mode="Markdown")
-    elif sub == "off":
-        ALERT_STATE["heartbeat_enabled"] = False
-        restart_heartbeat_job(context.job_queue, chat_id)
-        save_settings()
-        await update.message.reply_text("🔴 Heartbeat **OFF**", parse_mode="Markdown")
+        restart_job(context.job_queue, "heartbeat_ping", chat_id)     # starts only if enabled
+        await update.message.reply_text(f"{'✅' if sub == 'on' else '🔴'} Heartbeat **{sub.upper()}**", parse_mode="Markdown")
     else:
         await update.message.reply_text("⚠️ **Unknown option.** Usage: `/heartbeat on|off|test`", parse_mode="Markdown")

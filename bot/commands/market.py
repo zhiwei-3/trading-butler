@@ -6,6 +6,8 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TF_LABELS
+from analysis import ALL
+from bot.registry import command, callback
 from core.database import get_recent_trades_for_chart
 from core.mt5_engine import get_gold_symbol, get_tick
 from core.news_engine import fetch_economic_events
@@ -62,7 +64,7 @@ def _news_usage_text():
     )
 
 
-@admin_only
+@command("news", "USD Calendar (day + impact)", icon="🗓️", group="Market Analysis", usage="/news [day] [impact]", order=3)
 async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tokens = [a.strip().lower() for a in (context.args or []) if a.strip()]
 
@@ -176,7 +178,8 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------------------------------------------------------- market snapshots
 
-@admin_only
+@command("spread", "Check Spread & Guard Status", icon="📏", group="Market Analysis", order=2)
+@callback("btn_spread")
 async def spread_check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = await asyncio.to_thread(get_gold_symbol)
     if not symbol:
@@ -200,13 +203,14 @@ async def spread_check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(reply, parse_mode="Markdown")
 
 
-@admin_only
+@command("gold", "Real-Time Chart & Analysis", icon="📊", group="Market Analysis", order=1)
+@callback("btn_gold")
 async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /gold command and menu button callbacks."""
     symbol = await asyncio.to_thread(get_gold_symbol) or "XAUUSD"
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
-    analysis = await asyncio.to_thread(analyze_market, symbol)
+    analysis = await asyncio.to_thread(analyze_market, symbol, ALL)
 
     if not analysis:
         await update.effective_message.reply_text("❌ Failed to fetch MT5 market data for Gold.")
@@ -251,7 +255,7 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(caption, parse_mode="Markdown")
 
 
-@admin_only
+@command("session", "Market Session Clock", icon="🕒", group="Market Analysis", order=4)
 async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_utc = datetime.now(timezone.utc)
     ch = now_utc.hour
@@ -277,10 +281,10 @@ async def market_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(reply, parse_mode="Markdown")
 
 
-@admin_only
+@command("diagnose", "Live Signal Diagnostic Check", icon="🔍", group="Market Analysis", order=5)
 async def diagnose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = await asyncio.to_thread(get_gold_symbol)
-    analysis = await asyncio.to_thread(analyze_market, symbol) if symbol else None
+    analysis = await asyncio.to_thread(analyze_market, symbol, ALL) if symbol else None
     if not analysis:
         await update.message.reply_text("❌ Diagnostic failed: Unable to fetch MT5 market analysis.")
         return

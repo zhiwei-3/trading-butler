@@ -1,35 +1,47 @@
+# analysis/indicators.py
+import numpy as np
 import pandas as pd
 import pandas_ta as ta
-from utils.smc import find_swing_points
+from .smc import find_swing_points
 
-def passes_volatility_filter(df, atr_multiplier=1.0, volume_multiplier=1.2, atr_period=14, avg_period=20):
+ATR_AVG_PERIOD = 20
+VOLUME_AVG_PERIOD = 20
+
+
+def add_indicators(df, extras=False):
+    """Adds EMA_20/EMA_50/RSI/ATR. extras=True (entry timeframe) also adds ATR_AVG, VOL_AVG, MACD_BIAS.
+    The ONLY place indicator columns are built — live fetches and backtest history both go through here."""
     df = df.copy()
-    df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=atr_period)
-    avg_atr = df['ATR'].rolling(avg_period).mean().iloc[-1]
-    latest_atr = df['ATR'].iloc[-1]
-    atr_ok = bool(latest_atr >= avg_atr * atr_multiplier) if pd.notna(avg_atr) and pd.notna(latest_atr) else True
+    df['EMA_20'] = pd.to_numeric(ta.ema(df['close'], length=20), errors='coerce')
+    df['EMA_50'] = pd.to_numeric(ta.ema(df['close'], length=50), errors='coerce')
+    df['RSI'] = pd.to_numeric(ta.rsi(df['close'], length=14), errors='coerce')
+    df['ATR'] = pd.to_numeric(ta.atr(df['high'], df['low'], df['close'], length=14), errors='coerce')
+    if not extras:
+        return df
 
+    df['ATR_AVG'] = df['ATR'].rolling(ATR_AVG_PERIOD).mean()
+    df['VOL_AVG'] = df['tick_volume'].rolling(VOLUME_AVG_PERIOD).mean() if 'tick_volume' in df.columns else np.nan
+
+    df['MACD_BIAS'] = None
+    macd_df = ta.macd(df['close'], fast=12, slow=26, signal=9)
+    if macd_df is not None and not macd_df.empty:
+        macd_col = next((c for c in macd_df.columns if c.startswith("MACD_")), None)
+        signal_col = next((c for c in macd_df.columns if c.startswith("MACDs_")), None)
+        if macd_col and signal_col:
+            df['MACD_BIAS'] = np.where(macd_df[macd_col] > macd_df[signal_col], "BULLISH", "BEARISH")
+    return df
+
+
+def vol_filter_ok(row, atr_multiplier=1.0, volume_multiplier=1.2):
+    """Row-based volatility/volume gate (needs the extras columns)."""
+    atr_ok = True
+    if pd.notna(row.get('ATR_AVG')) and pd.notna(row.get('ATR')):
+        atr_ok = bool(row['ATR'] >= row['ATR_AVG'] * atr_multiplier)
     vol_ok = True
-    if 'tick_volume' in df.columns:
-        avg_vol = df['tick_volume'].rolling(avg_period).mean().iloc[-1]
-        latest_vol = df['tick_volume'].iloc[-1]
-        if pd.notna(avg_vol) and pd.notna(latest_vol):
-            vol_ok = bool(latest_vol >= avg_vol * volume_multiplier)
+    if 'tick_volume' in row.index and pd.notna(row.get('VOL_AVG')) and pd.notna(row['tick_volume']):
+        vol_ok = bool(row['tick_volume'] >= row['VOL_AVG'] * volume_multiplier)
+    return atr_ok and vol_ok
 
-    return (atr_ok and vol_ok), {"latest_atr": round(latest_atr, 2) if pd.notna(latest_atr) else None}
-
-def get_macd_bias(df, fast=12, slow=26, signal=9):
-    macd_df = ta.macd(df['close'], fast=fast, slow=slow, signal=signal)
-    if macd_df is None or macd_df.empty:
-        return None
-    macd_col = next((c for c in macd_df.columns if c.startswith("MACD_")), None)
-    signal_col = next((c for c in macd_df.columns if c.startswith("MACDs_")), None)
-    if not macd_col or not signal_col:
-        return None
-    line, sig = macd_df[macd_col].iloc[-1], macd_df[signal_col].iloc[-1]
-    if pd.isna(line) or pd.isna(sig):
-        return None
-    return "BULLISH" if line > sig else "BEARISH"
 
 def detect_candlestick_pattern(df):
     if len(df) < 2:
@@ -53,6 +65,7 @@ def detect_candlestick_pattern(df):
         return "DOJI"
     return None
 
+
 def detect_divergence(df, rsi_col='RSI', lookback=60, left=2, right=2):
     result = {"bullish": False, "bearish": False}
     recent = df.iloc[-lookback:].reset_index(drop=True)
@@ -71,6 +84,7 @@ def detect_divergence(df, rsi_col='RSI', lookback=60, left=2, right=2):
         if pd.notna(r1) and pd.notna(r2) and p2 > p1 and r2 < r1:
             result["bearish"] = True
     return result
+
 
 def find_sr_zones(df, lookback=180, left=3, right=3, cluster_pct=0.0015, min_touches=2):
     recent = df.iloc[-lookback:].reset_index(drop=True)
@@ -106,6 +120,7 @@ def find_sr_zones(df, lookback=180, left=3, right=3, cluster_pct=0.0015, min_tou
             "type": "mixed" if len(z["types"]) > 1 else next(iter(z["types"])),
         })
     return sorted(out, key=lambda z: z["touches"], reverse=True)
+
 
 def nearest_sr_zone(zones, price, max_distance_pct=0.004):
     candidates = [z for z in zones if abs(z["price"] - price) / price <= max_distance_pct]

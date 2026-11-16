@@ -4,35 +4,28 @@ import logging
 import itertools
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
 import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS, TF_BY_NAME
-from strategies import get_strategy, get_params, STRATEGIES, Params, BacktestData
 from core.mt5_engine import MT5_LOCK, get_broker_utc_offset_seconds
-from utils.smc import (
-    find_swing_points, detect_market_structure,
-    detect_liquidity_sweeps, detect_fvg, detect_order_block,
-    find_unmitigated_fvgs, fvg_snapshot_from_gaps,
-)
-from utils.indicators import (
-    detect_candlestick_pattern, detect_divergence, find_sr_zones, nearest_sr_zone
-)
+from analysis import add_indicators, compute, View, default_config
+from strategies import get_strategy, get_params, STRATEGIES, Params, BacktestData
 from utils.chart import CHART_LOCK
 
 MIN_WARMUP_BARS = 210
 MAX_BARS_FORWARD = 200
 ENTRY_WINDOW = 200
 HTF_WINDOW = 200
-ATR_AVG_PERIOD = 20
-VOLUME_AVG_PERIOD = 20
 MIN_INDICATOR_BARS = 80
+MAX_SWEEP_COMBOS = 150
+MIN_SWEEP_SAMPLE = 5
 
 _TF_MINUTES = {
     mt5.TIMEFRAME_M1: 1, mt5.TIMEFRAME_M5: 5, mt5.TIMEFRAME_M15: 15, mt5.TIMEFRAME_M30: 30,
     mt5.TIMEFRAME_H1: 60, mt5.TIMEFRAME_H4: 240, mt5.TIMEFRAME_D1: 1440,
 }
+
 
 def _min_warmup_days_for(timeframe, min_bars=MIN_INDICATOR_BARS):
     minutes = _TF_MINUTES.get(timeframe, 60)
@@ -40,6 +33,7 @@ def _min_warmup_days_for(timeframe, min_bars=MIN_INDICATOR_BARS):
     if minutes >= 1440:
         calendar_days *= 1.5
     return calendar_days
+
 
 def _fetch_history(symbol, timeframe, start, end):
     with MT5_LOCK:
@@ -50,62 +44,12 @@ def _fetch_history(symbol, timeframe, start, end):
     df['time'] = pd.to_datetime(df['time'], unit='s', utc=True).astype('datetime64[ns, UTC]')
     return df
 
-def _precompute_indicators(df):
-    df = df.copy()
-    df['EMA_20'] = pd.to_numeric(ta.ema(df['close'], length=20), errors='coerce')
-    df['EMA_50'] = pd.to_numeric(ta.ema(df['close'], length=50), errors='coerce')
-    df['RSI'] = pd.to_numeric(ta.rsi(df['close'], length=14), errors='coerce')
-    df['ATR'] = pd.to_numeric(ta.atr(df['high'], df['low'], df['close'], length=14), errors='coerce')
-    return df
-
-def _precompute_entry_extras(df):
-    df = df.copy()
-    df['ATR_AVG'] = df['ATR'].rolling(ATR_AVG_PERIOD).mean()
-    df['VOL_AVG'] = df['tick_volume'].rolling(VOLUME_AVG_PERIOD).mean() if 'tick_volume' in df.columns else np.nan
-
-    macd_df = ta.macd(df['close'], fast=12, slow=26, signal=9)
-    if macd_df is not None and not macd_df.empty:
-        macd_col = next((c for c in macd_df.columns if c.startswith("MACD_")), None)
-        signal_col = next((c for c in macd_df.columns if c.startswith("MACDs_")), None)
-        if macd_col and signal_col:
-            df['MACD_BIAS'] = np.where(macd_df[macd_col] > macd_df[signal_col], "BULLISH", "BEARISH")
-        else:
-            df['MACD_BIAS'] = None
-    else:
-        df['MACD_BIAS'] = None
-    return df
-
-def _vol_filter_ok(row, atr_multiplier, volume_multiplier):
-    atr_ok = True
-    if pd.notna(row['ATR_AVG']) and pd.notna(row['ATR']):
-        atr_ok = bool(row['ATR'] >= row['ATR_AVG'] * atr_multiplier)
-    vol_ok = True
-    if 'tick_volume' in row.index and pd.notna(row.get('VOL_AVG')) and pd.notna(row['tick_volume']):
-        vol_ok = bool(row['tick_volume'] >= row['VOL_AVG'] * volume_multiplier)
-    return atr_ok and vol_ok
 
 def _advance_cursor(times_arr, cursor, ts):
     n = len(times_arr)
     while cursor + 1 < n and times_arr[cursor + 1] <= ts:
         cursor += 1
     return cursor
-
-def _full_analysis_with_memory(entry_slice, state, lookback_bars=10):
-    fvg = detect_fvg(entry_slice)
-    swing_highs, swing_lows = find_swing_points(entry_slice, state["fractal_window"], state["fractal_window"])
-    sweeps = detect_liquidity_sweeps(entry_slice, swing_highs, swing_lows)
-    structure = detect_market_structure(entry_slice)
-
-    return {
-        "sweeps": sweeps,
-        "fvg": fvg,
-        "order_block": detect_order_block(entry_slice),
-        "structure": structure,
-        "macd_bias": entry_slice['MACD_BIAS'].iloc[-1] if 'MACD_BIAS' in entry_slice.columns else None,
-        "candle_pattern": detect_candlestick_pattern(entry_slice),
-        "divergence": detect_divergence(entry_slice),
-        "open_price": float(entry_slice['open'].iloc[-1]),
-    }
 
 
 def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forward=MAX_BARS_FORWARD, dual=True):
@@ -160,6 +104,7 @@ def _simulate_trade(df_entry, entry_idx, trade, spread_price=0.0, max_bars_forwa
 
     return ("HIT_TP1" if hit_tp1 else "OPEN"), times[end_idx]
 
+
 def _prepare_history(symbol, days, timeframe_mode):
     mode = timeframe_mode or ALERT_STATE["timeframe_mode"]
     if mode not in TIMEFRAME_PRESETS:
@@ -185,9 +130,9 @@ def _prepare_history(symbol, days, timeframe_mode):
     if df_entry_raw is None or df_trend_raw is None or df_macro_raw is None:
         return {"error": "Insufficient MT5 historical data returned for the requested range/timeframe."}
 
-    df_entry = _precompute_entry_extras(_precompute_indicators(df_entry_raw))
-    df_trend = _precompute_indicators(df_trend_raw)
-    df_macro = _precompute_indicators(df_macro_raw)
+    df_entry = add_indicators(df_entry_raw, extras=True)      # same builder the live path uses
+    df_trend = add_indicators(df_trend_raw)
+    df_macro = add_indicators(df_macro_raw)
 
     if df_trend['EMA_50'].notna().sum() == 0 or df_macro['EMA_50'].notna().sum() == 0:
         return {"error": "Not enough historical bars on the trend/macro timeframe to compute a 50-period EMA."}
@@ -210,6 +155,7 @@ def _extra_frame(prepared, name):
             cache[name] = _fetch_history(prepared["symbol"], tf,
                                          prepared["start"] - timedelta(days=warm), prepared["end"])
     return cache[name]
+
 
 def run_backtest(symbol, days=30, timeframe_mode=None, spread_pips=2.0, progress_callback=None,
                  strategy_name=None, param_overrides=None, _prepared=None):
@@ -239,8 +185,10 @@ def run_backtest(symbol, days=30, timeframe_mode=None, spread_pips=2.0, progress
     }
     state.update(strat.init_state(p))          # the strategy's own dedup/memory keys
 
-    atr_multiplier = ALERT_STATE["atr_multiplier"]
-    volume_multiplier = ALERT_STATE["volume_multiplier"]
+    gate_vol = bool(state["require_volume_atr_filter"])
+    feature_names = tuple(set(needs.features) | ({"vol_filter_ok"} if gate_vol else set()))
+    cfg = default_config()
+    macro_store = {}                           # macro-scope features are recomputed only when a macro bar closes
     spread_price = spread_pips / 10.0
 
     first_valid_idx = df_entry['ATR_AVG'].first_valid_index() or 0
@@ -283,10 +231,6 @@ def run_backtest(symbol, days=30, timeframe_mode=None, spread_pips=2.0, progress
     except Exception as e:
         logging.exception(f"Strategy '{strat.key}' prepare_backtest() failed")
         return {"error": f"Strategy `{strat.key}` could not prepare its backtest data: {e}"}
-
-    cached_sr_macro_cursor = -1
-    cached_sr_zones = []
-    cached_macro_gaps = []
 
     trades = []
     factor_stats = {}
@@ -335,40 +279,31 @@ def run_backtest(symbol, days=30, timeframe_mode=None, spread_pips=2.0, progress
         if ctx_bar is None:
             continue
 
-        vol_filter_ok = True
-        if state["require_volume_atr_filter"] or needs.vol_filter:
-            vol_filter_ok = _vol_filter_ok(df_entry.iloc[i], atr_multiplier, volume_multiplier)
-            if state["require_volume_atr_filter"] and not vol_filter_ok:
-                continue
+        price_r, rsi_r, atr_r = round(float(close_price), 2), round(float(rsi_val), 2), round(float(atr_val), 2)
 
-        if needs.standard_analysis:
-            entry_slice = df_entry.iloc[max(0, i - (ENTRY_WINDOW - 1)):i + 1]
-            if macro_cursor != cached_sr_macro_cursor:
-                macro_slice = df_macro.iloc[max(0, macro_cursor - (HTF_WINDOW - 1)):macro_cursor + 1].reset_index(drop=True)
-                cached_sr_zones = find_sr_zones(
-                    macro_slice,
-                    lookback=ALERT_STATE["sr_lookback"],
-                    cluster_pct=ALERT_STATE["sr_cluster_pct"],
-                    min_touches=ALERT_STATE["sr_min_touches"],
-                )
-                cached_macro_gaps = find_unmitigated_fvgs(macro_slice)
-                cached_sr_macro_cursor = macro_cursor
-            full = _full_analysis_with_memory(entry_slice, state)
-            full["sr_zones"] = cached_sr_zones
-            full["macro_fvg"] = fvg_snapshot_from_gaps(cached_macro_gaps, float(close_price))
-        else:
-            full = {}
-        full["vol_filter_ok"] = vol_filter_ok
-        full["ctx"] = ctx_bar
+        # ---- the SAME analysis pipeline the live scanner uses (slices are lazy: only built if a feature needs them)
+        mc = macro_cursor
+        view = View(
+            entry=lambda i=i: df_entry.iloc[max(0, i - (ENTRY_WINDOW - 1)):i + 1],
+            price=price_r, atr=atr_r, cfg=cfg,
+            macro=lambda mc=mc: df_macro.iloc[max(0, mc - (HTF_WINDOW - 1)):mc + 1].reset_index(drop=True),
+            macro_store=macro_store, macro_key=mc,
+        )
+        if gate_vol and not view.get("vol_filter_ok"):
+            continue
+        values = compute(feature_names, view)
 
-        price_r = round(float(close_price), 2)
-        c = {
-            "close_price": price_r, "rsi_val": round(float(rsi_val), 2), "atr_val": round(float(atr_val), 2),
+        a = {
+            "symbol": symbol, "close_price": price_r, "rsi_val": rsi_r, "atr_val": atr_r,
             "entry_bullish": entry_bullish, "trend_bullish": trend_bullish, "macro_bullish": macro_bullish,
-            "full": full, "ctx": ctx_bar, "state": state, "p": p,
-            "structure": full.get("structure", "NEUTRAL"),
-            "near_zone": nearest_sr_zone(full.get("sr_zones", []), price_r,
-                                         max_distance_pct=ALERT_STATE["sr_max_distance_pct"]),
+            "df_entry": view.entry, **values, "ctx": ctx_bar,
+        }
+        c = {
+            "a": a,                                   # same shape as the live analysis dict
+            "close_price": price_r, "rsi_val": rsi_r, "atr_val": atr_r,
+            "entry_bullish": entry_bullish, "trend_bullish": trend_bullish, "macro_bullish": macro_bullish,
+            "full": values, "ctx": ctx_bar, "state": state, "p": p,
+            "structure": values.get("structure"), "near_zone": values.get("near_zone"),
         }
         trade = strat.decide(c)
         if trade is None:
@@ -443,15 +378,12 @@ def run_backtest(symbol, days=30, timeframe_mode=None, spread_pips=2.0, progress
     factor_summary.sort(key=lambda x: x[1], reverse=True)
 
     return {
-        "symbol": symbol, "mode": mode, "days": days, "strategy": strat.key,
-        "params": dict(p),
+        "symbol": symbol, "mode": mode, "days": days, "strategy": strat.key, "params": dict(p),
         "total_trades": total, "wins": wins, "losses": losses, "open": still_open,
         "win_rate": win_rate, "avg_r": avg_r, "net_r": net_r, "max_drawdown_r": round(max_dd, 2),
         "equity_curve": equity, "trades": trades, "factor_summary": factor_summary,
     }
 
-MAX_SWEEP_COMBOS = 150
-MIN_SWEEP_SAMPLE = 5
 
 def run_backtest_sweep(symbol, days=30, timeframe_mode=None, plan=None, spread_pips=2.0, progress_callback=None):
     """plan: [(strategy_key, {param_key: [values]})] from strategies.plan_sweep()."""
@@ -520,6 +452,7 @@ def run_backtest_sweep(symbol, days=30, timeframe_mode=None, plan=None, spread_p
         "axes": axes_swept,
         "min_sample": max(MIN_SWEEP_SAMPLE, math.ceil(days * 0.5)),
     }
+
 
 def generate_equity_chart(equity_curve, title="Backtest Equity Curve"):
     if not equity_curve or len(equity_curve) < 2:

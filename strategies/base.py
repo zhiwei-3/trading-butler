@@ -2,7 +2,7 @@
 """
 The contract every strategy package implements.
 
-PURITY: a strategy may import only `config`, `utils.*`, numpy and pandas (plus this module).
+PURITY: a strategy may import config, utils.*, analysis.*, numpy and pandas (plus this module).
 No MT5, no database, no Telegram, no charts, no `core.*`, no `bot.*`.
 The core fetches data and hands it in through the hooks below.
 """
@@ -36,9 +36,8 @@ class Param:
 class Needs:
     """What the strategy asks the core to provide."""
     entry_bars: int = 200            # live entry-TF candles to fetch
-    extra: tuple = ()                # ((tf_name, live_bars), ...)  e.g. (("H1", 400),)  names: see config.TF_BY_NAME
-    vol_filter: bool = False         # backtester computes vol_filter_ok per bar
-    standard_analysis: bool = True   # backtester builds swings/FVG/OB/S&R "full" dict per bar (slow; skip if unused)
+    extra: tuple = ()                # ((tf_name, live_bars), ...)  e.g. (("H1", 400),)
+    features: tuple = ()             # analysis features to compute (see analysis.FEATURES), e.g. ("fvg", "near_zone")
 
 
 @dataclass

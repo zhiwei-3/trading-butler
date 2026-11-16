@@ -7,6 +7,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, save_settings
+from bot.registry import command, callback
 from core.mt5_engine import check_mt5_alive, get_tick, MT5_LOCK
 from core.database import get_open_dry_run_signals
 from core.trade_engine import (
@@ -117,7 +118,7 @@ def _fetch_dry_run_positions(curr="USD"):
     return positions
 
 
-@admin_only
+@command("trade", "Arm / Disarm Live Execution", icon="🤖", group="Trade Execution & History", usage="/trade [on|off|dry|live CONFIRM]", order=1)
 async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Arms/disarms live execution. Going LIVE requires an explicit confirmation token."""
     args = [a.lower() for a in (context.args or [])]
@@ -238,7 +239,8 @@ def _totals_line(projections, curr):
     return ("   └ **Potential:** " + " | ".join(parts)) if parts else None
 
 
-@admin_only
+@command("positions", "Open Positions (Dry-Run & Live)", icon="💼", group="Trade Execution & History", order=2)
+@callback("btn_positions")
 async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Shows ONLY currently open/running positions: live MT5 + dry-run. No filters, no history."""
     curr, live_positions, err = await asyncio.to_thread(_fetch_live_positions)
@@ -310,7 +312,7 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@admin_only
+@command("close", "Close Position or Flatten All", icon="🧯", group="Trade Execution & History", usage="/close <ticket|all>", order=4)
 async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -343,7 +345,7 @@ async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{icon} **Close `#{ticket}`** — {md_safe(res['reason'])}", parse_mode="Markdown")
 
 
-@admin_only
+@command("breakeven", "Move SL to Break-Even", icon="🔒", group="Trade Execution & History", usage="/breakeven <ticket>", order=5)
 async def breakeven_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually trail a managed position's SL to its entry price."""
     if not context.args:
