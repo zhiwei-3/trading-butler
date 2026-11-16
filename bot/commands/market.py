@@ -8,6 +8,7 @@ from telegram.ext import ContextTypes
 from config import ALERT_STATE, TF_LABELS
 from analysis import ALL
 from bot.registry import command, callback
+from bot.messaging import fit_lines
 from core.database import get_recent_trades_for_chart
 from core.mt5_engine import get_gold_symbol, get_tick
 from core.news_engine import fetch_economic_events
@@ -173,7 +174,8 @@ async def news_calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         out.append(line)
         used += len(line)
 
-    await update.message.reply_text("".join(out), parse_mode="Markdown")
+    text = fit_lines(lines, note="... *(truncated — narrow with a day or impact filter)*", sep="")
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------- market snapshots

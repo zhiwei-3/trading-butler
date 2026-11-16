@@ -40,3 +40,15 @@ def choice(*options):
             raise ValueError(f"must be one of: {', '.join(opts)}")
         return s
     return parse
+
+
+def choice_list(*options):
+    """Comma/space separated list of allowed values, e.g. 'high, medium'."""
+    opts = tuple(o.lower() for o in options)
+    def parse(s):
+        vals = [x.strip().lower() for x in str(s).replace(",", " ").split() if x.strip()]
+        bad = [v for v in vals if v not in opts]
+        if not vals or bad:
+            raise ValueError(f"must be from: {', '.join(opts)}")
+        return vals
+    return parse

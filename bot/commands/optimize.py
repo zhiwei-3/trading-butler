@@ -7,8 +7,9 @@ import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings
+from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings, apply_timeframe_mode
 from bot.registry import command, callback
+from bot.messaging import fit_lines
 from strategies import STRATEGIES, STRATEGY_PRESETS, get_params, plan_sweep, reset_runtime
 from core.database import (
     get_sweep_run, get_latest_sweep_run, get_sweep_results,
@@ -157,7 +158,9 @@ async def _optimize_view(update: Update, args, chat_id):
         final_lines.append(line)
         current_len += len(line) + 1
 
-    await update.effective_message.reply_text("\n".join(final_lines), parse_mode="Markdown")
+    text = fit_lines(lines, note=(f"\n... *(truncated — {len(rows)} results saved; ranks beyond this are still "
+                                  f"usable with* `/optimize apply {run_id} <rank>` *)*"))
+    await update.effective_message.reply_text(text, parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------- /optimize history
@@ -261,7 +264,9 @@ async def _optimize_history(update: Update, args, chat_id):
         final_lines.append(line)
         current_len += len(line) + 1
 
-    await update.effective_message.reply_text("\n".join(final_lines), parse_mode="Markdown")
+    text = fit_lines(lines, note=(f"\n... *(truncated — {total} total sweeps; use* "
+                                  f"`/optimize history <page>` *to page through)*"))
+    await update.effective_message.reply_text(text, parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------- /optimize apply
@@ -321,12 +326,7 @@ async def _optimize_apply(update: Update, args, chat_id):
     tf_note = ""
     sweep_mode = run.get("timeframe_mode")
     old_mode = ALERT_STATE.get("timeframe_mode")
-    if sweep_mode in TIMEFRAME_PRESETS and sweep_mode != old_mode:
-        preset = TIMEFRAME_PRESETS[sweep_mode]
-        ALERT_STATE["timeframe_mode"] = sweep_mode
-        ALERT_STATE["entry_tf"] = preset["entry"]
-        ALERT_STATE["trend_tf"] = preset["trend"]
-        ALERT_STATE["macro_tf"] = preset["macro"]
+    if sweep_mode != old_mode and apply_timeframe_mode(sweep_mode):
         tf_note = f"\n• **Timeframe:** `{old_mode}` ➡️ `{sweep_mode}` *(matches the backtest this result came from)*"
 
     reset_runtime()
@@ -520,7 +520,8 @@ async def _optimize_run(update: Update, args, chat_id):
         current_len += len(line) + 1
     final_lines.append(disclaimer)
 
-    await update.message.reply_text("\n".join(final_lines), parse_mode="Markdown")
+    body = fit_lines(lines, budget=3800 - len(disclaimer) - 40, note="\n... *(results truncated for length)*")
+    await update.message.reply_text(body + "\n" + disclaimer, parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------- dispatcher

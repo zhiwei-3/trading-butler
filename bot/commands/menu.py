@@ -2,7 +2,7 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings
+from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings, apply_timeframe_mode
 from strategies import STRATEGY_PRESETS, get_strategy, get_params, reset_runtime
 from bot.registry import command, callback
 
@@ -81,12 +81,7 @@ async def timeframe_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @callback("set_tf_", prefix=True)
 async def select_timeframe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = update.callback_query.data.replace("set_tf_", "", 1)
-    preset = TIMEFRAME_PRESETS.get(mode)
-    if preset:
-        ALERT_STATE["timeframe_mode"] = mode
-        ALERT_STATE["entry_tf"] = preset["entry"]
-        ALERT_STATE["trend_tf"] = preset["trend"]
-        ALERT_STATE["macro_tf"] = preset["macro"]
+    if apply_timeframe_mode(mode):
         reset_runtime()
         save_settings()
     await menu_cmd(update, context)

@@ -3,7 +3,7 @@
     "max_allowed_spread_pips": 10.0,
     "timeframe_mode": "scalp",
     "active_strategy": "rsi_reversion",
-    "require_structure_break": true,
+    "require_structure_break": false,
     "require_volume_atr_filter": false,
     "atr_multiplier": 1.0,
     "volume_multiplier": 1.2,
@@ -27,6 +27,23 @@
             "rsi_buy": 30.0,
             "rsi_sell": 70.0,
             "watch_margin": 5.0
+        },
+        "trend_breakout": {
+            "adx_min": 22.0,
+            "tp1_rr": 1.5,
+            "min_rrr": 1.5,
+            "tp2_rr": 3.0,
+            "window_hours": 2.0,
+            "london_start": 8.0,
+            "ny_start": 13.0,
+            "use_breakout": true,
+            "use_sweep_bos": true,
+            "sweep_max_bars": 20,
+            "bos_pre_bars": 6,
+            "sl_buffer_atr": 0.25,
+            "min_sl_atr": 0.8,
+            "max_sl_atr": 3.0,
+            "dual": true
         }
     },
     "_legacy": {},

@@ -14,6 +14,7 @@ from telegram.ext import ContextTypes
 
 from config import ALERT_STATE
 from bot.registry import command, callback
+from bot.messaging import reply_md, reply_photo_md, edit_md, strip_md
 from core.database import get_dry_run_journal_signals, get_live_signal_links
 from core.mt5_engine import check_mt5_alive, MT5_LOCK, get_broker_utc_offset_seconds
 from utils.chart import generate_journal_chart
@@ -612,24 +613,6 @@ def _render(st, view):
 
 # ================================================================ handlers
 
-def _strip_md(text):
-    return text.replace("*", "").replace("`", "").replace("_", " ")
-
-
-async def _safe_edit(query, text, kb):
-    try:
-        await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
-    except BadRequest as e:
-        if "not modified" in str(e).lower():
-            return
-        logging.warning(f"Journal markdown rejected ({e}); resending as plain text")
-        try:
-            await query.edit_message_text(_strip_md(text), reply_markup=kb)
-        except BadRequest as e2:
-            if "not modified" not in str(e2).lower():
-                raise
-
-
 @command("journal", "Trade Journal (Manual, Dry-Run & Live)", icon="📓", group="Trade Execution & History", usage="/journal [filters]", order=3)
 @callback("btn_journal")
 async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -646,10 +629,7 @@ async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     view = await asyncio.to_thread(_build_view, st)
     text, kb = _render(st, view)
-    try:
-        await update.effective_message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
-    except BadRequest:
-        await update.effective_message.reply_text(_strip_md(text), reply_markup=kb)
+    await reply_md(update.effective_message, text, reply_markup=kb)
 
 
 @callback("j:", "jc:", "jn", prefix=True, answers=False)      # journal_callback answers the query itself
@@ -686,14 +666,10 @@ async def journal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = (f"📈 **Journal Chart — {label}**{_filter_tag(st)}\n"
                    f"`{s['n']}` trades · **{s['win_rate']}%** WR · PF `{_pf_text(s)}` · "
                    f"Net `{_money(s['pnl'], curr)}`")
-        try:
-            await query.message.reply_photo(photo=buf, caption=caption, parse_mode="Markdown")
-        except BadRequest:
-            buf.seek(0)
-            await query.message.reply_photo(photo=buf, caption=_strip_md(caption))
+        await reply_photo_md(query.message, buf, caption)
         return
 
     await query.answer()                  # ---- filter / sort / page change
     view = await asyncio.to_thread(_build_view, st)
     text, kb = _render(st, view)
-    await _safe_edit(query, text, kb)
+    await edit_md(query, text, kb)

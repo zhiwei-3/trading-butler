@@ -8,6 +8,7 @@ from telegram.ext import ContextTypes
 from telegram.error import NetworkError, TelegramError, TimedOut, BadRequest
 
 from config import ALERT_STATE, USER_ID, BOT_START_TIME, save_settings
+from bot.messaging import send_text, send_alert
 from bot.registry import job, stop_job
 from core.database import (
     get_db_connection,
@@ -36,31 +37,6 @@ def format_uptime(delta: timedelta) -> str:
     parts.append(f"{minutes}m")
     return " ".join(parts)
 
-def _plain(text):
-    return text.replace("*", "").replace("`", "")
-
-async def _send_text(bot, chat_id, text, **kw):
-    kw.pop("parse_mode", None)  # this helper owns parse_mode
-    try:
-        return await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown", **kw)
-    except BadRequest as e:
-        logging.warning(f"Markdown rejected ({e}); resending as plain text")
-        return await bot.send_message(chat_id=chat_id, text=_plain(text), **kw)
-
-async def _send_alert(bot, chat_id, text, photo=None):
-    try:
-        if photo and len(text) <= 1024:
-            try:
-                await bot.send_photo(chat_id=chat_id, photo=photo, caption=text, parse_mode="Markdown")
-            except BadRequest:
-                photo.seek(0)
-                await bot.send_photo(chat_id=chat_id, photo=photo, caption=_plain(text))
-            return
-        if photo:
-            await bot.send_photo(chat_id=chat_id, photo=photo)
-        await _send_text(bot, chat_id, text)
-    except (NetworkError, TelegramError) as e:
-        logging.warning(f"⚠️ Alert dispatch failed: {e}")
 
 async def build_status_snapshot() -> str:
     uptime = format_uptime(datetime.now(timezone.utc) - BOT_START_TIME)
@@ -140,7 +116,7 @@ async def evaluate_circuit_breaker(context: ContextTypes.DEFAULT_TYPE) -> bool:
         )
         chat_id = context.job.chat_id if (context.job and context.job.chat_id) else int(USER_ID)
         if chat_id:
-            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+            await send_text(context.bot, chat_id, msg)
         return True
 
     return False
@@ -188,17 +164,13 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
             for item in signals_found:
                 if isinstance(item, tuple):
                     msg_text, chart_buffer = item
-                    await _send_alert(context.bot, chat_id, msg_text, chart_buffer)
+                    await send_alert(context.bot, chat_id, msg_text, chart_buffer)
                 else:
-                    await _send_alert(context.bot, chat_id, item)
+                    await send_alert(context.bot, chat_id, item)
 
             for watch_msg in watch_found:
                 try:
-                    await context.bot.send_message(
-                        chat_id=chat_id, 
-                        text=watch_msg, 
-                        parse_mode="Markdown"
-                    )
+                    await send_text(context.bot, chat_id, watch_msg)
                 except (TimedOut, NetworkError, TelegramError) as e:
                     logging.warning(f"⚠️ Telegram dispatch timed out: {e}")
     except Exception:
@@ -213,7 +185,7 @@ async def market_scanner_job(context: ContextTypes.DEFAULT_TYPE):
 
     for report in exec_reports:
         try:
-            await _send_text(context.bot, chat_id=chat_id, text=report, parse_mode="Markdown")
+            await send_text(context.bot, chat_id, report)
         except (TimedOut, NetworkError, TelegramError) as e:
             logging.warning(f"⚠️ Execution report dispatch failed: {e}")
 
@@ -246,7 +218,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         for line in await asyncio.to_thread(enforce_single_trade):
             if USER_ID:
-                await _send_text(context.bot, chat_id=int(USER_ID), text=line, parse_mode="Markdown")
+                await send_text(context.bot, int(USER_ID), line)
     except Exception:
         logging.exception("enforce_single_trade failed")
 
@@ -442,7 +414,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
                     trades=trades_hist, exclude_id=sig["id"],
                     near_zone=_zone_from_sig(sig),
                 )
-            await _send_alert(context.bot, chat_id, full_msg, chart_buf)
+            await send_alert(context.bot, chat_id, full_msg, chart_buf)
         except Exception as e:
             logging.exception(f"Error sending outcome alert for signal {sig['id']}: {e}")
 
@@ -455,7 +427,7 @@ async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE):
     if not chat_id: return
     snapshot = await build_status_snapshot()
     ALERT_STATE["last_heartbeat_at"] = datetime.now(timezone.utc)
-    await context.bot.send_message(chat_id=chat_id, text=f"💓 **HEARTBEAT — BOT IS ALIVE**\n\n{snapshot}", parse_mode="Markdown")
+    await send_text(context.bot, chat_id, f"💓 **HEARTBEAT — BOT IS ALIVE**\n\n{snapshot}")
 
 @job("mt5_watchdog", interval=90, first=15)
 async def mt5_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
@@ -468,10 +440,10 @@ async def mt5_watchdog_job(context: ContextTypes.DEFAULT_TYPE):
         ALERT_STATE["consecutive_mt5_failures"] = 0
         if not was_ok:
             ALERT_STATE["mt5_connected"] = True
-            await context.bot.send_message(chat_id=chat_id, text="✅ **MT5 CONNECTION RESTORED**\n\nThe bot has reconnected to MT5. Scanning and signals have resumed.", parse_mode="Markdown")
+            await send_text(context.bot, chat_id, "✅ **MT5 CONNECTION RESTORED**\n\nThe bot has reconnected to MT5. Scanning and signals have resumed.")
         return
 
     ALERT_STATE["consecutive_mt5_failures"] += 1
     if was_ok and ALERT_STATE["consecutive_mt5_failures"] >= 2:
         ALERT_STATE["mt5_connected"] = False
-        await context.bot.send_message(chat_id=chat_id, text="🚨 **MT5 CONNECTION LOST!**\n\nThe bot can't reach the MT5 terminal. Signal generation is effectively paused.", parse_mode="Markdown")
+        await send_text(context.bot, chat_id, "🚨 **MT5 CONNECTION LOST!**\n\nThe bot can't reach the MT5 terminal. Signal generation is effectively paused.")
