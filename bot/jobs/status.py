@@ -1,0 +1,59 @@
+# bot/jobs/status.py
+import asyncio
+from datetime import datetime, timezone, timedelta
+
+from config import ALERT_STATE, BOT_START_TIME
+from strategies import get_strategy, get_params
+from core.database import get_sl_cooldown_remaining_s
+from core.mt5_engine import check_mt5_alive
+from core.trade_engine import list_managed_positions
+
+
+def format_uptime(delta: timedelta) -> str:
+    total_seconds = int(delta.total_seconds())
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    parts = []
+    if days: parts.append(f"{days}d")
+    if hours or days: parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+
+async def build_status_snapshot() -> str:
+    uptime = format_uptime(datetime.now(timezone.utc) - BOT_START_TIME)
+    mt5_ok = await asyncio.to_thread(check_mt5_alive)
+    ALERT_STATE["mt5_connected"] = mt5_ok
+    last_hb = ALERT_STATE["last_heartbeat_at"]
+    last_hb_str = last_hb.astimezone().strftime("%Y-%m-%d %H:%M %Z") if last_hb else "Not sent yet"
+
+    trade_mode = "🔴 OFF"
+    if ALERT_STATE.get("auto_trade_enabled"):
+        trade_mode = "🧪 DRY-RUN" if ALERT_STATE.get("trade_dry_run", True) else "🟢 LIVE"
+    try:
+        open_managed = len(await asyncio.to_thread(list_managed_positions))
+    except Exception:
+        open_managed = 0
+
+    cd_s = await asyncio.to_thread(get_sl_cooldown_remaining_s)
+    cooldown_str = f"⏸️ {cd_s / 60:.0f}m left" if cd_s > 0 else "Clear"
+
+    strat = get_strategy(ALERT_STATE.get("active_strategy"))
+    strat_line = f"`{strat.key.upper()}` · `{strat.summary(get_params(strat.key))}`" if strat else "`NONE`"
+
+    return (
+        f"• **Uptime:** `{uptime}`\n"
+        f"• **MT5 Connection:** {'🟢 Connected' if mt5_ok else '🔴 Disconnected'}\n"
+        f"• **Scanner:** {'🟢 Running' if ALERT_STATE['scanner_enabled'] else '🔴 Stopped'}\n"
+        f"• **Auto-Trade:** {trade_mode} | **Open Positions:** `{open_managed}`\n"
+        f"• **Active Strategy:** {strat_line}\n"
+        f"• **Sizing:** `{ALERT_STATE.get('fixed_lot_size', 0.01)}` lots/leg (fixed)\n"
+        f"• **Timeframe Mode:** `{ALERT_STATE['timeframe_mode']}`\n"
+        f"• **Structure Filter:** {'ON' if ALERT_STATE['require_structure_break'] else 'OFF'}\n"
+        f"• **Volume/ATR Filter:** {'ON' if ALERT_STATE['require_volume_atr_filter'] else 'OFF'}\n"
+        f"• **News Lockout:** {'🔒 Active' if ALERT_STATE['news_lockout'] else 'Clear'}\n"
+        f"• **SL Cooldown:** {cooldown_str}\n"
+        f"• **Heartbeat Pings:** {'🟢 ON' if ALERT_STATE['heartbeat_enabled'] else '🔴 OFF'} every `{ALERT_STATE['heartbeat_interval_hours']}h`\n"
+        f"• **Last Heartbeat Sent:** `{last_hb_str}`"
+    )

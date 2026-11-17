@@ -1,8 +1,12 @@
 {
     "scanner_enabled": true,
-    "max_allowed_spread_pips": 10.0,
     "timeframe_mode": "scalp",
     "active_strategy": "rsi_reversion",
+    "setup_forming_enabled": true,
+    "broker_utc_offset_hours": 2,
+    "heartbeat_enabled": false,
+    "heartbeat_interval_hours": 1.0,
+    "max_allowed_spread_pips": 10.0,
     "require_structure_break": false,
     "require_volume_atr_filter": false,
     "atr_multiplier": 1.0,
@@ -47,31 +51,27 @@
         }
     },
     "_legacy": {},
-    "dynamic_lots_enabled": true,
     "risk_percent": 0.5,
     "max_lot_size": 1.0,
-    "broker_utc_offset_hours": 2,
-    "setup_forming_enabled": true,
-    "heartbeat_enabled": false,
-    "heartbeat_interval_hours": 1,
-    "circuit_breaker_enabled": true,
-    "max_daily_losses": 3,
-    "max_daily_drawdown_r": 3.0,
-    "news_blockade_enabled": true,
-    "news_blockade_impacts": [
-        "high"
-    ],
-    "news_blockade_mins_before": 30,
-    "news_blockade_mins_after": 30,
+    "dynamic_lots_enabled": true,
     "auto_trade_enabled": true,
     "trade_dry_run": false,
+    "fixed_lot_size": 0.01,
     "magic_number": 770077,
     "max_slippage_points": 30,
     "max_daily_trades": 5,
     "max_entry_drift_pct": 25.0,
-    "fixed_lot_size": 0.01,
     "flatten_on_circuit_breaker": true,
+    "trade_comment": "TradingButler",
+    "circuit_breaker_enabled": true,
+    "max_daily_losses": 3,
+    "max_daily_drawdown_r": 3.0,
     "sl_cooldown_enabled": true,
     "sl_cooldown_minutes": 30,
-    "trade_comment": "TradingButler"
+    "news_blockade_enabled": true,
+    "news_blockade_mins_before": 30,
+    "news_blockade_mins_after": 30,
+    "news_blockade_impacts": [
+        "high"
+    ]
 }

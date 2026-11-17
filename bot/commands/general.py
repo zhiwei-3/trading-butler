@@ -13,7 +13,7 @@ from config import USER_ID, ALERT_STATE, save_settings
 from core.database import get_signal_stats
 from strategies import get_strategy, get_params
 from core.mt5_engine import check_mt5_alive, MT5_LOCK, get_broker_utc_offset_seconds
-from bot.jobs import build_status_snapshot
+from bot.jobs.status import build_status_snapshot
 from bot.registry import command, callback, restart_job, stop_job, help_text
 from ._common import admin_only
 

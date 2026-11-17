@@ -211,6 +211,28 @@ def get_signal_stats():
         counts = {row["status"]: row["count"] for row in cursor.fetchall()}
     return counts
 
+
+def get_tracked_signals():
+    """Signals whose outcome is still being tracked (PENDING, or dual with a running runner)."""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, timestamp, symbol, status, direction, entry_price, sl_price, tp1_price, tp2_price, "
+            "dual_entry, ticket, exec_mode, lots, fill_price, ticket2, exec_mode2, lots2, fill_price2, "
+            "be_moved2, zone_low, zone_high, zone_type "
+            "FROM signals WHERE status IN ('PENDING', 'HIT_TP1')"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_signal_statuses(writes):
+    """writes: [(new_status, updated_at, signal_id), ...]"""
+    if not writes:
+        return
+    with get_db_connection() as conn:
+        conn.executemany("UPDATE signals SET status = ?, updated_at = ? WHERE id = ?", writes)
+        conn.commit()
+
+
 def get_daily_performance_stats():
     """Today's CLOSED trade performance (local day, PC timezone). R is computed from each signal's real levels,
     using the same model as the backtester (dual: TP1/2 leg-averages; BE runner = tp1_r/2)."""
