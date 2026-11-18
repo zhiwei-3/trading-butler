@@ -7,7 +7,8 @@ from strategies import get_strategy, get_params
 from core.database import get_sl_cooldown_remaining_s
 from core.mt5_engine import check_mt5_alive
 from core.trade_engine import list_managed_positions
-
+from bot.messaging import md_safe
+from core.guards import active_blocks
 
 def format_uptime(delta: timedelta) -> str:
     total_seconds = int(delta.total_seconds())
@@ -42,6 +43,9 @@ async def build_status_snapshot() -> str:
     strat = get_strategy(ALERT_STATE.get("active_strategy"))
     strat_line = f"`{strat.key.upper()}` · `{strat.summary(get_params(strat.key))}`" if strat else "`NONE`"
 
+    blocks = active_blocks()
+    guards_line = "Clear" if not blocks else " · ".join(f"🔒 {n}: {md_safe(r)}" for n, r in blocks.items())
+
     return (
         f"• **Uptime:** `{uptime}`\n"
         f"• **MT5 Connection:** {'🟢 Connected' if mt5_ok else '🔴 Disconnected'}\n"
@@ -52,7 +56,7 @@ async def build_status_snapshot() -> str:
         f"• **Timeframe Mode:** `{ALERT_STATE['timeframe_mode']}`\n"
         f"• **Structure Filter:** {'ON' if ALERT_STATE['require_structure_break'] else 'OFF'}\n"
         f"• **Volume/ATR Filter:** {'ON' if ALERT_STATE['require_volume_atr_filter'] else 'OFF'}\n"
-        f"• **News Lockout:** {'🔒 Active' if ALERT_STATE['news_lockout'] else 'Clear'}\n"
+        f"• **Guards:** {guards_line}\n"
         f"• **SL Cooldown:** {cooldown_str}\n"
         f"• **Heartbeat Pings:** {'🟢 ON' if ALERT_STATE['heartbeat_enabled'] else '🔴 OFF'} every `{ALERT_STATE['heartbeat_interval_hours']}h`\n"
         f"• **Last Heartbeat Sent:** `{last_hb_str}`"

@@ -37,3 +37,6 @@ def test_outcomes_is_pure():
     forbidden = ("core", "bot", "config", "MetaTrader5", "telegram", "sqlite3", "matplotlib", "requests")
     bad = [m for m in _imports(path) if any(m == f or m.startswith(f + ".") for f in forbidden)]
     assert not bad, f"core/outcomes.py must stay pure, but imports: {bad}"
+
+def test_core_does_not_reach_up():
+    assert not (v := _violations("core", ("bot", "telegram"))), "\n".join(v)

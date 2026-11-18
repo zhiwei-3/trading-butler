@@ -5,7 +5,6 @@ import json
 import subprocess
 import requests
 from datetime import datetime, timezone, timedelta
-from telegram.ext import ContextTypes
 from config import ALERT_STATE
 
 # In-Memory Cache & State Variables
@@ -174,84 +173,80 @@ def _clean_val(val):
     return str(val).strip()
 
 
-async def news_guard_check(context: ContextTypes.DEFAULT_TYPE, chat_id):
+async def upcoming_news_warnings():
     """
-    Sends an enriched pre-event warning ping ~30 minutes before configured news releases,
-    including forecast, previous metrics, and XAUUSD strategic insights.
+    Pre-event heads-up messages (~30 minutes before a configured-impact release), each returned exactly once,
+    with forecast, previous and the XAUUSD insight. Returns a list of Telegram-Markdown strings.
     """
     target_impacts = [imp.lower() for imp in ALERT_STATE.get("news_blockade_impacts", ["high"])]
     all_events = await fetch_economic_events(impact_level="all", currency="USD")
     if not all_events:
-        return
+        return []
 
     events = [ev for ev in all_events if str(ev.get("impact", "")).strip().lower() in target_impacts]
     if not events:
-        return
+        return []
 
     now_utc = datetime.now(timezone.utc)
-
     warned = ALERT_STATE["news_warned_events"]
     cutoff = now_utc - _RESULT_TTL
     for k in [k for k, t in warned.items() if t < cutoff]:
         del warned[k]
 
+    out = []
     for ev in events:
         event_title = ev.get("title", "USD Economic Event")
         raw_date = ev.get("date", "")
         try:
-            clean_date = raw_date.replace("Z", "+00:00")
-            event_dt = datetime.fromisoformat(clean_date).astimezone(timezone.utc)
+            event_dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).astimezone(timezone.utc)
         except (ValueError, TypeError):
             continue
 
         time_diff = (event_dt - now_utc).total_seconds() / 60.0
         warn_key = f"{event_title}|{raw_date}"
+        if not (25 <= time_diff <= 35) or warn_key in warned:
+            continue
+        warned[warn_key] = now_utc
 
-        if 25 <= time_diff <= 35 and warn_key not in warned:
-            warned[warn_key] = now_utc
-            
-            # Format local time and timezone label
-            dt_local = event_dt.astimezone()
-            tz_label = dt_local.strftime("%Z") or "Local"
-            time_str = f"{dt_local.strftime('%H:%M')} {tz_label} ({event_dt.strftime('%H:%M UTC')})"
+        dt_local = event_dt.astimezone()
+        tz_label = dt_local.strftime("%Z") or "Local"
+        time_str = f"{dt_local.strftime('%H:%M')} {tz_label} ({event_dt.strftime('%H:%M UTC')})"
 
-            forecast = _clean_val(ev.get("forecast"))
-            previous = _clean_val(ev.get("previous"))
-            insight = generate_xauusd_news_insight(event_title, forecast, previous)
-
-            impact_badge = str(ev.get("impact", "")).upper()
-            msg = (
-                f"🚨 **{impact_badge} IMPACT NEWS HEADS-UP** 🚨\n\n"
-                f"• **Event:** `{event_title}`\n"
-                f"• **Time:** `{time_str}` (~30 mins away)\n"
-                f"• **Forecast:** `{forecast}` | **Previous:** `{previous}`\n\n"
-                f"📊 **XAUUSD Macro Insight:**\n{insight}\n\n"
-                f"🛡️ *Scanner will auto-pause during release. Tighten SL or lock profits.*"
-            )
-            try:
-                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-            except Exception as e:
-                logging.warning(f"Failed to send news warning: {e}")
+        forecast = _clean_val(ev.get("forecast"))
+        previous = _clean_val(ev.get("previous"))
+        insight = generate_xauusd_news_insight(event_title, forecast, previous)
+        impact_badge = str(ev.get("impact", "")).upper()
+        out.append(
+            f"🚨 **{impact_badge} IMPACT NEWS HEADS-UP** 🚨\n\n"
+            f"• **Event:** `{event_title}`\n"
+            f"• **Time:** `{time_str}` (~30 mins away)\n"
+            f"• **Forecast:** `{forecast}` | **Previous:** `{previous}`\n\n"
+            f"📊 **XAUUSD Macro Insight:**\n{insight}\n\n"
+            f"🛡️ *Scanner will auto-pause during release. Tighten SL or lock profits.*"
+        )
+    return out
 
 
-async def check_news_post_release(context: ContextTypes.DEFAULT_TYPE, chat_id):
+async def news_results_to_announce():
     """
-    Monitors calendar feed for newly published actual results and broadcasts live outcome analysis.
+    Newly published `actual` results (within an hour of release) for configured impacts, each returned
+    exactly once, with live XAUUSD outcome analysis. Returns a list of Telegram-Markdown strings.
     """
     global _ANNOUNCED_RESULTS
     target_impacts = [imp.lower() for imp in ALERT_STATE.get("news_blockade_impacts", ["high"])]
     all_events = await fetch_economic_events(impact_level="all", currency="USD")
     if not all_events:
-        return
+        return []
 
     events = [ev for ev in all_events if str(ev.get("impact", "")).strip().lower() in target_impacts]
     if not events:
-        return
+        return []
 
     now_utc = datetime.now(timezone.utc)
     cutoff = now_utc - _RESULT_TTL
     _ANNOUNCED_RESULTS = {k: t for k, t in _ANNOUNCED_RESULTS.items() if t >= cutoff}
 
+    out = []
     for ev in events:
         actual = ev.get("actual")
         if not actual or str(actual).strip() == "":
@@ -260,37 +255,31 @@ async def check_news_post_release(context: ContextTypes.DEFAULT_TYPE, chat_id):
         event_title = ev.get("title", "USD News Event")
         raw_date = ev.get("date", "")
         event_key = f"RESULT|{event_title}|{raw_date}"
-
         if event_key in _ANNOUNCED_RESULTS:
             continue
-
         try:
-            clean_date = raw_date.replace("Z", "+00:00")
-            event_dt = datetime.fromisoformat(clean_date).astimezone(timezone.utc)
+            event_dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).astimezone(timezone.utc)
         except (ValueError, TypeError):
             continue
 
         minutes_since_release = (now_utc - event_dt).total_seconds() / 60.0
-        if 0 <= minutes_since_release <= 60:
-            _ANNOUNCED_RESULTS[event_key] = now_utc
-            forecast = _clean_val(ev.get("forecast"))
-            previous = _clean_val(ev.get("previous"))
-            actual_str = _clean_val(actual)
+        if not (0 <= minutes_since_release <= 60):
+            continue
+        _ANNOUNCED_RESULTS[event_key] = now_utc
 
-            outcome_insight = generate_xauusd_news_insight(event_title, forecast, previous, actual=actual_str)
-
-            msg = (
-                f"📊 **ECONOMIC NEWS RESULT DISPATCH** 📊\n\n"
-                f"• **Event:** `{event_title}`\n"
-                f"• **Actual:** `{actual_str}`\n"
-                f"• **Forecast:** `{forecast}` | **Previous:** `{previous}`\n\n"
-                f"⚡ **XAUUSD Market Impact:**\n{outcome_insight}\n\n"
-                f"🔎 *Monitor MT5 price structure for post-news momentum or mean-reversion signals.*"
-            )
-            try:
-                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-            except Exception as e:
-                logging.warning(f"Failed to send news result dispatch: {e}")
+        forecast = _clean_val(ev.get("forecast"))
+        previous = _clean_val(ev.get("previous"))
+        actual_str = _clean_val(actual)
+        outcome_insight = generate_xauusd_news_insight(event_title, forecast, previous, actual=actual_str)
+        out.append(
+            f"📊 **ECONOMIC NEWS RESULT DISPATCH** 📊\n\n"
+            f"• **Event:** `{event_title}`\n"
+            f"• **Actual:** `{actual_str}`\n"
+            f"• **Forecast:** `{forecast}` | **Previous:** `{previous}`\n\n"
+            f"⚡ **XAUUSD Market Impact:**\n{outcome_insight}\n\n"
+            f"🔎 *Monitor MT5 price structure for post-news momentum or mean-reversion signals.*"
+        )
+    return out
 
 
 async def check_news_blockade():

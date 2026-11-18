@@ -141,7 +141,6 @@ SCHEMA = (
 
 # In-memory only: never saved, never settable.
 RUNTIME_STATE = {
-    "news_lockout": False,
     "news_warned_events": {},       # event_key -> warned_at (UTC); pruned by age in news_engine
     "entry_tf": None, "trend_tf": None, "macro_tf": None,       # derived from timeframe_mode
     "last_heartbeat_at": None,

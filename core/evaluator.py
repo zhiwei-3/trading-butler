@@ -9,9 +9,7 @@ import logging
 from config import ALERT_STATE, TIMEFRAME_PRESETS, TF_BY_NAME
 from analysis import add_indicators, compute, View, default_config
 from strategies import get_strategy, get_params, get_runtime, MarketData
-from core.database import (
-    log_signal_to_db, get_recent_trades_for_chart, set_signal_status, get_sl_cooldown_remaining_s,
-)
+from core.database import log_signal_to_db, get_recent_trades_for_chart, set_signal_status
 from core.mt5_engine import fetch_candles, get_broker_utc_offset_seconds
 from core.trade_engine import request_execution, trade_slot_blocker, calc_risk_lots
 from utils.chart import generate_signal_chart
@@ -192,8 +190,12 @@ def analyze_market(symbol, features=None):
     return a
 
 
-def evaluate_signals(a):
-    """Runs the active strategy's pure rules, then packages each resulting signal spec."""
+def evaluate_signals(a, signals_allowed=True):
+    """
+    Runs the active strategy's pure rules, then packages each resulting signal spec.
+    signals_allowed=False (a signal-scope guard blocked: SL cooldown, volume filter, ...) still lets
+    heads-up pings through, but the strategy's evaluate() is not called.
+    """
     strat = get_strategy(ALERT_STATE.get("active_strategy"))
     if strat is None:
         return [], []          # nothing selected/installed -> no signals, no heads-up pings
@@ -207,13 +209,7 @@ def evaluate_signals(a):
         except Exception:
             logging.exception(f"Strategy '{strat.key}' watch() crashed — no heads-up this tick.")
 
-    # Post-stop-loss cooldown: heads-up pings still work, new trade signals don't.
-    cooldown_s = get_sl_cooldown_remaining_s()
-    if cooldown_s > 0:
-        logging.info(f"⏸️ SL cooldown active — {cooldown_s / 60:.1f} min remaining, signals suppressed.")
-        return [], watches
-
-    if ALERT_STATE.get("require_volume_atr_filter", False) and not a.get("vol_filter_ok", True):
+    if not signals_allowed:
         return [], watches
 
     try:

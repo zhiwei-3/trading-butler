@@ -13,6 +13,7 @@ from core.database import get_recent_trades_for_chart
 from core.mt5_engine import get_gold_symbol, get_tick
 from core.news_engine import fetch_economic_events
 from core.evaluator import analyze_market
+from core.guards.spread import pips_of_spread
 from utils.chart import generate_chart_snapshot
 from strategies import get_strategy, get_params
 from ._common import admin_only, md_safe
@@ -193,7 +194,7 @@ async def spread_check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     bid, ask = round(tick.bid, 2), round(tick.ask, 2)
-    spread_pips = round((ask - bid) * 10, 1)
+    spread_pips = pips_of_spread(tick)
     status_msg = "🟢 NORMAL" if spread_pips <= ALERT_STATE["max_allowed_spread_pips"] else "⚠️ HIGH (SCANNER PAUSED)"
 
     reply = (
