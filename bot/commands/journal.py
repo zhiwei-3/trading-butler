@@ -17,7 +17,7 @@ from bot.registry import command, callback
 from bot.messaging import reply_md, reply_photo_md, edit_md, strip_md
 from core.database import get_dry_run_journal_signals, get_live_signal_links
 from core.mt5 import check_mt5_alive, MT5_LOCK, get_broker_utc_offset_seconds
-from utils.chart import generate_journal_chart
+from charts import generate_journal_chart
 from ._common import admin_only, md_safe
 from .general import _HISTORY_START, _deal_stats, _money, _pf_text
 

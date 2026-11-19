@@ -7,7 +7,8 @@ from config import ALERT_STATE, TIMEFRAME_PRESETS
 from bot.registry import command, callback
 from strategies import STRATEGIES, STRATEGY_PRESETS, find_param, get_params, Params
 from core.mt5 import get_gold_symbol
-from core.backtester import run_backtest, generate_equity_chart
+from core.backtester import run_backtest
+from charts import generate_equity_chart
 from ._common import admin_only
 
 _STRAT_KEYS = ("strategy", "strat")

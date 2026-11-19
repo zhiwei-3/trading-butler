@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-STRATEGY_FORBIDDEN = ("core", "bot", "MetaTrader5", "telegram", "sqlite3", "matplotlib", "requests", "utils.chart")
+STRATEGY_FORBIDDEN = ("core", "bot", "MetaTrader5", "telegram", "sqlite3", "matplotlib", "requests", "charts")
 UTILS_FORBIDDEN = ("core", "bot", "telegram")
 _SKIP = {".venv", "venv", "env", ".git", "__pycache__"}
 
@@ -60,3 +60,7 @@ def test_pure_layers_import_without_metatrader5():
             "import config, analysis, strategies, utils.common, core.outcomes")
     result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+    
+
+def test_charts_are_pure():
+    assert not (v := _violations("charts", ("core", "bot", "MetaTrader5", "telegram", "sqlite3", "requests"))), "\n".join(v)

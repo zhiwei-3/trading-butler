@@ -12,7 +12,7 @@ from strategies import get_strategy, get_params, get_runtime, MarketData
 from core.database import log_signal_to_db, get_recent_trades_for_chart, set_signal_status
 from core.mt5 import fetch_candles, get_broker_utc_offset_seconds
 from core.execution import request_execution, trade_slot_blocker, calc_risk_lots
-from utils.chart import generate_signal_chart
+from charts import generate_signal_chart
 from utils.common import format_reasons
 
 
@@ -128,7 +128,8 @@ def package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, ba
         chart_buf = generate_signal_chart(
             a["df_entry"], symbol, direction, close_price, sl_price, tp1_price, tp2_price,
             fvg=zone or a.get("fvg"), near_zone=a.get("near_zone"), dual=dual,
-            trades=trades_hist, exclude_id=signal_id)
+            trades=trades_hist, exclude_id=signal_id,
+            server_offset_s=int(get_broker_utc_offset_seconds()))
     except Exception:
         logging.exception("Signal chart failed — sending alert without chart")
     return (full_msg, chart_buf)

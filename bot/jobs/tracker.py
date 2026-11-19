@@ -18,11 +18,11 @@ from core import outcomes
 from core.database import (
     get_tracked_signals, update_signal_statuses, mark_leg2_be_moved, get_recent_trades_for_chart,
 )
-from core.mt5 import get_gold_symbol, fetch_candles
+from core.mt5 import get_gold_symbol, fetch_candles, get_broker_utc_offset_seconds
 from core.execution import (
     reconcile_exit, trail_leg_to_breakeven, force_close_leg, enforce_single_trade, summarize_outcome_pnl,
 )
-from utils.chart import generate_outcome_chart
+from charts import generate_outcome_chart
 
 
 def _zone_from_sig(sig):
@@ -95,6 +95,7 @@ async def _announce(context, chat_id, symbol, sig, new_status, message, extra_no
     try:
         chart_buf = None
         if df_chart is not None and not df_chart.empty:
+            offset_s = await asyncio.to_thread(get_broker_utc_offset_seconds)
             chart_buf = await asyncio.to_thread(
                 generate_outcome_chart,
                 df=df_chart, entry_p=sig["entry_price"], sl_p=sig["sl_price"],
@@ -102,6 +103,7 @@ async def _announce(context, chat_id, symbol, sig, new_status, message, extra_no
                 outcome_status=new_status, symbol=symbol, direction=sig["direction"],
                 entry_time=sig["timestamp"], exit_time=closed_at, dual=bool(sig["dual_entry"]),
                 trades=trades_hist, exclude_id=sig["id"], near_zone=_zone_from_sig(sig),
+                server_offset_s=offset_s,
             )
         await send_alert(context.bot, chat_id, full_msg, chart_buf)
     except Exception as e:

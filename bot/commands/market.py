@@ -10,11 +10,11 @@ from analysis import ALL
 from bot.registry import command, callback
 from bot.messaging import fit_lines
 from core.database import get_recent_trades_for_chart
-from core.mt5 import get_gold_symbol, get_tick
+from core.mt5 import get_gold_symbol, get_tick, get_broker_utc_offset_seconds
 from core.news_engine import fetch_economic_events
 from core.evaluator import analyze_market
 from core.guards.spread import pips_of_spread
-from utils.chart import generate_chart_snapshot
+from charts import generate_chart_snapshot
 from strategies import get_strategy, get_params
 from ._common import admin_only, md_safe
 
@@ -236,6 +236,7 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Fetch recent trade history from database for chart overlay
     trades_db = await asyncio.to_thread(get_recent_trades_for_chart, 40, symbol)
+    offset_s = await asyncio.to_thread(get_broker_utc_offset_seconds)
 
     entry_lbl = TF_LABELS.get(ALERT_STATE["entry_tf"], "")
     chart_buf = await asyncio.to_thread(
@@ -246,6 +247,7 @@ async def gold_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         near_zone=analysis.get("near_zone"),
         macro_fvg=analysis.get("macro_fvg"),
         trades=trades_db,
+        server_offset_s=offset_s,
     )
 
     if chart_buf:
