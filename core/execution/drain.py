@@ -7,7 +7,7 @@ from core.execution.common import EXEC_LOCK, fixed_lot
 from core.execution.gates import trade_slot_blocker
 from core.execution.intents import take_pending
 from core.execution.orders import open_position
-from core.mt5_engine import get_tick
+from core.mt5 import get_tick
 
 
 def execute_pending_intents():

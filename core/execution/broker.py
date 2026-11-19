@@ -3,7 +3,7 @@
 
 import math
 
-import MetaTrader5 as mt5
+from core.mt5 import mt5
 
 _FILLING_CACHE = {}   # symbol -> filling mode that the broker actually accepted
 

@@ -3,7 +3,7 @@
 
 import logging
 
-import MetaTrader5 as mt5
+from core.mt5 import mt5
 
 from config import ALERT_STATE
 from core.execution.broker import (adjust_levels, filling_modes, forget_filling, remember_filling,
@@ -12,7 +12,7 @@ from core.execution.common import (MAX_SEND_RETRIES, RC_INVALID_FILL, RC_RETRYAB
                                    magic, mark_fill, rc_text)
 from core.execution.gates import preflight
 from core.execution.positions import fetch_managed, position_by_ticket
-from core.mt5_engine import MT5_LOCK, get_tick
+from core.mt5 import MT5_LOCK, get_tick
 
 
 def _new_fill(symbol, direction, before):

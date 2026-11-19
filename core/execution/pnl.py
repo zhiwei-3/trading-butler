@@ -1,11 +1,11 @@
 # core/execution/pnl.py
 """Telegram-ready P&L blocks for the legs a status transition closed."""
 
-import MetaTrader5 as mt5
+from core.mt5 import mt5
 
 from core.execution.common import fixed_lot
 from core.execution.reconcile import position_realized_pnl
-from core.mt5_engine import MT5_LOCK
+from core.mt5 import MT5_LOCK
 
 
 def _account_currency():

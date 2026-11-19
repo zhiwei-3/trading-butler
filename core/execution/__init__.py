@@ -3,7 +3,7 @@
 Live MT5 order execution for Trading Butler.
 
 Boundaries:
-  * core.mt5_engine   terminal connectivity + broker helpers
+  * core.mt5   terminal connectivity + broker helpers
   * core.execution    order_send / modify / close, position management (this package)
   * strategies/       decide WHAT to trade (never send orders)
   * core.outcomes     decides what happened to a trade (pure)

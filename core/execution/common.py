@@ -4,7 +4,7 @@
 import time
 import threading
 
-import MetaTrader5 as mt5
+from core.mt5 import mt5
 
 from config import ALERT_STATE
 

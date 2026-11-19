@@ -1,10 +1,12 @@
 # tests/test_architecture.py
 import ast, pathlib
+import subprocess
+import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 STRATEGY_FORBIDDEN = ("core", "bot", "MetaTrader5", "telegram", "sqlite3", "matplotlib", "requests", "utils.chart")
 UTILS_FORBIDDEN = ("core", "bot", "telegram")
-
+_SKIP = {".venv", "venv", "env", ".git", "__pycache__"}
 
 def _imports(path):
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
@@ -38,5 +40,23 @@ def test_outcomes_is_pure():
     bad = [m for m in _imports(path) if any(m == f or m.startswith(f + ".") for f in forbidden)]
     assert not bad, f"core/outcomes.py must stay pure, but imports: {bad}"
 
+
 def test_core_does_not_reach_up():
     assert not (v := _violations("core", ("bot", "telegram"))), "\n".join(v)
+
+
+def test_only_the_gateway_imports_metatrader5():
+    allowed = ROOT / "core" / "mt5" / "gateway.py"
+    offenders = [
+        str(p.relative_to(ROOT)) for p in ROOT.rglob("*.py")
+        if p != allowed and not (_SKIP & set(p.parts))
+        and any(m == "MetaTrader5" or m.startswith("MetaTrader5.") for m in _imports(p))
+    ]
+    assert not offenders, "import the lock-protected proxy instead (`from core.mt5 import mt5`):\n" + "\n".join(offenders)
+
+
+def test_pure_layers_import_without_metatrader5():
+    code = ("import sys; sys.modules['MetaTrader5'] = None; "      # a None entry makes `import MetaTrader5` fail
+            "import config, analysis, strategies, utils.common, core.outcomes")
+    result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes
 from config import ALERT_STATE
 from bot.registry import job
 from bot.messaging import send_text
-from core.mt5_engine import check_mt5_alive
+from core.mt5 import check_mt5_alive
 
 
 @job("mt5_watchdog", interval=90, first=15)

@@ -1,8 +1,8 @@
 # core/execution/positions.py
-import MetaTrader5 as mt5
+from core.mt5 import mt5
 
 from core.execution.common import magic
-from core.mt5_engine import MT5_LOCK
+from core.mt5 import MT5_LOCK
 
 
 def fetch_managed(symbol=None):

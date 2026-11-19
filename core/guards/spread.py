@@ -3,7 +3,7 @@ import asyncio
 
 from config import ALERT_STATE
 from core.guards import guard
-from core.mt5_engine import get_tick
+from core.mt5 import get_tick
 
 
 def pips_of_spread(tick):

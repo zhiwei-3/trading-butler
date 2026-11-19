@@ -17,7 +17,7 @@ import logging
 import pkgutil
 
 from analysis import FEATURES
-from config import ALERT_STATE, TF_BY_NAME
+from config import ALERT_STATE, TF_MINUTES
 from .base import Strategy, Param, Needs, Params, MarketData, BacktestData
 
 __all__ = [
@@ -42,8 +42,8 @@ def _check(strat):
                 return f"duplicate param name '{name}'"
             seen.add(name)
     for name, _bars in strat.needs.extra:
-        if name not in TF_BY_NAME:
-            return f"needs.extra: unknown timeframe '{name}' (valid: {', '.join(TF_BY_NAME)})"
+        if name not in TF_MINUTES:
+            return f"needs.extra: unknown timeframe '{name}' (valid: {', '.join(TF_MINUTES)})"
     for name in strat.needs.features:
         if name not in FEATURES:
             return f"needs.features: unknown analysis feature '{name}' (valid: {', '.join(FEATURES)})"

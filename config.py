@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-import MetaTrader5 as mt5
 from dotenv import load_dotenv
 
 from utils.parsers import num, boolean, choice, choice_list
@@ -19,26 +18,20 @@ SETTINGS_FILE = "settings.json"
 
 BOT_START_TIME = datetime.now(timezone.utc)
 
+
 # ---------------------------------------------------------------- timeframes
+# Plain names everywhere ("M5", "H1"); core.mt5 resolves them to terminal constants at the edge.
 
 TIMEFRAME_PRESETS = {
-    "scalp":    {"entry": mt5.TIMEFRAME_M5,  "trend": mt5.TIMEFRAME_M15, "macro": mt5.TIMEFRAME_H1, "label": "5M Entry / 15M Trend / 1H Macro (Scalping)"},
-    "intraday": {"entry": mt5.TIMEFRAME_M15, "trend": mt5.TIMEFRAME_H1,  "macro": mt5.TIMEFRAME_H4, "label": "15M Entry / 1H Trend / 4H Macro (Intraday)"},
-    "swing":    {"entry": mt5.TIMEFRAME_H1,  "trend": mt5.TIMEFRAME_H4,  "macro": mt5.TIMEFRAME_D1, "label": "1H Entry / 4H Trend / Daily Macro (Swing)"},
+    "scalp":    {"entry": "M5",  "trend": "M15", "macro": "H1", "label": "5M Entry / 15M Trend / 1H Macro (Scalping)"},
+    "intraday": {"entry": "M15", "trend": "H1",  "macro": "H4", "label": "15M Entry / 1H Trend / 4H Macro (Intraday)"},
+    "swing":    {"entry": "H1",  "trend": "H4",  "macro": "D1", "label": "1H Entry / 4H Trend / Daily Macro (Swing)"},
 }
 
-# Used by /diagnose, charts and the timeframe menu so labels always match the ACTUAL active preset.
-TF_LABELS = {
-    mt5.TIMEFRAME_M1: "1M", mt5.TIMEFRAME_M5: "5M", mt5.TIMEFRAME_M15: "15M",
-    mt5.TIMEFRAME_M30: "30M", mt5.TIMEFRAME_H1: "1H", mt5.TIMEFRAME_H4: "4H",
-    mt5.TIMEFRAME_D1: "1D",
-}
+TF_MINUTES = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240, "D1": 1440}
 
-TF_BY_NAME = {
-    "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
-    "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4,
-    "D1": mt5.TIMEFRAME_D1,
-}
+# Display labels (charts, /gold, /diagnose, menus) keyed by timeframe name.
+TF_LABELS = {"M1": "1M", "M5": "5M", "M15": "15M", "M30": "30M", "H1": "1H", "H4": "4H", "D1": "1D"}
 
 
 # ---------------------------------------------------------------- settings schema

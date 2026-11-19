@@ -4,10 +4,10 @@
 import logging
 from datetime import datetime, timezone, timedelta
 
-import MetaTrader5 as mt5
+from core.mt5 import mt5
 
 from core.execution.positions import position_by_ticket
-from core.mt5_engine import MT5_LOCK
+from core.mt5 import MT5_LOCK
 
 
 def reconcile_exit(ticket, candidates):

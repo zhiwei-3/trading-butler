@@ -2,10 +2,10 @@
 import math
 import logging
 
-import MetaTrader5 as mt5
+from core.mt5 import mt5
 
 from config import ALERT_STATE
-from core.mt5_engine import MT5_LOCK, init_mt5
+from core.mt5 import MT5_LOCK, init_mt5
 
 
 def calc_risk_lots(symbol, sl_dist, legs=1):

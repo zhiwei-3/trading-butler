@@ -8,7 +8,6 @@ import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 
-import MetaTrader5 as mt5
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, USER_ID
@@ -19,7 +18,7 @@ from core import outcomes
 from core.database import (
     get_tracked_signals, update_signal_statuses, mark_leg2_be_moved, get_recent_trades_for_chart,
 )
-from core.mt5_engine import get_gold_symbol, fetch_candles
+from core.mt5 import get_gold_symbol, fetch_candles
 from core.execution import (
     reconcile_exit, trail_leg_to_breakeven, force_close_leg, enforce_single_trade, summarize_outcome_pnl,
 )
@@ -127,7 +126,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     core/outcomes.py (see its docstring); this job only observes, acts and announces.
     """
     symbol = await asyncio.to_thread(get_gold_symbol) or "XAUUSD"
-    df = await asyncio.to_thread(fetch_candles, symbol, mt5.TIMEFRAME_M1, 5)
+    df = await asyncio.to_thread(fetch_candles, symbol, "M1", 5)
     if df is None or df.empty:
         return
 
@@ -170,7 +169,7 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
     await evaluate_circuit_breaker(context)
 
     # One chart-candle fetch shared by every update in this tick (entry timeframe, deep window).
-    entry_tf = ALERT_STATE.get("entry_tf", mt5.TIMEFRAME_M5)
+    entry_tf = ALERT_STATE.get("entry_tf") or "M5"
     df_chart = await asyncio.to_thread(fetch_candles, symbol, entry_tf, 300)
     trades_hist = await asyncio.to_thread(get_recent_trades_for_chart, 40, symbol)
     for sig, new_status, message, extra_note in updates:

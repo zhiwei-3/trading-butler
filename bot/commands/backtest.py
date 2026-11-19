@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes
 from config import ALERT_STATE, TIMEFRAME_PRESETS
 from bot.registry import command, callback
 from strategies import STRATEGIES, STRATEGY_PRESETS, find_param, get_params, Params
-from core.mt5_engine import get_gold_symbol
+from core.mt5 import get_gold_symbol
 from core.backtester import run_backtest, generate_equity_chart
 from ._common import admin_only
 

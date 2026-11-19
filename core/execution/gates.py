@@ -2,14 +2,14 @@
 """The one-trade-at-a-time gate and the pre-send checks. FAIL CLOSED: when MT5 or the DB can't be
 queried, no new trade opens."""
 
-import MetaTrader5 as mt5
+from core.mt5 import mt5
 
 from config import ALERT_STATE
 from core.database import count_live_trades_today, get_open_executed_signals
 from core.execution.common import FILL_COOLDOWN_S, seconds_since_fill
 from core.execution.intents import pending_intent_count
 from core.execution.positions import fetch_managed
-from core.mt5_engine import MT5_LOCK, init_mt5
+from core.mt5 import MT5_LOCK, init_mt5
 
 
 def trade_slot_blocker(symbol, exclude_signal_id=None):

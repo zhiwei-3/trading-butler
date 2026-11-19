@@ -10,7 +10,7 @@ from analysis import ALL
 from bot.registry import command, callback
 from bot.messaging import fit_lines
 from core.database import get_recent_trades_for_chart
-from core.mt5_engine import get_gold_symbol, get_tick
+from core.mt5 import get_gold_symbol, get_tick
 from core.news_engine import fetch_economic_events
 from core.evaluator import analyze_market
 from core.guards.spread import pips_of_spread

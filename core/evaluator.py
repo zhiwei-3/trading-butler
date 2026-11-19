@@ -6,11 +6,11 @@ Strategy RULES live in strategies/ (pure); everything with side effects lives he
 
 import logging
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS, TF_BY_NAME
+from config import ALERT_STATE, TIMEFRAME_PRESETS
 from analysis import add_indicators, compute, View, default_config
 from strategies import get_strategy, get_params, get_runtime, MarketData
 from core.database import log_signal_to_db, get_recent_trades_for_chart, set_signal_status
-from core.mt5_engine import fetch_candles, get_broker_utc_offset_seconds
+from core.mt5 import fetch_candles, get_broker_utc_offset_seconds
 from core.execution import request_execution, trade_slot_blocker, calc_risk_lots
 from utils.chart import generate_signal_chart
 from utils.common import format_reasons
@@ -181,7 +181,7 @@ def analyze_market(symbol, features=None):
     # Strategy connector: the strategy is pure, so WE fetch what it declared in `needs` and pass it in.
     if strat is not None:
         try:
-            extra = {name: fetch_candles(symbol, TF_BY_NAME[name], bars) for name, bars in strat.needs.extra}
+            extra = {name: fetch_candles(symbol, name, bars) for name, bars in strat.needs.extra}
             md = MarketData(symbol=symbol, entry=df_entry, trend=df_trend, macro=df_macro, extra=extra,
                             broker_offset_s=int(get_broker_utc_offset_seconds()))
             a["ctx"] = strat.build_live_context(md, get_params(strat.key))

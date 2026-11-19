@@ -9,7 +9,7 @@ from bot.registry import job
 from bot.messaging import send_text, send_alert
 from bot.jobs.circuit_breaker import evaluate_circuit_breaker
 from core.guards import GuardContext, run_guards
-from core.mt5_engine import get_gold_symbol
+from core.mt5 import get_gold_symbol
 from core.evaluator import analyze_market, evaluate_signals
 from core.execution import execute_pending_intents
 

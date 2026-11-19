@@ -4,11 +4,10 @@ import logging
 import itertools
 import numpy as np
 import pandas as pd
-import MetaTrader5 as mt5
 from datetime import datetime, timezone, timedelta
 
-from config import ALERT_STATE, TIMEFRAME_PRESETS, TF_BY_NAME
-from core.mt5_engine import MT5_LOCK, get_broker_utc_offset_seconds
+from config import ALERT_STATE, TIMEFRAME_PRESETS, TF_MINUTES
+from core.mt5 import mt5, fetch_history, get_broker_utc_offset_seconds
 from analysis import add_indicators, compute, View, default_config
 from strategies import get_strategy, get_params, STRATEGIES, Params, BacktestData
 from utils.chart import CHART_LOCK
@@ -21,28 +20,13 @@ MIN_INDICATOR_BARS = 80
 MAX_SWEEP_COMBOS = 150
 MIN_SWEEP_SAMPLE = 5
 
-_TF_MINUTES = {
-    mt5.TIMEFRAME_M1: 1, mt5.TIMEFRAME_M5: 5, mt5.TIMEFRAME_M15: 15, mt5.TIMEFRAME_M30: 30,
-    mt5.TIMEFRAME_H1: 60, mt5.TIMEFRAME_H4: 240, mt5.TIMEFRAME_D1: 1440,
-}
-
 
 def _min_warmup_days_for(timeframe, min_bars=MIN_INDICATOR_BARS):
-    minutes = _TF_MINUTES.get(timeframe, 60)
+    minutes = TF_MINUTES.get(timeframe, 60)
     calendar_days = (minutes * min_bars) / (60 * 24)
     if minutes >= 1440:
         calendar_days *= 1.5
     return calendar_days
-
-
-def _fetch_history(symbol, timeframe, start, end):
-    with MT5_LOCK:
-        rates = mt5.copy_rates_range(symbol, timeframe, start, end)
-    if rates is None or len(rates) == 0:
-        return None
-    df = pd.DataFrame(rates)
-    df['time'] = pd.to_datetime(df['time'], unit='s', utc=True).astype('datetime64[ns, UTC]')
-    return df
 
 
 def _advance_cursor(times_arr, cursor, ts):
@@ -124,9 +108,9 @@ def _prepare_history(symbol, days, timeframe_mode):
     )
     warmup_start = start - timedelta(days=warmup_days)
 
-    df_entry_raw = _fetch_history(symbol, preset["entry"], warmup_start, end)
-    df_trend_raw = _fetch_history(symbol, preset["trend"], warmup_start, end)
-    df_macro_raw = _fetch_history(symbol, preset["macro"], warmup_start, end)
+    df_entry_raw = fetch_history(symbol, preset["entry"], warmup_start, end)
+    df_trend_raw = fetch_history(symbol, preset["trend"], warmup_start, end)
+    df_macro_raw = fetch_history(symbol, preset["macro"], warmup_start, end)
     if df_entry_raw is None or df_trend_raw is None or df_macro_raw is None:
         return {"error": "Insufficient MT5 historical data returned for the requested range/timeframe."}
 
@@ -147,13 +131,12 @@ def _extra_frame(prepared, name):
     """Raw history for a strategy-requested timeframe (e.g. 'H1'), fetched once and cached."""
     cache = prepared["extra"]
     if name not in cache:
-        tf = TF_BY_NAME.get(name)
-        if tf is None:
+        if name not in TF_MINUTES:
             cache[name] = None
         else:
-            warm = max(30, _min_warmup_days_for(tf, 300))
-            cache[name] = _fetch_history(prepared["symbol"], tf,
-                                         prepared["start"] - timedelta(days=warm), prepared["end"])
+            warm = max(30, _min_warmup_days_for(name, 300))
+            cache[name] = fetch_history(prepared["symbol"], name,
+                                        prepared["start"] - timedelta(days=warm), prepared["end"])
     return cache[name]
 
 
@@ -211,10 +194,10 @@ def run_backtest(symbol, days=30, timeframe_mode=None, spread_pips=2.0, progress
     macro_ema20_arr = df_macro['EMA_20'].values
     macro_ema50_arr = df_macro['EMA_50'].values
 
-    entry_minutes = _TF_MINUTES[preset["entry"]]
+    entry_minutes = TF_MINUTES[preset["entry"]]
     entry_td = np.timedelta64(entry_minutes, "m")
-    trend_close_arr = trend_time_arr + np.timedelta64(_TF_MINUTES[preset["trend"]], "m")
-    macro_close_arr = macro_time_arr + np.timedelta64(_TF_MINUTES[preset["macro"]], "m")
+    trend_close_arr = trend_time_arr + np.timedelta64(TF_MINUTES[preset["trend"]], "m")
+    macro_close_arr = macro_time_arr + np.timedelta64(TF_MINUTES[preset["macro"]], "m")
 
     trend_cursor = max(0, int(np.searchsorted(trend_close_arr, time_arr[test_start_idx] + entry_td, side='right')) - 1)
     macro_cursor = max(0, int(np.searchsorted(macro_close_arr, time_arr[test_start_idx] + entry_td, side='right')) - 1)

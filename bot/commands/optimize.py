@@ -16,7 +16,7 @@ from core.database import (
     count_sweep_runs, get_sweep_history, get_sweep_history_ranked,
     log_sweep_run,
 )
-from core.mt5_engine import get_gold_symbol
+from core.mt5 import get_gold_symbol
 from core.backtester import run_backtest_sweep, MIN_SWEEP_SAMPLE
 from ._common import admin_only
 
