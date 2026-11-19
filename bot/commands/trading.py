@@ -10,7 +10,7 @@ from config import ALERT_STATE, save_settings
 from bot.registry import command, callback
 from core.mt5_engine import check_mt5_alive, get_tick, MT5_LOCK
 from core.database import get_open_dry_run_signals
-from core.trade_engine import (
+from core.execution import (
     list_managed_positions, close_position, close_all_managed,
     modify_position_sltp, pending_intent_count,
 )

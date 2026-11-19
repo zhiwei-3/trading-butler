@@ -20,7 +20,7 @@ from core.database import (
     get_tracked_signals, update_signal_statuses, mark_leg2_be_moved, get_recent_trades_for_chart,
 )
 from core.mt5_engine import get_gold_symbol, fetch_candles
-from core.trade_engine import (
+from core.execution import (
     reconcile_exit, trail_leg_to_breakeven, force_close_leg, enforce_single_trade, summarize_outcome_pnl,
 )
 from utils.chart import generate_outcome_chart

@@ -7,7 +7,7 @@ from config import ALERT_STATE, USER_ID, save_settings
 from bot.registry import stop_job
 from bot.messaging import send_text
 from core.database import get_daily_performance_stats
-from core.trade_engine import close_all_managed
+from core.execution import close_all_managed
 
 
 async def evaluate_circuit_breaker(context: ContextTypes.DEFAULT_TYPE) -> bool:
