@@ -3,7 +3,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings, apply_timeframe_mode
-from strategies import STRATEGY_PRESETS, get_strategy, get_params, reset_runtime
+from strategies import STRATEGY_PRESETS, get_strategy, get_params, reset_runtime, sizing_summary
 from bot.registry import command, callback
 
 
@@ -22,7 +22,7 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **Active Strategy:** `{strat_name}`\n"
         f"• **Settings:** `{strat_summary}`\n"
         f"• **Timeframe Preset:** `{tf_mode}`\n"
-        f"• **Sizing:** `{ALERT_STATE.get('fixed_lot_size', 0.01)}` lots/leg\n\n"
+        f"• **Sizing:** `{sizing_summary(strat.key if strat else None)}`\n\n"
         "Tap a button below for instant quick actions:"
     )
     keyboard = [

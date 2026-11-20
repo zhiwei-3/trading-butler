@@ -21,7 +21,7 @@ from config import ALERT_STATE, TF_MINUTES
 from .base import Strategy, Param, Needs, Params, MarketData, BacktestData
 
 __all__ = [
-    "STRATEGIES", "STRATEGY_PRESETS", "get_strategy", "get_params", "get_runtime",
+    "STRATEGIES", "STRATEGY_PRESETS", "get_strategy", "get_params", "sizing_summary", "get_runtime",
     "reset_runtime", "resolve_param", "find_param", "plan_sweep", "params_overview",
     "Strategy", "Param", "Needs", "Params", "MarketData", "BacktestData",
 ]
@@ -118,6 +118,14 @@ def get_strategy(name):
 def get_params(key):
     """Fresh Params snapshot of a strategy's current settings."""
     return Params(ALERT_STATE.get("strategy_params", {}).get(key, {}))
+
+
+def sizing_summary(key=None):
+    """One-liner for /menu, /status and /trade."""
+    p = get_params(key) if key else {}
+    if p.get("dynamic_lots"):
+        return f"{p['risk_pct']:g}% risk/trade, max {p['max_lot']:g} lots/leg"
+    return f"{ALERT_STATE.get('fixed_lot_size', 0.01)} lots/leg (fixed)"
 
 
 def get_runtime(key):

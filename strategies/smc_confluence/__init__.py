@@ -2,7 +2,7 @@ from config import ALERT_STATE
 from utils.common import signal_spec
 
 from ..base import Strategy, Needs
-from .._lib import rsi_watch, rsi_valid
+from .._lib import rsi_watch, rsi_valid, sizing_spec
 from . import connectors, rules
 from .params import PARAMS
 from .scoring import build_reasons, format_confluence_breakdown
@@ -74,7 +74,7 @@ class SmcConfluence(Strategy):
         )
         return [signal_spec(d, close_price, t["sl_price"], t["tp1_price"], t["tp2_price"], msg,
                             score=score, reasons=build_reasons(d, a, score, breakdown, t, p),
-                            dual=self.is_dual(score, p))]
+                            dual=self.is_dual(score, p), risk=sizing_spec(p))]
 
     # ---- backtest
     def decide(self, c):

@@ -3,7 +3,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 
 from config import ALERT_STATE, BOT_START_TIME
-from strategies import get_strategy, get_params
+from strategies import get_strategy, get_params, sizing_summary
 from core.db import get_sl_cooldown_remaining_s
 from core.mt5 import check_mt5_alive
 from core.execution import list_managed_positions
@@ -52,7 +52,7 @@ async def build_status_snapshot() -> str:
         f"• **Scanner:** {'🟢 Running' if ALERT_STATE['scanner_enabled'] else '🔴 Stopped'}\n"
         f"• **Auto-Trade:** {trade_mode} | **Open Positions:** `{open_managed}`\n"
         f"• **Active Strategy:** {strat_line}\n"
-        f"• **Sizing:** `{ALERT_STATE.get('fixed_lot_size', 0.01)}` lots/leg (fixed)\n"
+        f"• **Sizing:** `{sizing_summary(strat.key if strat else None)}`\n"
         f"• **Timeframe Mode:** `{ALERT_STATE['timeframe_mode']}`\n"
         f"• **Structure Filter:** {'ON' if ALERT_STATE['require_structure_break'] else 'OFF'}\n"
         f"• **Volume/ATR Filter:** {'ON' if ALERT_STATE['require_volume_atr_filter'] else 'OFF'}\n"

@@ -1,6 +1,6 @@
 # strategies/_template/__init__.py
 from utils.common import signal_spec, target_reasons
-
+from .._lib import sizing_spec
 from ..base import Strategy, Needs
 from . import connectors
 from .params import PARAMS
@@ -54,7 +54,7 @@ class RangeBreakout(Strategy):
             f"{'high' if is_buy else 'low'} ({found['level']})",
         ] + target_reasons(t)
         return [signal_spec(d, entry, t["sl_price"], t["tp1_price"], t["tp2_price"], msg, score=60,
-                            zone={"fvg_top": hi, "fvg_bottom": lo},
+                            zone={"fvg_top": hi, "fvg_bottom": lo}, risk=sizing_spec(p),
                             reasons=reasons, dual=self.is_dual(60, p))]
 
     # ---- backtest

@@ -1,7 +1,7 @@
 from utils.common import signal_spec, target_reasons
 
 from ..base import Strategy, Needs
-from .._lib import atr_targets, atr_targets_bt, rsi_watch, rsi_valid
+from .._lib import atr_targets, atr_targets_bt, rsi_watch, rsi_valid, sizing_spec
 from . import connectors, rules
 from .params import PARAMS
 
@@ -61,7 +61,7 @@ class RsiReversion(Strategy):
         why = rules.reasons(direction, a["rsi_val"], a["near_zone"], p) + target_reasons(targets)
         return [signal_spec(direction, close_price, targets["sl_price"], targets["tp1_price"],
                             targets["tp2_price"], msg, score=rules.SCORE, reasons=why,
-                            dual=self.is_dual(rules.SCORE, p))]
+                            dual=self.is_dual(rules.SCORE, p), risk=sizing_spec(p))]
 
     # ---- backtest
     def decide(self, c):

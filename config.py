@@ -82,14 +82,6 @@ SCHEMA = (
     Setting("strategy_params", {}),
     Setting("_legacy", {}),             # retired global values found in settings.json, used once to seed strategy params
 
-    # ---- position sizing
-    Setting("risk_percent", 0.5, num(0, 10, lo_open=True), ("risk", "risk_pct"),
-            "Risk / Trade", "Position Sizing", "%"),
-    Setting("max_lot_size", 1.0, num(0, 100, lo_open=True), ("max_lot",),
-            "Max Lot / Leg", "Position Sizing"),
-    Setting("dynamic_lots_enabled", True, boolean, ("dyn_lots", "dynamic_lots"),
-            "Dynamic Lots", "Position Sizing"),
-
     # ---- trade execution (see /trade)
     Setting("auto_trade_enabled", False, boolean),            # safe default: disarmed
     Setting("trade_dry_run", True, boolean),                  # safe default: orders are built but never sent

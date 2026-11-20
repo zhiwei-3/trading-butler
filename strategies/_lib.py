@@ -4,7 +4,7 @@ Nothing here is mandatory — a strategy with its own risk model simply doesn't 
 
 from .base import Param
 from utils.common import calculate_targets
-from utils.parsers import num
+from utils.parsers import num, boolean
 
 
 def risk_params(min_rrr=1.5, sl=1.2, tp1=2.0, tp2=3.5):
@@ -21,6 +21,25 @@ def risk_params(min_rrr=1.5, sl=1.2, tp1=2.0, tp2=3.5):
         Param("tp2_mult", tp2, num(0, 20, lo_open=True), ("tp2", "tp2_atr"),
               "TP2 distance (ATR multiple)", legacy="tp2_atr_mult"),
     )
+
+
+def sizing_params(dynamic=False, risk_pct=0.5, max_lot=1.0, legacy_dynamic=False):
+    """Position-sizing group. dynamic=False -> fixed lots (the global fixed_lot_size).
+    legacy_dynamic=True migrates the old global `dynamic_lots_enabled` (only for strategies that used it)."""
+    return (
+        Param("dynamic_lots", dynamic, boolean, ("dyn_lots",),
+              "size each trade by risk % of balance (off = fixed lots)",
+              legacy="dynamic_lots_enabled" if legacy_dynamic else ""),
+        Param("risk_pct", risk_pct, num(0, 10, lo_open=True), ("risk",),
+              "% of balance risked per trade (shared across legs)", legacy="risk_percent"),
+        Param("max_lot", max_lot, num(0, 100, lo_open=True), (),
+              "cap on lots per leg when sizing dynamically", legacy="max_lot_size"),
+    )
+
+
+def sizing_spec(p):
+    """What a strategy hands the evaluator: the risk to size by, or None for fixed lots."""
+    return {"risk_pct": p["risk_pct"], "max_lot": p["max_lot"]} if p["dynamic_lots"] else None
 
 
 def score_params(min_score=35, dual_score=50):

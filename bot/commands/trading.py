@@ -8,6 +8,7 @@ from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, save_settings
 from bot.registry import command, callback
+from strategies import sizing_summary
 from core.mt5 import check_mt5_alive, get_tick, MT5_LOCK
 from core.db import get_open_dry_run_signals
 from core.execution import (
@@ -131,7 +132,8 @@ async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🤖 **TRADE EXECUTION ENGINE**\n\n"
             f"• **Status:** `{mode}`\n"
             f"• **Magic Number:** `{ALERT_STATE.get('magic_number')}`\n"
-            f"• **Sizing:** `{ALERT_STATE.get('fixed_lot_size')}` lots per leg (fixed — not scaled by account size)\n"
+            f"• **Sizing:** `{sizing_summary(ALERT_STATE.get('active_strategy'))}` "
+            f"(`/set dyn_lots on|off` · `/set risk <%>` for the active strategy)\n"
             f"• **Max Trades / Day:** `{ALERT_STATE.get('max_daily_trades')}` *(counts tickets, so a dual entry uses 2)*\n"
             f"• **Slippage Allowance:** `{ALERT_STATE.get('max_slippage_points')}` points\n"
             f"• **Entry Drift Abort:** `{ALERT_STATE.get('max_entry_drift_pct')}%` of SL\n"
@@ -176,7 +178,7 @@ async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_settings()
         await update.effective_message.reply_text(
             "🟢 **LIVE EXECUTION ENABLED.**\n\n"
-            f"• Fixed `{ALERT_STATE.get('fixed_lot_size')}` lots per leg\n"
+            f"• Sizing: `{sizing_summary(ALERT_STATE.get('active_strategy'))}`\n"
             f"• Each strategy decides single-leg or dual-leg entries\n"
             f"• Max `{ALERT_STATE.get('max_daily_trades')}` fills/day (one trade idea open at a time)\n"
             f"• Circuit breaker: `{ALERT_STATE.get('max_daily_losses')}` losses / "

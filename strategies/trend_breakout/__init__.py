@@ -1,7 +1,7 @@
 import numpy as np
 
 from utils.common import signal_spec, target_reasons
-
+from .._lib import sizing_spec
 from ..base import Strategy, Needs
 from . import connectors, rules
 from .params import PARAMS
@@ -99,7 +99,7 @@ class TrendBreakout(Strategy):
 
         return [signal_spec(direction, close_price, t["sl_price"], t["tp1_price"], t["tp2_price"], msg,
                             score=rules.SCORE, zone={"fvg_top": setup["ah"], "fvg_bottom": setup["al"]},
-                            reasons=reasons, dynamic_sizing=True, dual=self.is_dual(rules.SCORE, p))]
+                            reasons=reasons, risk=sizing_spec(p), dual=self.is_dual(rules.SCORE, p))]
 
     # ---- backtest
     def decide(self, c):

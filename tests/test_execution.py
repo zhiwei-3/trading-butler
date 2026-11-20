@@ -40,28 +40,25 @@ def sized(monkeypatch):
                   symbol_info=lambda s: ns(**{**INFO.__dict__, **overrides}))
         monkeypatch.setattr(sizing, "mt5", fake)
         monkeypatch.setattr(sizing, "init_mt5", lambda: True)
-        monkeypatch.setitem(ALERT_STATE, "risk_percent", 0.5)
-        monkeypatch.setitem(ALERT_STATE, "max_lot_size", 1.0)
     return setup
 
 
 def test_risk_lots_keep_the_money_at_risk_constant(sized):
     sized()                                    # 0.5% of 10,000 = 50; a 5-point stop costs 500 per lot
-    r = sizing.calc_risk_lots("XAUUSD", 5.0)
+    r = sizing.calc_risk_lots("XAUUSD", 5.0, risk_pct=0.5, max_lot=1.0)
     assert r["ok"] and r["lots"] == 0.1 and r["risk_money"] == 50.0
 
-    r2 = sizing.calc_risk_lots("XAUUSD", 5.0, legs=2)       # budget is shared between the legs
+    r2 = sizing.calc_risk_lots("XAUUSD", 5.0, legs=2, risk_pct=0.5, max_lot=1.0)   # budget shared between legs
     assert r2["lots"] == 0.05 and r2["risk_money"] == 50.0
 
 
-def test_risk_lots_are_capped_and_can_refuse(sized, monkeypatch):
+def test_risk_lots_are_capped_and_can_refuse(sized):
     sized()
-    monkeypatch.setitem(ALERT_STATE, "max_lot_size", 0.03)
-    assert sizing.calc_risk_lots("XAUUSD", 5.0)["lots"] == 0.03
+    assert sizing.calc_risk_lots("XAUUSD", 5.0, risk_pct=0.5, max_lot=0.03)["lots"] == 0.03
 
     assert not sizing.calc_risk_lots("XAUUSD", 0)["ok"]
     sized(balance=100.0)
-    r = sizing.calc_risk_lots("XAUUSD", 50.0)               # budget 0.5 -> 0.0001 lots, below the broker minimum
+    r = sizing.calc_risk_lots("XAUUSD", 50.0, risk_pct=0.5, max_lot=1.0)   # budget 0.5 -> 0.0001 lots, below minimum
     assert not r["ok"] and "too small" in r["reason"]
 
 

@@ -4,14 +4,14 @@ No I/O of any kind (no MT5, DB, Telegram, charts) and no settings access."""
 
 
 def signal_spec(direction, close_price, sl_price, tp1_price, tp2_price, base_msg, score=0,
-                zone=None, reasons=None, dynamic_sizing=False, dual=False):
+                zone=None, reasons=None, risk=None, dual=False):
     """What a strategy hands back to the evaluator. core.evaluator.package_signal(a, **spec)
-    does the side effects (DB log, execution intent, chart)."""
+    does the side effects (DB log, execution intent, chart). risk: {"risk_pct", "max_lot"} or None."""
     return {
         "direction": direction, "close_price": close_price,
         "sl_price": sl_price, "tp1_price": tp1_price, "tp2_price": tp2_price,
         "base_msg": base_msg, "score": score, "zone": zone, "reasons": reasons,
-        "dynamic_sizing": dynamic_sizing, "dual": dual,
+        "risk": risk, "dual": dual,
     }
 
 

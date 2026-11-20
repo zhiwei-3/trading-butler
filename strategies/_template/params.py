@@ -1,5 +1,6 @@
 # strategies/_template/params.py
 from ..base import Param
+from .._lib import sizing_params
 from utils.parsers import num, boolean
 
 PARAMS = (
@@ -15,4 +16,4 @@ PARAMS = (
           sweep=(1.2, 1.5, 2.0, 2.5)),
     Param("tp2_rr",        3.0,  num(0, 50, lo_open=True),   (),       "TP2 reward:risk"),
     Param("dual",          True, boolean,                    (),       "2 legs: TP1 + TP2/BE runner"),
-)
+) + sizing_params()

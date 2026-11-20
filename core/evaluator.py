@@ -53,20 +53,22 @@ def _eval_setup_forming(a):
 
 
 def package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, base_msg, score=0, zone=None,
-                   reasons=None, dynamic_sizing=False, dual=False):
+                   reasons=None, risk=None, dual=False):
     """Logs the signal, queues live execution (if armed and the slot is free), and renders the alert.
     Receives the kwargs of a strategy's utils.common.signal_spec(...)."""
     symbol = a.get("symbol", "XAUUSD")
 
-    # ATR/risk-based sizing (only for strategies that opt in).
+    # Risk-based sizing (only for strategies that opt in via risk={...}); otherwise fixed lots.
     lots_leg, sizing_text, sizing_blocker = None, "", None
-    if dynamic_sizing and ALERT_STATE.get("dynamic_lots_enabled", True):
-        sz = calc_risk_lots(symbol, abs(close_price - sl_price), legs=2 if dual else 1)
+    if risk:
+        stop = abs(close_price - sl_price)
+        sz = calc_risk_lots(symbol, stop, legs=2 if dual else 1,
+                            risk_pct=risk["risk_pct"], max_lot=risk["max_lot"])
         if sz["ok"]:
             lots_leg = sz["lots"]
             sizing_text = (f"`{lots_leg}` lots per leg — risk `{sz['risk_money']:,.2f}` "
-                           f"(`{ALERT_STATE.get('risk_percent')}%` of `{sz['balance']:,.2f}` balance, "
-                           f"stop `{abs(close_price - sl_price):.2f}` pts)")
+                           f"(`{risk['risk_pct']}%` of `{sz['balance']:,.2f}` balance, "
+                           f"stop `{stop:.2f}` pts)")
         else:
             sizing_blocker = sz["reason"]
             sizing_text = f"⚠️ unavailable — {sizing_blocker}"
