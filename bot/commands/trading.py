@@ -14,8 +14,8 @@ from core.execution import (
     list_managed_positions, close_position, close_all_managed,
     modify_position_sltp, pending_intent_count,
 )
+from utils.fmt import money
 from ._common import admin_only, md_safe
-from .general import _money
 
 
 _MAX_POSITION_ROWS = 12
@@ -200,13 +200,13 @@ def _project_sltp(symbol, direction, volume, entry, sl, tp):
 
 
 def _projection_line(tp_pnl, sl_pnl, curr):
-    tp_str = f"`{_money(tp_pnl, curr)}`" if tp_pnl is not None else "`no TP`"
+    tp_str = f"`{money(tp_pnl, curr)}`" if tp_pnl is not None else "`no TP`"
     if sl_pnl is None:
         sl_str = "`no SL ⚠️`"
     elif abs(sl_pnl) < 0.005:
         sl_str = "`0.00 (break-even)` 🔒"
     else:
-        sl_str = f"`{_money(sl_pnl, curr)}`"
+        sl_str = f"`{money(sl_pnl, curr)}`"
     return f"   🎯 If TP: {tp_str} | 🛡️ If SL: {sl_str}"
 
 
@@ -233,9 +233,9 @@ def _totals_line(projections, curr):
     sls = [s for _, s in projections if s is not None]
     parts = []
     if tps:
-        parts.append(f"All TP: `{_money(sum(tps), curr)}`")
+        parts.append(f"All TP: `{money(sum(tps), curr)}`")
     if sls:
-        parts.append(f"All SL: `{_money(sum(sls), curr)}`")
+        parts.append(f"All SL: `{money(sum(sls), curr)}`")
     return ("   └ **Potential:** " + " | ".join(parts)) if parts else None
 
 
@@ -266,13 +266,13 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(
                 f"• {src} `#{p.ticket}` {side} `{p.volume}` lots **{p.symbol}**{comment}\n"
                 f"   Entry `${p.price_open:.2f}` ➔ Now `${p.price_current:.2f}` | "
-                f"SL `${p.sl:.2f}` | TP `${p.tp:.2f}` | PnL: `{_money(p.profit, curr)}`\n"
+                f"SL `${p.sl:.2f}` | TP `${p.tp:.2f}` | PnL: `{money(p.profit, curr)}`\n"
                 f"{_projection_line(tp_pnl, sl_pnl, curr)}"
             )
         if len(live_positions) > _MAX_POSITION_ROWS:
             lines.append(f"   … and `{len(live_positions) - _MAX_POSITION_ROWS}` more")
         if len(live_positions) > 1:
-            lines.append(f"   └ **Live Floating PnL:** `{_money(sum(p.profit for p in live_positions), curr)}`")
+            lines.append(f"   └ **Live Floating PnL:** `{money(sum(p.profit for p in live_positions), curr)}`")
             totals = _totals_line(live_proj, curr)
             if totals:
                 lines.append(totals)
@@ -285,7 +285,7 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             be_note = " 🔒[BE]" if dp.get("is_be") else ""
             has_px = dp.get("price_current") is not None
             now_str = f"${dp['price_current']:.2f}" if has_px else "N/A"
-            pnl_str = _money(dp["profit"], curr) if has_px else "N/A"
+            pnl_str = money(dp["profit"], curr) if has_px else "N/A"
             lines.append(
                 f"• `[DRY] #{dp['signal_id']} Leg {dp['leg']} ({dp['label']})` {side} "
                 f"`{dp['volume']}` lots **{dp['symbol']}**{be_note}\n"
@@ -297,7 +297,7 @@ async def positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"   … and `{len(dry_positions) - _MAX_POSITION_ROWS}` more")
         if len(dry_positions) > 1:
             dry_float = sum(dp["profit"] for dp in dry_positions if dp.get("price_current") is not None)
-            lines.append(f"   └ **Dry-Run Floating PnL:** `{_money(dry_float, curr)}`")
+            lines.append(f"   └ **Dry-Run Floating PnL:** `{money(dry_float, curr)}`")
             totals = _totals_line(dry_proj, curr)
             if totals:
                 lines.append(totals)

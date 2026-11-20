@@ -17,9 +17,12 @@ from bot.registry import command, callback
 from bot.messaging import reply_md, reply_photo_md, edit_md, strip_md
 from core.database import get_dry_run_journal_signals, get_live_signal_links
 from core.mt5 import check_mt5_alive, MT5_LOCK, get_broker_utc_offset_seconds
+from core.account import HISTORY_START
+from core.stats import deal_stats
+from utils.fmt import money, pf_text
 from charts import generate_journal_chart
 from ._common import admin_only, md_safe
-from .general import _HISTORY_START, _deal_stats, _money, _pf_text
+
 
 PAGE_SIZE = 6
 MAX_PAGE = 9999          # keeps callback_data well under Telegram's 64-byte limit
@@ -229,7 +232,7 @@ def _fetch_live_trades(since_utc):
     shift = timedelta(seconds=offset_s)
     now = datetime.now(timezone.utc)
     # Look back an extra 30 days so a position's opening deal is still in the window.
-    start = _HISTORY_START if since_utc is None else since_utc - timedelta(days=30)
+    start = HISTORY_START if since_utc is None else since_utc - timedelta(days=30)
     magic = int(ALERT_STATE.get("magic_number", 770077))
 
     with MT5_LOCK:
@@ -269,7 +272,7 @@ def _fetch_live_trades(since_utc):
         else:   # opening deal fell outside the window: infer from the closing deal
             direction = "SELL" if outs[0].type == mt5.DEAL_TYPE_BUY else "BUY"
 
-        # Round to cents so the BE/WIN/LOSS label and _deal_stats (which counts >0 / <0)
+        # Round to cents so the BE/WIN/LOSS label and deal_stats (which counts >0 / <0)
         # can never disagree about a trade like +0.003.
         net = round(sum(d.profit + d.swap + d.commission + getattr(d, "fee", 0.0) for d in ds), 2)
         link = links.get(pid)
@@ -474,7 +477,7 @@ def _fmt_row(t, curr, show_date):
     is_open = t["result"] == "OPEN"
     entry = f"${t['entry']:.2f}" if t["entry"] is not None else "?"
     exit_ = "running" if is_open else f"${t['exit']:.2f}"
-    pnl = "—" if is_open else _money(t["net_pnl"], curr)
+    pnl = "—" if is_open else money(t["net_pnl"], curr)
     ts = t["time"] or t["opened"]
     fmt = "%d %b %H:%M" if show_date else "%H:%M"
     when = (f"opened {ts.strftime(fmt)}" if is_open else ts.strftime(fmt)) if ts else "?"
@@ -524,7 +527,7 @@ def _render(st, view):
 
     closed = sorted((t for t in rows if t["result"] != "OPEN"), key=lambda t: t["time"] or t["opened"])
     open_n = len(rows) - len(closed)
-    s = _deal_stats(closed)
+    s = deal_stats(closed)
     be_n = s["n"] - s["wins"] - s["losses"]
 
     lines = [f"📓 **TRADE JOURNAL** — {label}{_filter_tag(st)}"]
@@ -540,15 +543,15 @@ def _render(st, view):
         lines.append(f"{_outcome_bar(s['wins'], s['losses'], be_n)}  **{s['win_rate']}%** win rate")
         lines.append(f"`{s['wins']}W · {s['losses']}L · {be_n}BE` | Open: `{open_n}`")
         spark = _sparkline(list(accumulate(t["net_pnl"] for t in closed)))
-        lines.append((f"📈 `{spark}`  " if spark else "💰 ") + f"**{_money(s['pnl'], curr)}**")
+        lines.append((f"📈 `{spark}`  " if spark else "💰 ") + f"**{money(s['pnl'], curr)}**")
         strip = _day_strip(closed)
         if strip:
             lines.append(f"🗓 {strip}")
         lines += [
             "",
-            f"• **PF:** `{_pf_text(s)}` | **Expectancy:** `{_money(s['expectancy'], curr)}`",
-            f"• **Avg Win:** `{_money(s['avg_win'], curr)}` | **Avg Loss:** `{_money(s['avg_loss'], curr)}`",
-            f"• **Best:** `{_money(s['best'], curr)}` | **Worst:** `{_money(s['worst'], curr)}`",
+            f"• **PF:** `{pf_text(s)}` | **Expectancy:** `{money(s['expectancy'], curr)}`",
+            f"• **Avg Win:** `{money(s['avg_win'], curr)}` | **Avg Loss:** `{money(s['avg_loss'], curr)}`",
+            f"• **Best:** `{money(s['best'], curr)}` | **Worst:** `{money(s['worst'], curr)}`",
             f"• **Max DD:** `{s['max_dd']:,.2f} {curr}` | **Streaks:** `{s['max_w']}W / {s['max_l']}L`",
         ]
         by_origin = defaultdict(list)
@@ -558,7 +561,7 @@ def _render(st, view):
             lines.append("")
             for lab, pnls in sorted(by_origin.items()):
                 w = sum(1 for p in pnls if p > _EPS)
-                lines.append(f"{lab}: `{len(pnls)}` trades · `{w}W` · `{_money(sum(pnls), curr)}`")
+                lines.append(f"{lab}: `{len(pnls)}` trades · `{w}W` · `{money(sum(pnls), curr)}`")
             if "🧪 Dry-run" in by_origin:
                 lines.append("_Net P&L mixes simulated and real results — use 💰 Live / 🧪 Dry to separate._")
 
@@ -591,7 +594,7 @@ def _render(st, view):
             head = f"📅 **{ts:%a %d %b}**"
             if last_day in day_tot:
                 tot = day_tot[last_day]
-                head += f" — `{_money(tot[0], curr)}` ({tot[1]})"
+                head += f" — `{money(tot[0], curr)}` ({tot[1]})"
             body.append(head)
         body.append(_fmt_row(t, curr, show_date=not grouped))
 
@@ -654,9 +657,9 @@ async def journal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("📭 Need at least 2 closed trades in this view to draw a chart.")
             return
         _, _, label = _period_bounds(st["period"])
-        s = _deal_stats(closed)
+        s = deal_stats(closed)
         curr = view["curr"]
-        subtitle = (f"{s['n']} trades · {s['win_rate']}% win rate · PF {_pf_text(s)} · "
+        subtitle = (f"{s['n']} trades · {s['win_rate']}% win rate · PF {pf_text(s)} · "
                     f"net {s['pnl']:+,.2f} {curr}")
         buf = await asyncio.to_thread(
             generate_journal_chart, closed, curr, f"Trade Journal — {label}", subtitle)
@@ -664,8 +667,8 @@ async def journal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ Could not render the chart.")
             return
         caption = (f"📈 **Journal Chart — {label}**{_filter_tag(st)}\n"
-                   f"`{s['n']}` trades · **{s['win_rate']}%** WR · PF `{_pf_text(s)}` · "
-                   f"Net `{_money(s['pnl'], curr)}`")
+                   f"`{s['n']}` trades · **{s['win_rate']}%** WR · PF `{pf_text(s)}` · "
+                   f"Net `{money(s['pnl'], curr)}`")
         await reply_photo_md(query.message, buf, caption)
         return
 

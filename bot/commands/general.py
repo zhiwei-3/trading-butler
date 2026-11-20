@@ -1,24 +1,17 @@
-# bot/commands/core.py
-
-import logging
+# bot/commands/general.py
 import asyncio
-from collections import defaultdict
-from datetime import datetime, timezone, timedelta, time as dtime
-from core.mt5 import mt5
-from telegram.error import BadRequest
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from datetime import datetime, timedelta, time as dtime
+
+from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import USER_ID, ALERT_STATE, save_settings
+from config import ALERT_STATE, save_settings
+from core.account import HISTORY_START, fetch_account_data
 from core.database import get_signal_stats
-from strategies import get_strategy, get_params
-from core.mt5 import check_mt5_alive, MT5_LOCK, get_broker_utc_offset_seconds
+from core.stats import deal_stats, signal_summary, realized_return_pct
 from bot.jobs.status import build_status_snapshot
 from bot.registry import command, callback, restart_job, stop_job, help_text
-from ._common import admin_only
-
-
-_HISTORY_START = datetime(2000, 1, 1, tzinfo=timezone.utc)
+from utils.fmt import money
 
 
 def _parse_period(args):
@@ -31,7 +24,7 @@ def _parse_period(args):
     now = datetime.now().astimezone()
     midnight = datetime.combine(now.date(), dtime.min).astimezone()   # local midnight (DST-correct)
     if not args:
-        return _HISTORY_START, "All Time", True
+        return HISTORY_START, "All Time", True
 
     arg = args[0].lower().strip()
     if arg in ("today", "1d"):
@@ -41,129 +34,13 @@ def _parse_period(args):
     if arg in ("month", "30d"):
         return now - timedelta(days=30), "Last 30 Days", False
     if arg in ("all", "alltime", "all-time", "max"):
-        return _HISTORY_START, "All Time", True
+        return HISTORY_START, "All Time", True
 
     digits = arg[:-1] if arg.endswith("d") else arg
     if digits.isdigit():
         days = max(1, min(int(digits), 365))
         return now - timedelta(days=days), f"Last {days} Day{'s' if days != 1 else ''}", False
     return None, None, False
-
-
-def _fetch_account_data():
-    """BLOCKING — call via asyncio.to_thread. Fetches account info, positions, and history deals."""
-    if not check_mt5_alive():
-        return None, "🔴 MT5 terminal is not connected or unreachable."
-
-    offset_s = int(get_broker_utc_offset_seconds())
-    shift = timedelta(seconds=offset_s)
-    now = datetime.now(timezone.utc)
-    magic = int(ALERT_STATE.get("magic_number", 770077))
-
-    with MT5_LOCK:
-        info = mt5.account_info()
-        if info is None:
-            return None, "❌ Failed to retrieve MT5 account details."
-        deals = mt5.history_deals_get(_HISTORY_START + shift, now + shift + timedelta(days=1))
-        positions = mt5.positions_get()
-
-    trades, deposits, withdrawals = [], 0.0, 0.0
-    # Commission/fee is often charged on the OPENING deal. Carry it onto the closing
-    # deal so per-trade P&L matches /journal (which sums every deal of a position).
-    entry_cost = defaultdict(float)
-    for d in (deals or []):
-        if d.type == mt5.DEAL_TYPE_BALANCE:
-            if d.profit > 0:
-                deposits += d.profit
-            else:
-                withdrawals += -d.profit
-            continue
-        if d.type not in (mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL):
-            continue
-        cost = d.commission + getattr(d, "fee", 0.0)
-        if d.entry == mt5.DEAL_ENTRY_IN:
-            entry_cost[d.position_id] += cost
-        elif d.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_INOUT, mt5.DEAL_ENTRY_OUT_BY):
-            trades.append({
-                "ticket": d.ticket,
-                "time": datetime.fromtimestamp(d.time - offset_s, tz=timezone.utc).astimezone(),
-                "symbol": d.symbol,
-                "type": "SELL" if d.type == mt5.DEAL_TYPE_BUY else "BUY",
-                "volume": d.volume,
-                "price": d.price,
-                "net_pnl": d.profit + d.swap + cost + entry_cost.pop(d.position_id, 0.0),
-                "is_bot": d.magic == magic,
-            })
-    trades.sort(key=lambda t: t["time"])
-
-    open_all = list(positions or [])
-    open_bot = [p for p in open_all if p.magic == magic]
-
-    return {
-        "login": info.login,
-        "server": info.server,
-        "currency": info.currency or "USD",
-        "leverage": info.leverage,
-        "balance": info.balance,
-        "equity": info.equity,
-        "profit": info.profit,
-        "margin": info.margin,
-        "free_margin": info.margin_free,
-        "margin_level": info.margin_level if info.margin > 0 else 0.0,
-        "deposits": deposits,
-        "withdrawals": withdrawals,
-        "trades": trades,
-        "open_positions": open_all,
-        "open_total": len(open_all),
-        "open_bot": len(open_bot),
-        "float_bot": sum(p.profit for p in open_bot),
-        "float_manual": sum(p.profit for p in open_all if p.magic != magic),
-    }, None
-
-
-def _deal_stats(trades):
-    """Win/loss, profit factor, expectancy, realized drawdown and streaks."""
-    pnls = [t["net_pnl"] for t in trades]
-    wins = [p for p in pnls if p > 0]
-    losses = [p for p in pnls if p < 0]
-    gross_win, gross_loss = sum(wins), -sum(losses)
-    decided = len(wins) + len(losses)
-
-    cum = peak = max_dd = 0.0
-    cur_w = cur_l = max_w = max_l = 0
-    for p in pnls:
-        cum += p
-        peak = max(peak, cum)
-        max_dd = max(max_dd, peak - cum)
-        if p > 0:
-            cur_w, cur_l = cur_w + 1, 0
-        elif p < 0:
-            cur_l, cur_w = cur_l + 1, 0
-        else:
-            cur_w = cur_l = 0
-        max_w, max_l = max(max_w, cur_w), max(max_l, cur_l)
-
-    return {
-        "n": len(pnls), "pnl": sum(pnls),
-        "wins": len(wins), "losses": len(losses),
-        "win_rate": round(len(wins) / decided * 100, 1) if decided else 0.0,
-        "pf": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
-        "avg_win": gross_win / len(wins) if wins else 0.0,
-        "avg_loss": -gross_loss / len(losses) if losses else 0.0,
-        "expectancy": sum(pnls) / len(pnls) if pnls else 0.0,
-        "best": max(pnls, default=0.0), "worst": min(pnls, default=0.0),
-        "max_dd": max_dd, "max_w": max_w, "max_l": max_l,
-    }
-
-
-def _money(v, curr):
-    return f"{v:+,.2f} {curr}"
-
-
-def _pf_text(st):
-    if st["pf"] is not None:
-        return f"{st['pf']}"
-    return "∞" if st["wins"] else "—"
 
 
 @command("start", "Show Quick Command Guide", icon="🤵‍♂️", group="Core & Dashboards", order=0, listed=False)
@@ -175,7 +52,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @callback("btn_account")
 async def account_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Executive view of capital, margin, deposits/withdrawals, net realized PnL, and signal engine stats."""
-    since_utc, period_str, is_all = _parse_period(context.args)
+    since_utc, period_str, _is_all = _parse_period(context.args)
     if since_utc is None:
         await update.effective_message.reply_text(
             "⚠️ **Usage:** `/account [period]`\n\n"
@@ -185,7 +62,7 @@ async def account_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    data, err = await asyncio.to_thread(_fetch_account_data)
+    data, err = await asyncio.to_thread(fetch_account_data)
     if err:
         await update.effective_message.reply_text(err, parse_mode="Markdown")
         return
@@ -196,41 +73,28 @@ async def account_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     float_pct = (float_pnl / balance * 100) if balance else 0.0
     pnl_icon = "📈" if float_pnl > 0 else ("📉" if float_pnl < 0 else "⚖️")
 
-    all_trades = data["trades"]
-    period_trades = [t for t in all_trades if t["time"] >= since_utc]
-    st_period = _deal_stats(period_trades)
-
-    net_dep = data["deposits"] - data["withdrawals"]
-    ret_str = f"{(equity - net_dep) / net_dep * 100:+.2f}%" if net_dep > 0 else "N/A"
-
-    skipped = counts.get("SKIPPED", 0)
-    total_sig = sum(v for k, v in counts.items() if k != "SKIPPED")
-    pending_sig = counts.get("PENDING", 0)
-    running_sig = counts.get("HIT_TP1", 0)
-    tp1_sig = counts.get("CLOSED_TP1", 0)
-    tp2_sig = counts.get("HIT_TP2", 0)
-    be_sig = counts.get("CLOSED_BE", 0)
-    sl_sig = counts.get("HIT_SL", 0)
-    wins_sig = tp1_sig + tp2_sig + be_sig
-    closed_sig = wins_sig + sl_sig
-    wr_sig = round(wins_sig / closed_sig * 100, 1) if closed_sig else 0.0
+    st = deal_stats([t for t in data["trades"] if t["time"] >= since_utc])
+    sig = signal_summary(counts)
+    ret = realized_return_pct(equity, data["deposits"], data["withdrawals"])
+    ret_str = f"{ret:+.2f}%" if ret is not None else "N/A"
 
     text = (
         f"💳 **ACCOUNT & CAPITAL SNAPSHOT**\n\n"
         f"**👤 Account Details**\n"
         f"• **Account:** `{data['login']}` (`{data['server']}`) | **Leverage:** `1:{data['leverage']}`\n"
         f"• **Balance:** `${balance:,.2f} {curr}` | **Equity:** `${equity:,.2f} {curr}`\n"
-        f"• **Floating PnL:** `{_money(float_pnl, curr)}` (`{float_pct:+.2f}%`) {pnl_icon}\n"
+        f"• **Floating PnL:** `{money(float_pnl, curr)}` (`{float_pct:+.2f}%`) {pnl_icon}\n"
         f"• **Margin:** `${data['margin']:,.2f}` | **Free Margin:** `${data['free_margin']:,.2f}` | "
         f"**Margin Level:** `{data['margin_level']:.1f}%`\n\n"
         f"**📊 Capital Summary ({period_str})**\n"
         f"• **Total Deposited:** `${data['deposits']:,.2f}` | **Withdrawn:** `${data['withdrawals']:,.2f}`\n"
-        f"• **Net Realized PnL:** `{_money(st_period['pnl'], curr)}` ({st_period['wins']}W - {st_period['losses']}L)\n"
+        f"• **Net Realized PnL:** `{money(st['pnl'], curr)}` ({st['wins']}W - {st['losses']}L)\n"
         f"• **Account Realized Return:** `{ret_str}`\n\n"
         f"**🧪 Bot Signals (Forward-Test Engine)**\n"
-        f"• **Total Signals:** `{total_sig}` | **Pending:** `{pending_sig}` | **Runners Active:** `{running_sig}` | **Alert-Only:** `{skipped}`\n"
-        f"• 🎯 TP1: `{tp1_sig}` | 🚀 TP2: `{tp2_sig}` | 🔒 BE: `{be_sig}` | 🛡️ SL: `{sl_sig}`\n"
-        f"• **Forward Win Rate:** `{wr_sig}%` (`{wins_sig}/{closed_sig}` closed signals)\n\n"
+        f"• **Total Signals:** `{sig['total']}` | **Pending:** `{sig['pending']}` | "
+        f"**Runners Active:** `{sig['running']}` | **Alert-Only:** `{sig['skipped']}`\n"
+        f"• 🎯 TP1: `{sig['tp1']}` | 🚀 TP2: `{sig['tp2']}` | 🔒 BE: `{sig['be']}` | 🛡️ SL: `{sig['sl']}`\n"
+        f"• **Forward Win Rate:** `{sig['win_rate']}%` (`{sig['wins']}/{sig['closed']}` closed signals)\n\n"
         f"💡 _Tip: Use `/positions` for open trades and `/journal` for deal history & analytics._"
     )
 

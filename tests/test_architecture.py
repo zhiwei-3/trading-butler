@@ -1,4 +1,5 @@
 # tests/test_architecture.py
+import pytest
 import ast, pathlib
 import subprocess
 import sys
@@ -32,14 +33,7 @@ def test_utils_do_not_reach_up():
 
 def test_analysis_is_pure():
     assert not (v := _violations("analysis", ("core", "bot", "MetaTrader5", "telegram", "sqlite3", "matplotlib"))), "\n".join(v)
-
-
-def test_outcomes_is_pure():
-    path = ROOT / "core" / "outcomes.py"
-    forbidden = ("core", "bot", "config", "MetaTrader5", "telegram", "sqlite3", "matplotlib", "requests")
-    bad = [m for m in _imports(path) if any(m == f or m.startswith(f + ".") for f in forbidden)]
-    assert not bad, f"core/outcomes.py must stay pure, but imports: {bad}"
-
+    
 
 def test_core_does_not_reach_up():
     assert not (v := _violations("core", ("bot", "telegram"))), "\n".join(v)
@@ -64,3 +58,11 @@ def test_pure_layers_import_without_metatrader5():
 
 def test_charts_are_pure():
     assert not (v := _violations("charts", ("core", "bot", "MetaTrader5", "telegram", "sqlite3", "requests"))), "\n".join(v)
+
+
+@pytest.mark.parametrize("module", ["outcomes.py", "stats.py"])
+def test_pure_core_modules_stay_pure(module):
+    path = ROOT / "core" / module
+    forbidden = ("core", "bot", "config", "MetaTrader5", "telegram", "sqlite3", "matplotlib", "requests")
+    bad = [m for m in _imports(path) if any(m == f or m.startswith(f + ".") for f in forbidden)]
+    assert not bad, f"core/{module} must stay pure, but imports: {bad}"
