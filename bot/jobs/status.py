@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 
 from config import ALERT_STATE, BOT_START_TIME
 from strategies import get_strategy, get_params
-from core.database import get_sl_cooldown_remaining_s
+from core.db import get_sl_cooldown_remaining_s
 from core.mt5 import check_mt5_alive
 from core.execution import list_managed_positions
 from bot.messaging import md_safe

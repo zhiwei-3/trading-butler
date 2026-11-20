@@ -5,7 +5,7 @@ queried, no new trade opens."""
 from core.mt5 import mt5
 
 from config import ALERT_STATE
-from core.database import count_live_trades_today, get_open_executed_signals
+from core.db import count_live_trades_today, get_open_executed_signals
 from core.execution.common import FILL_COOLDOWN_S, seconds_since_fill
 from core.execution.intents import pending_intent_count
 from core.execution.positions import fetch_managed

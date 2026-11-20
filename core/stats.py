@@ -39,7 +39,7 @@ def deal_stats(trades):
 
 
 def signal_summary(counts):
-    """Forward-test engine totals from {status: count} (core.database.get_signal_stats).
+    """Forward-test engine totals from {status: count} (core.db.get_signal_stats).
     SKIPPED (alert-only) signals are reported separately and never counted as results."""
     g = counts.get
     tp1, tp2, be, sl = g("CLOSED_TP1", 0), g("HIT_TP2", 0), g("CLOSED_BE", 0), g("HIT_SL", 0)

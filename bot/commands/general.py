@@ -7,7 +7,7 @@ from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, save_settings
 from core.account import HISTORY_START, fetch_account_data
-from core.database import get_signal_stats
+from core.db import get_signal_stats
 from core.stats import deal_stats, signal_summary, realized_return_pct
 from bot.jobs.status import build_status_snapshot
 from bot.registry import command, callback, restart_job, stop_job, help_text

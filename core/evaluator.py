@@ -9,7 +9,7 @@ import logging
 from config import ALERT_STATE, TIMEFRAME_PRESETS
 from analysis import add_indicators, compute, View, default_config
 from strategies import get_strategy, get_params, get_runtime, MarketData
-from core.database import log_signal_to_db, get_recent_trades_for_chart, set_signal_status
+from core.db import log_signal_to_db, get_recent_trades_for_chart, set_signal_status
 from core.mt5 import fetch_candles, get_broker_utc_offset_seconds
 from core.execution import request_execution, trade_slot_blocker, calc_risk_lots
 from charts import generate_signal_chart

@@ -4,7 +4,7 @@ import logging
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, ContextTypes
 from config import TELEGRAM_TOKEN, USER_ID
-from core.database import init_db
+from core.db import init_db
 from core.mt5 import init_mt5
 from bot.registry import install, bot_commands, start_all_jobs
 import bot.commands   # noqa: F401  registers every @command / @callback

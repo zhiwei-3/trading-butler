@@ -1,7 +1,7 @@
 # core/guards/cooldown.py
 import asyncio
 
-from core.database import get_sl_cooldown_remaining_s
+from core.db import get_sl_cooldown_remaining_s
 from core.guards import guard
 
 

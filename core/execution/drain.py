@@ -2,7 +2,7 @@
 """Turns queued trade ideas into orders. Everything here is BLOCKING — call via asyncio.to_thread()."""
 
 from config import ALERT_STATE
-from core.database import attach_trade_execution, set_signal_status
+from core.db import attach_trade_execution, set_signal_status
 from core.execution.common import EXEC_LOCK, fixed_lot
 from core.execution.gates import trade_slot_blocker
 from core.execution.intents import take_pending

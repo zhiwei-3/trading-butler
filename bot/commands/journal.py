@@ -15,7 +15,7 @@ from telegram.ext import ContextTypes
 from config import ALERT_STATE
 from bot.registry import command, callback
 from bot.messaging import reply_md, reply_photo_md, edit_md, strip_md
-from core.database import get_dry_run_journal_signals, get_live_signal_links
+from core.db import get_dry_run_journal_signals, get_live_signal_links
 from core.mt5 import check_mt5_alive, MT5_LOCK, get_broker_utc_offset_seconds
 from core.account import HISTORY_START
 from core.stats import deal_stats

@@ -9,7 +9,7 @@ from config import ALERT_STATE, TF_LABELS
 from analysis import ALL
 from bot.registry import command, callback
 from bot.messaging import fit_lines
-from core.database import get_recent_trades_for_chart
+from core.db import get_recent_trades_for_chart
 from core.mt5 import get_gold_symbol, get_tick, get_broker_utc_offset_seconds
 from core.news_engine import fetch_economic_events
 from core.evaluator import analyze_market

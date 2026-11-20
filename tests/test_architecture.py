@@ -66,3 +66,13 @@ def test_pure_core_modules_stay_pure(module):
     forbidden = ("core", "bot", "config", "MetaTrader5", "telegram", "sqlite3", "matplotlib", "requests")
     bad = [m for m in _imports(path) if any(m == f or m.startswith(f + ".") for f in forbidden)]
     assert not bad, f"core/{module} must stay pure, but imports: {bad}"
+
+
+def test_only_the_db_package_imports_sqlite3():
+    allowed = ROOT / "core" / "db"
+    offenders = [
+        str(p.relative_to(ROOT)) for p in ROOT.rglob("*.py")
+        if allowed not in p.parents and "tests" not in p.parts and not (_SKIP & set(p.parts))
+        and any(m == "sqlite3" or m.startswith("sqlite3.") for m in _imports(p))
+    ]
+    assert not offenders, "only core/db may touch sqlite3:\n" + "\n".join(offenders)

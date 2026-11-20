@@ -11,7 +11,7 @@ from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings, apply_timefram
 from bot.registry import command, callback
 from bot.messaging import fit_lines
 from strategies import STRATEGIES, STRATEGY_PRESETS, get_params, plan_sweep, reset_runtime
-from core.database import (
+from core.db import (
     get_sweep_run, get_latest_sweep_run, get_sweep_results,
     count_sweep_runs, get_sweep_history, get_sweep_history_ranked,
     log_sweep_run,

@@ -15,7 +15,7 @@ from bot.registry import job
 from bot.messaging import send_text, send_alert
 from bot.jobs.circuit_breaker import evaluate_circuit_breaker
 from core import outcomes
-from core.database import (
+from core.db import (
     get_tracked_signals, update_signal_statuses, mark_leg2_be_moved, get_recent_trades_for_chart,
 )
 from core.mt5 import get_gold_symbol, fetch_candles, get_broker_utc_offset_seconds

@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes
 from config import ALERT_STATE, USER_ID, save_settings
 from bot.registry import stop_job
 from bot.messaging import send_text
-from core.database import get_daily_performance_stats
+from core.db import get_daily_performance_stats
 from core.execution import close_all_managed
 
 
