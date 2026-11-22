@@ -85,8 +85,8 @@
             "max_lot": 1.0
         },
         "zscore_reversion": {
-            "entry_z": 2.4,
-            "z_len": 40,
+            "entry_z": 2.0,
+            "z_len": 50,
             "stop_z": 3.5,
             "adx_max": 25.0,
             "slope_bars": 5,

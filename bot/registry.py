@@ -17,7 +17,8 @@ from typing import Callable
 
 from telegram import BotCommand, Update
 from telegram.error import BadRequest
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes,
+                          MessageHandler, filters)
 
 from bot.auth import admin_only
 
@@ -198,6 +199,9 @@ def start_all_jobs(job_queue, chat_id):
 # ---------------------------------------------------------------- wiring
 
 def install(app: Application):
+    from bot.batch import batch_handler        # lazy: batch imports COMMANDS from this module
+    # group -1 runs before the CommandHandlers (group 0); it only consumes multi-line command messages.
+    app.add_handler(MessageHandler(filters.COMMAND & filters.UpdateType.MESSAGES, batch_handler), group=-1)
     for spec in COMMANDS.values():
         app.add_handler(CommandHandler([spec.name, *spec.aliases], spec.fn))
     app.add_handler(CallbackQueryHandler(dispatch_callback))

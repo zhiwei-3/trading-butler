@@ -26,7 +26,9 @@ def _overview():
             lines.append(f"• {s.label} (`{s.aliases[0]}`): `{_fmt(s, ALERT_STATE.get(s.key))}`")
         lines.append("")
     lines.append("**Usage:** `/set <key> <value>` — e.g. `/set lot 0.02`, `/set news_impact high, medium`\n"
-                 "**Strategy settings:** `/set strategies` lists them · `/set <strategy>.<param> <value>`")
+                 "**Strategy settings:** `/set strategies` lists them · `/set <strategy>.<param> <value>`\n"
+                 "**Batch:** put several commands on separate lines of one message "
+                 "(`/set`, `/filters`, `/watchlist`, `/timeframe`, `/strategy`, `/heartbeat`, scanner on/off).")
     return "\n".join(lines)
 
 
