@@ -13,6 +13,7 @@ _LAST_FETCH_TIME = None
 _CACHE_DURATION = timedelta(minutes=10)
 _ANNOUNCED_RESULTS = {}   # event_key -> added_at (UTC). Dict (not set) so it can be pruned by age.
 _RESULT_TTL = timedelta(days=8)
+_FAILED_COOLDOWN = timedelta(seconds=60)
 
 
 def _fetch_via_curl(url):
@@ -45,14 +46,14 @@ def _fetch_calendar_sync():
     global _NEWS_CACHE, _LAST_FETCH_TIME
     now = datetime.now(timezone.utc)
 
-    # 1. Return fresh cached data if available (10-minute cache)
+    # 1. Fresh cache (10 minutes)
     if _NEWS_CACHE is not None and _LAST_FETCH_TIME and (now - _LAST_FETCH_TIME) < _CACHE_DURATION:
         return _NEWS_CACHE
 
-    # 2. Cooldown throttle: If previous fetch failed, wait 60s before retrying to prevent log spam
-    _FAILED_COOLDOWN = timedelta(seconds=60)
-    if _NEWS_CACHE is None and _LAST_FETCH_TIME and (now - _LAST_FETCH_TIME) < _FAILED_COOLDOWN:
-        return None
+    # 2. Retry throttle: we only get here if the cache is empty/stale, so a recent attempt means it failed.
+    #    Applies WITH or WITHOUT a stale cache (serve the stale copy instead of hammering the feed).
+    if _LAST_FETCH_TIME and (now - _LAST_FETCH_TIME) < _FAILED_COOLDOWN:
+        return _NEWS_CACHE
 
     url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
     headers = {
@@ -71,14 +72,11 @@ def _fetch_calendar_sync():
     if not data:
         data = _fetch_via_curl(url)
 
-    # Always update last fetch attempt timestamp to throttle retries on failure
-    _LAST_FETCH_TIME = now
+    _LAST_FETCH_TIME = now          # stamp every attempt so failures are throttled too
 
     if data:
         _NEWS_CACHE = data
-        return _NEWS_CACHE
-
-    return _NEWS_CACHE if _NEWS_CACHE is not None else None
+    return _NEWS_CACHE
 
 
 async def fetch_economic_events(impact_level="high", currency="USD"):

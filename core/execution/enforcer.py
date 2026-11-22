@@ -6,11 +6,19 @@ from core.execution.orders import close_position
 from core.execution.positions import fetch_managed
 
 
+def _tickets(sig):
+    return {int(t) for t in (sig["ticket"], sig["ticket2"]) if t}
+
+
 def enforce_single_trade():
     """
     Safety net. The only legal live state is ONE signal's legs (1 or 2 tickets).
     Closes (a) bot positions not linked to any active signal (e.g. retry duplicates)
-    and (b) every active signal after the oldest one. Returns report lines.
+    and (b) positions of every owning signal after the oldest one. Returns report lines.
+
+    Only signals that actually OWN an open position count: an older signal whose
+    tickets are already closed (tracker hasn't resolved it yet) must neither be
+    "kept" nor be marked SKIPPED, or it would cost us a freshly opened trade.
     """
     if ALERT_STATE.get("trade_dry_run", True):
         return []
@@ -18,9 +26,11 @@ def enforce_single_trade():
         positions = fetch_managed()
         if not positions:
             return []
+        open_tickets = {int(p.ticket) for p in positions}
         signals = get_active_live_signals()          # oldest first
-        keep = signals[0] if signals else None
-        keep_tickets = {t for t in (keep["ticket"], keep["ticket2"]) if t} if keep else set()
+        owners = [s for s in signals if _tickets(s) & open_tickets]
+        keep = owners[0] if owners else None
+        keep_tickets = _tickets(keep) if keep else set()
 
         out = []
         for p in sorted(positions, key=lambda p: p.time):
@@ -29,6 +39,6 @@ def enforce_single_trade():
             res = close_position(p.ticket)
             out.append(f"🛑 **Extra position `#{p.ticket}` closed** (one-trade rule) — "
                        f"{'✅' if res['ok'] else '⚠️'} {res['reason']}")
-        for extra in signals[1:]:
+        for extra in owners[1:]:
             set_signal_status(extra["id"], "SKIPPED")
         return out

@@ -26,6 +26,9 @@ __pycache__/
 # Commit settings.example.json instead and let each deployment generate its own.
 settings.json
 
+# Runtime logs
+logs/
+
 # Editor / OS cruft
 .vscode/
 .idea/

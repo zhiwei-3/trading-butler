@@ -1,5 +1,7 @@
 # app.py
 
+import logsetup  # noqa: F401  MUST stay the first import: configures file-only logging
+
 import logging
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, ContextTypes
@@ -9,6 +11,12 @@ from core.mt5 import init_mt5
 from bot.registry import install, bot_commands, start_all_jobs
 import bot.commands   # noqa: F401  registers every @command / @callback
 import bot.jobs       # noqa: F401  registers every @job
+
+
+def _startup(msg, level=logging.INFO):
+    """Startup banner lines: shown in the terminal AND recorded in the log file."""
+    print(msg)
+    logging.log(level, msg)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -26,10 +34,11 @@ async def post_init_setup(application: Application) -> None:
 
 def main():
     if not TELEGRAM_TOKEN:
-        print("❌ TELEGRAM_TOKEN missing in environment.")
+        _startup("❌ TELEGRAM_TOKEN missing in environment.", logging.CRITICAL)
         return
     if not USER_ID:
-        print("❌ TELEGRAM_USER_ID missing in environment — required for admin authorization and background jobs.")
+        _startup("❌ TELEGRAM_USER_ID missing in environment — required for admin authorization and background jobs.",
+                 logging.CRITICAL)
         return
 
     init_db()
@@ -46,18 +55,18 @@ def main():
     app.post_init = post_init_setup
 
     if init_mt5():
-        print("✅ MT5 Engine Online!")
+        _startup("✅ MT5 Engine Online!")
     else:
-        print("⚠️ Warning: MT5 connection failed — watchdog will keep retrying.")
+        _startup("⚠️ Warning: MT5 connection failed — watchdog will keep retrying.", logging.WARNING)
 
     app.add_error_handler(error_handler)
     install(app)                                        # commands + callback dispatcher
 
     boot_id = int(USER_ID)
     start_all_jobs(app.job_queue, boot_id)              # scanner, outcome tracker, watchdog, heartbeat
-    print(f"✅ Background jobs running for Chat ID: {boot_id}")
+    _startup(f"✅ Background jobs running for Chat ID: {boot_id}")
 
-    print("🚀 Trading Butler running polling loop with error handling active!")
+    _startup(f"🚀 Trading Butler running polling loop with error handling active!")
     app.run_polling()
 
 

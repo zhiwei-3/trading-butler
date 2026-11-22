@@ -8,14 +8,21 @@ ATR_AVG_PERIOD = 20
 VOLUME_AVG_PERIOD = 20
 
 
+def _num(series, index):
+    """pandas_ta returns None when there are too few bars; turn that into an all-NaN column."""
+    if series is None:
+        return pd.Series(np.nan, index=index)
+    return pd.to_numeric(series, errors='coerce')
+
+
 def add_indicators(df, extras=False):
     """Adds EMA_20/EMA_50/RSI/ATR. extras=True (entry timeframe) also adds ATR_AVG, VOL_AVG, MACD_BIAS.
     The ONLY place indicator columns are built — live fetches and backtest history both go through here."""
     df = df.copy()
-    df['EMA_20'] = pd.to_numeric(ta.ema(df['close'], length=20), errors='coerce')
-    df['EMA_50'] = pd.to_numeric(ta.ema(df['close'], length=50), errors='coerce')
-    df['RSI'] = pd.to_numeric(ta.rsi(df['close'], length=14), errors='coerce')
-    df['ATR'] = pd.to_numeric(ta.atr(df['high'], df['low'], df['close'], length=14), errors='coerce')
+    df['EMA_20'] = _num(ta.ema(df['close'], length=20), df.index)
+    df['EMA_50'] = _num(ta.ema(df['close'], length=50), df.index)
+    df['RSI'] = _num(ta.rsi(df['close'], length=14), df.index)
+    df['ATR'] = _num(ta.atr(df['high'], df['low'], df['close'], length=14), df.index)
     if not extras:
         return df
 

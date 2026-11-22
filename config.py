@@ -1,6 +1,7 @@
 import os
 import copy
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -178,13 +179,17 @@ def apply_timeframe_mode(mode):
 # ---------------------------------------------------------------- persistence
 
 def save_settings():
-    """Saves current configurable parameters to settings.json."""
+    """Saves current configurable parameters to settings.json (atomic: temp file + replace)."""
     data = {k: ALERT_STATE[k] for k in PERSISTENT_KEYS if k in ALERT_STATE}
+    tmp = SETTINGS_FILE + ".tmp"
     try:
-        with open(SETTINGS_FILE, "w") as f:
+        with open(tmp, "w") as f:
             json.dump(data, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, SETTINGS_FILE)
     except Exception as e:
-        print(f"⚠️ Failed to save settings: {e}")
+        logging.error(f"⚠️ Failed to save settings: {e}")
 
 
 def _coerce(spec, value):
@@ -194,7 +199,7 @@ def _coerce(spec, value):
     try:
         return spec.parse(to_text(value))
     except (ValueError, TypeError):
-        print(f"⚠️ settings.json: invalid value {value!r} for '{spec.key}' — using default {spec.default!r}.")
+        logging.warning(f"⚠️ settings.json: invalid value {value!r} for '{spec.key}' — using default {spec.default!r}.")
         return copy.deepcopy(spec.default)
 
 
@@ -213,13 +218,16 @@ def load_settings():
                     ALERT_STATE[k] = _coerce(spec, v)
             # Kept so tuned values survive until a strategy that owns them is installed.
             ALERT_STATE["_legacy"] = {**ALERT_STATE.get("_legacy", {}), **legacy}
+            logging.info("✅ Loaded persistent settings from settings.json")
             print("✅ Loaded persistent settings from settings.json")
         except Exception as e:
-            print(f"⚠️ Failed to load settings: {e}")
+            logging.error(f"⚠️ Failed to load settings: {e}")
 
     apply_timeframe_mode(ALERT_STATE["timeframe_mode"]) or apply_timeframe_mode("scalp")
     if ALERT_STATE.get("auto_trade_enabled") and not ALERT_STATE.get("trade_dry_run", True):
-        print("🟢 Live execution is ARMED on startup (restored from settings.json).")
+        msg = "🟢 Live execution is ARMED on startup (restored from settings.json)."
+        logging.warning(msg)
+        print(msg)
 
 
 load_settings()

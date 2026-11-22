@@ -66,7 +66,7 @@ def preflight(symbol, bypass_position_cap=False, dry=None):
     if not bypass_position_cap:
         blocker = trade_slot_blocker(symbol)
         if blocker:
-            return False, blocker.capitalize()
+            return False, blocker[:1].upper() + blocker[1:]
 
     day_n = count_live_trades_today()
     day_cap = int(ALERT_STATE.get("max_daily_trades", 5))
