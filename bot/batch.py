@@ -20,6 +20,8 @@ from telegram.ext import ApplicationHandlerStop, ContextTypes
 from config import USER_ID
 from bot.registry import COMMANDS
 from bot.messaging import reply_md, fit_lines
+from bot.audit import in_batch, actor
+from utils.logkit import audit
 
 BATCHABLE = {"set", "filters", "watchlist", "timeframe", "strategy",
              "heartbeat", "scanner_on", "scanner_off"}
@@ -100,20 +102,26 @@ async def batch_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     parsed, err = _parse(msg.text)
     if err:
+        audit("batch.rejected", logging.WARNING, error=err, **actor(update))
         await reply_md(msg, f"❌ **Batch rejected — nothing was applied.**\n{err}")
         raise ApplicationHandlerStop
 
+    audit("batch", lines=len(parsed), **actor(update))
     results = []
-    for line, spec, args in parsed:
-        sink = []
-        proxy = _CaptureUpdate(update, _CaptureMessage(msg, sink))
-        context.args = args
-        try:
-            await spec.fn(proxy, context)
-        except Exception as e:
-            logging.exception(f"Batch line failed: {line}")
-            sink.append(f"❌ Crashed: {str(e)[:200]}")
-        results.append((line, sink or ["(no reply)"]))
+    token = in_batch.set(True)          # each replayed line is audited with batch=True
+    try:
+        for line, spec, args in parsed:
+            sink = []
+            proxy = _CaptureUpdate(update, _CaptureMessage(msg, sink))
+            context.args = args
+            try:
+                await spec.fn(proxy, context)
+            except Exception as e:
+                logging.exception(f"Batch line failed: {line}")
+                sink.append(f"❌ Crashed: {str(e)[:200]}")
+            results.append((line, sink or ["(no reply)"]))
+    finally:
+        in_batch.reset(token)
 
     lines = [f"🧾 **BATCH — {len(results)} command(s)**", ""]
     for line, outs in results:

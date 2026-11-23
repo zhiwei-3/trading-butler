@@ -8,6 +8,7 @@ from core.execution.gates import trade_slot_blocker
 from core.execution.intents import take_pending
 from core.execution.orders import open_position
 from core.mt5 import get_tick
+from utils.logkit import trade_event
 
 
 def execute_pending_intents():
@@ -19,8 +20,10 @@ def execute_pending_intents():
         return _drain_batch(batch)
 
 
-def _skip_intent(intent, dual):
+def _skip_intent(intent, dual, reason=""):
     """Records that no order was sent and takes the signal out of outcome tracking."""
+    trade_event("intent.skipped", logging.WARNING, signal=intent["signal_id"], dir=intent["direction"],
+                symbol=intent["symbol"], reason=reason)
     lot = fixed_lot()
     attach_trade_execution(intent["signal_id"], 1, None, lot, "NONE", None)
     if dual:
@@ -38,7 +41,7 @@ def _drain_batch(batch):
         leg_lots = float(intent.get("lots") or default_lot)
         sl_dist = abs(intent["entry"] - intent["sl"])
         if sl_dist <= 1e-9:
-            _skip_intent(intent, dual)
+            _skip_intent(intent, dual, "zero SL distance")
             reports.append(f"❌ **Execution skipped** — zero SL distance on {direction} {symbol}.")
             continue
 
@@ -47,7 +50,7 @@ def _drain_batch(batch):
         else:
             blocker = trade_slot_blocker(symbol, exclude_signal_id=intent["signal_id"])
         if blocker:
-            _skip_intent(intent, dual)
+            _skip_intent(intent, dual, blocker)
             reports.append(f"⏭️ **Execution skipped** — {direction} {symbol} signal ignored, {blocker}")
             continue
 
@@ -57,7 +60,7 @@ def _drain_batch(batch):
             drift_pct = abs(live - intent["entry"]) / sl_dist * 100.0
             max_drift = float(ALERT_STATE.get("max_entry_drift_pct", 25.0))
             if drift_pct > max_drift:
-                _skip_intent(intent, dual)
+                _skip_intent(intent, dual, f"entry drift {drift_pct:.0f}% > {max_drift:.0f}%")
                 reports.append(
                     f"🚫 **Execution aborted** — {direction} {symbol} drifted "
                     f"`{drift_pct:.0f}%` of SL distance from the signal price "

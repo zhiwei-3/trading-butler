@@ -13,6 +13,7 @@ from core.execution.common import (MAX_SEND_RETRIES, RC_INVALID_FILL, RC_RETRYAB
 from core.execution.gates import preflight
 from core.execution.positions import fetch_managed, position_by_ticket
 from core.mt5 import MT5_LOCK, get_tick
+from utils.logkit import trade_event
 
 
 def _new_fill(symbol, direction, before):
@@ -26,7 +27,7 @@ def _new_fill(symbol, direction, before):
 
 # ---------------------------------------------------------------- open
 
-def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypass_position_cap=False):
+def _open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypass_position_cap=False):
     dry = ALERT_STATE.get("trade_dry_run", True) if dry_run is None else dry_run
     ok, reason = preflight(symbol, bypass_position_cap=bypass_position_cap, dry=dry)
     if not ok:
@@ -138,9 +139,18 @@ def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypas
             "reason": f"{last_reason} (gave up after {MAX_SEND_RETRIES} attempts)"}
 
 
+def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypass_position_cap=False):
+    res = _open_position(symbol, direction, lots, sl, tp, dry_run, tag, bypass_position_cap)
+    trade_event("order.open", logging.INFO if res["ok"] else logging.WARNING,
+                ok=res["ok"], dry=res.get("dry_run"), symbol=symbol, dir=direction,
+                lots=res.get("lots", lots), ticket=res.get("ticket"), price=res.get("price"),
+                sl=res.get("sl", sl), tp=res.get("tp", tp), tag=tag, reason=res.get("reason"))
+    return res
+
+
 # ---------------------------------------------------------------- modify / close
 
-def modify_position_sltp(ticket, sl=None, tp=None):
+def _modify_position_sltp(ticket, sl=None, tp=None):
     pos = position_by_ticket(ticket)
     if pos is None:
         return {"ok": False, "reason": "Position not found (already closed?)."}
@@ -178,7 +188,14 @@ def modify_position_sltp(ticket, sl=None, tp=None):
             "reason": f"{rc_text(result.retcode)} — {result.comment}"}
 
 
-def close_position(ticket, lots=None):
+def modify_position_sltp(ticket, sl=None, tp=None):
+    res = _modify_position_sltp(ticket, sl, tp)
+    trade_event("order.modify", logging.INFO if res["ok"] else logging.WARNING,
+                ok=res["ok"], ticket=ticket, sl=res.get("sl", sl), tp=res.get("tp", tp), reason=res.get("reason"))
+    return res
+
+
+def _close_position(ticket, lots=None):
     pos = position_by_ticket(ticket)
     if pos is None:
         return {"ok": False, "reason": "Position not found (already closed?)."}
@@ -239,6 +256,14 @@ def close_position(ticket, lots=None):
             break
 
     return {"ok": False, "reason": last_reason}
+
+
+def close_position(ticket, lots=None):
+    res = _close_position(ticket, lots)
+    trade_event("order.close", logging.INFO if res["ok"] else logging.WARNING,
+                ok=res["ok"], ticket=ticket, lots=res.get("closed", lots), price=res.get("price"),
+                reason=res.get("reason"))
+    return res
 
 
 def close_all_managed(symbol=None):

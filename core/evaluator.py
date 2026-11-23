@@ -14,6 +14,7 @@ from core.mt5 import fetch_candles, get_broker_utc_offset_seconds
 from core.execution import request_execution, trade_slot_blocker, calc_risk_lots
 from charts import generate_signal_chart
 from utils.common import format_reasons
+from utils.logkit import trade_event
 
 
 def _eval_setup_forming(a):
@@ -84,13 +85,17 @@ def package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, ba
     if signal_id is None and ALERT_STATE.get("auto_trade_enabled") and not blocker:
         blocker = "the signal could not be logged to the database, so no untracked trade will be opened."
 
+    queued = False
     if blocker:
         # Alert only — no order, and keep it out of the outcome tracker / stats.
         if signal_id:
             set_signal_status(signal_id, "SKIPPED")
     else:
-        request_execution(signal_id, symbol, direction, close_price, sl_price, tp1_price, tp2_price,
-                          score, dual_entry=dual, lots=lots_leg)
+        queued = request_execution(signal_id, symbol, direction, close_price, sl_price, tp1_price, tp2_price,
+                                   score, dual_entry=dual, lots=lots_leg)
+    trade_event("signal", signal=signal_id, symbol=symbol, dir=direction, entry=close_price,
+                sl=sl_price, tp1=tp1_price, tp2=tp2_price, score=score, dual=dual, lots=lots_leg,
+                queued=queued, skipped_because=blocker)
 
     lot_disp = lots_leg if lots_leg else ALERT_STATE.get("fixed_lot_size", 0.01)
     exec_note = ""

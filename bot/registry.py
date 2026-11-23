@@ -14,6 +14,8 @@ app.py never lists handlers: it calls install(), bot_commands() and start_all_jo
 import logging
 from dataclasses import dataclass
 from typing import Callable
+import functools
+import time
 
 from telegram import BotCommand, Update
 from telegram.error import BadRequest
@@ -21,6 +23,8 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, Con
                           MessageHandler, filters)
 
 from bot.auth import admin_only
+from bot.audit import audited, actor, observe_message
+from utils.logkit import audit, system
 
 # group -> icon, in display order. Commands in an unlisted group are shown after these.
 GROUPS = {
@@ -55,7 +59,7 @@ def command(name, help, *, icon="▫️", group="Other", usage=None, order=50, a
     def deco(fn):
         if name in COMMANDS:
             raise ValueError(f"Duplicate command /{name}")
-        wrapped = admin_only(fn)
+        wrapped = admin_only(audited(name)(fn))
         COMMANDS[name] = CommandSpec(name, wrapped, help, icon, group, usage or f"/{name}",
                                      order, tuple(aliases), listed)
         return wrapped
@@ -131,15 +135,27 @@ async def dispatch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if spec is None:
         await query.answer()
         logging.warning(f"Unhandled callback_data: {data!r}")
+        audit("callback", logging.WARNING, data=data, result="unhandled", **actor(update))
         return
     if spec.answers:
         await query.answer()
+    t0 = time.perf_counter()
+    outcome = "ok"
     try:
         await spec.fn(update, context)
     except BadRequest as e:
         # Re-selecting the current option re-renders an identical message.
-        if "not modified" not in str(e).lower():
+        if "not modified" in str(e).lower():
+            outcome = "not_modified"
+        else:
+            outcome = "error:BadRequest"
             raise
+    except BaseException as e:
+        outcome = f"error:{type(e).__name__}"
+        raise
+    finally:
+        audit("callback", logging.WARNING if outcome.startswith("error") else logging.INFO,
+              data=data, ms=round((time.perf_counter() - t0) * 1000), result=outcome, **actor(update))
 
 
 # ---------------------------------------------------------------- scheduled jobs
@@ -155,6 +171,26 @@ class JobSpec:
 
 
 JOBS = {}
+_SLOW_JOB_S = 15.0
+
+def _logged_job(name, fn):
+    """Times every run; logs failures (the traceback comes from app.error_handler) and slow runs."""
+    @functools.wraps(fn)
+    async def wrapper(context):
+        t0 = time.perf_counter()
+        try:
+            return await fn(context)
+        except Exception as e:
+            system("job.failed", logging.WARNING, job=name, error=type(e).__name__,
+                   ms=round((time.perf_counter() - t0) * 1000))
+            raise
+        finally:
+            dt = time.perf_counter() - t0
+            if dt > _SLOW_JOB_S:
+                system("job.slow", logging.WARNING, job=name, seconds=round(dt, 1))
+            else:
+                logging.debug(f"job {name} finished in {dt * 1000:.0f}ms")
+    return wrapper
 
 
 def job(name, *, interval, first=10, enabled=None, grace=30):
@@ -162,7 +198,7 @@ def job(name, *, interval, first=10, enabled=None, grace=30):
     def deco(fn):
         if name in JOBS:
             raise ValueError(f"Duplicate job '{name}'")
-        JOBS[name] = JobSpec(name, fn, interval, first, enabled, grace)
+        JOBS[name] = JobSpec(name, _logged_job(name, fn), interval, first, enabled, grace)
         return fn
     return deco
 
@@ -177,12 +213,16 @@ def start_job(job_queue, name, chat_id):
     interval = spec.interval() if callable(spec.interval) else spec.interval
     job_queue.run_repeating(spec.fn, interval=interval, first=spec.first, chat_id=chat_id, name=name,
                             job_kwargs={"misfire_grace_time": spec.grace})
+    system("job.start", job=name, interval_s=interval)
     return True
 
 
 def stop_job(job_queue, name):
-    for j in job_queue.get_jobs_by_name(name):
+    jobs = job_queue.get_jobs_by_name(name)
+    for j in jobs:
         j.schedule_removal()
+    if jobs:
+        system("job.stop", job=name)
 
 
 def restart_job(job_queue, name, chat_id):
@@ -202,6 +242,7 @@ def install(app: Application):
     from bot.batch import batch_handler        # lazy: batch imports COMMANDS from this module
     # group -1 runs before the CommandHandlers (group 0); it only consumes multi-line command messages.
     app.add_handler(MessageHandler(filters.COMMAND & filters.UpdateType.MESSAGES, batch_handler), group=-1)
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, observe_message), group=-2)
     for spec in COMMANDS.values():
         app.add_handler(CommandHandler([spec.name, *spec.aliases], spec.fn))
     app.add_handler(CallbackQueryHandler(dispatch_callback))

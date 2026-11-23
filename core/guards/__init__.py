@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from utils.logkit import system 
 
 @dataclass(frozen=True)
 class GuardContext:
@@ -71,7 +72,12 @@ async def run_guards(scope, ctx):
         except Exception:
             logging.exception(f"❌ Guard '{g.name}' crashed — failing closed.")
             reason = "guard crashed (see log) — failing closed"
+        prev = _STATE.get(g.name, (None, 0))[0]
         _STATE[g.name] = (reason, _now())
+        if reason and not prev:
+            system("guard.block", logging.WARNING, guard=g.name, scope=scope, reason=reason)
+        elif prev and not reason:
+            system("guard.clear", guard=g.name, scope=scope)
         if reason:
             blocks.append(Block(g.name, reason))
     return blocks

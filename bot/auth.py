@@ -1,8 +1,11 @@
 # bot/auth.py
+import logging
 from functools import wraps
 from telegram import Update
 from telegram.ext import ContextTypes
 from config import USER_ID
+from bot.audit import log_denied
+from utils.logkit import audit
 
 
 def admin_only(func):
@@ -12,11 +15,13 @@ def admin_only(func):
         try:
             allowed_id = int(USER_ID)
         except (TypeError, ValueError):
+            audit("auth.misconfigured", logging.ERROR, reason="TELEGRAM_USER_ID not set")
             if update.effective_message:
                 await update.effective_message.reply_text("⛔ **Bot misconfigured:** TELEGRAM_USER_ID is not set.")
             return
         user_id = update.effective_user.id if update.effective_user else None
         if user_id != allowed_id:
+            log_denied(update)
             if update.callback_query:
                 try:
                     await update.callback_query.answer("⛔ Access denied", show_alert=True)

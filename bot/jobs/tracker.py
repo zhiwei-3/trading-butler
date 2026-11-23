@@ -23,6 +23,7 @@ from core.execution import (
     reconcile_exit, trail_leg_to_breakeven, force_close_leg, enforce_single_trade, summarize_outcome_pnl,
 )
 from charts import generate_outcome_chart
+from utils.logkit import trade_event
 
 
 def _zone_from_sig(sig):
@@ -160,6 +161,9 @@ async def signal_outcome_tracker_job(context: ContextTypes.DEFAULT_TYPE):
             extra_note = await _close_runner(sig, tr.close_leg2_reason)
 
         status_writes.append((tr.new_status, now_str, sig["id"]))
+        trade_event("outcome", signal=sig["id"], dir=sig["direction"], status=tr.new_status,
+            price=price, trail_be=tr.trail_leg2_to_be or None,
+            close_runner=tr.close_leg2_reason, note=extra_note)
         updates.append((sig, tr.new_status, tr.message, extra_note))
 
     await asyncio.to_thread(update_signal_statuses, status_writes)

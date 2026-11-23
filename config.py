@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 from dotenv import load_dotenv
 
 from utils.parsers import num, boolean, choice, choice_list
+from utils.logkit import audit
 
 load_dotenv()
 
@@ -178,9 +179,35 @@ def apply_timeframe_mode(mode):
 
 # ---------------------------------------------------------------- persistence
 
+_LAST_SAVED = {}      # flattened snapshot of the last persisted state, for change logging
+
+
+def _flatten(d, prefix=""):
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict) and v:
+            out.update(_flatten(v, f"{prefix}{k}."))
+        else:
+            out[f"{prefix}{k}"] = v
+    return out
+
+
+def _log_setting_changes(data):
+    """audit('setting.changed') for every persisted value that differs from the last save."""
+    global _LAST_SAVED
+    new = _flatten(copy.deepcopy(data))
+    for key in sorted(new):
+        if key.startswith("_legacy"):
+            continue
+        if key in _LAST_SAVED and _LAST_SAVED[key] != new[key]:
+            audit("setting.changed", key=key, old=_LAST_SAVED[key], new=new[key])
+    _LAST_SAVED = new
+
+
 def save_settings():
     """Saves current configurable parameters to settings.json (atomic: temp file + replace)."""
     data = {k: ALERT_STATE[k] for k in PERSISTENT_KEYS if k in ALERT_STATE}
+    _log_setting_changes(data)
     tmp = SETTINGS_FILE + ".tmp"
     try:
         with open(tmp, "w") as f:
@@ -229,5 +256,7 @@ def load_settings():
         logging.warning(msg)
         print(msg)
 
+    global _LAST_SAVED
+    _LAST_SAVED = _flatten(copy.deepcopy({k: ALERT_STATE[k] for k in PERSISTENT_KEYS if k in ALERT_STATE}))
 
 load_settings()

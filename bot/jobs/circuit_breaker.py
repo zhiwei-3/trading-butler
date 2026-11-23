@@ -1,5 +1,6 @@
 # bot/jobs/circuit_breaker.py
 import asyncio
+import logging
 
 from telegram.ext import ContextTypes
 
@@ -8,6 +9,7 @@ from bot.registry import stop_job
 from bot.messaging import send_text
 from core.db import get_daily_performance_stats
 from core.execution import close_all_managed
+from utils.logkit import trade_event
 
 
 async def evaluate_circuit_breaker(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -39,6 +41,11 @@ async def evaluate_circuit_breaker(context: ContextTypes.DEFAULT_TYPE) -> bool:
     if ALERT_STATE.get("flatten_on_circuit_breaker", True):
         results = await asyncio.to_thread(close_all_managed)
         flatten_note = "\n\n🧯 **Flattened managed positions:**\n" + "\n".join(f"• {r}" for r in results)
+
+    trade_event("circuit_breaker.tripped", logging.WARNING,
+                consecutive_losses=stats["consecutive_losses"], net_r=stats["net_r"],
+                wins=stats["today_wins"], losses=stats["today_losses"],
+                flattened=bool(flatten_note) or None)
 
     msg = (
         f"🚨 **CIRCUIT BREAKER TRIGGERED — SCANNER DEACTIVATED** 🚨\n\n"
