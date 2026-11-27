@@ -32,7 +32,7 @@ class LockedMt5:
         self._wrapped = {}
 
     def __getattr__(self, name):
-        if name.startswith("__"):
+        if name.startswith("__") and name not in ("__version__", "__author__"):
             raise AttributeError(name)
         wrapped = self._wrapped.get(name)
         if wrapped is not None:

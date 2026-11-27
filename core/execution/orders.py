@@ -8,7 +8,7 @@ from core.mt5 import mt5
 from config import ALERT_STATE
 from core.execution.broker import (adjust_levels, filling_modes, forget_filling, remember_filling,
                                    snap_volume)
-from core.execution.common import (MAX_SEND_RETRIES, RC_INVALID_FILL, RC_RETRYABLE, comment, deviation,
+from core.execution.common import (MAX_SEND_RETRIES, RC_FILL_REJECTS, RC_RETRYABLE, comment, deviation,
                                    magic, mark_fill, rc_text)
 from core.execution.gates import preflight
 from core.execution.positions import fetch_managed, position_by_ticket
@@ -23,6 +23,58 @@ def _new_fill(symbol, direction, before):
         if p.ticket not in before and p.type == want:
             return p
     return None
+
+
+_STYLES = ("positional", "kwargs", "request=")
+_style = "positional"       # the call style this MetaTrader5 build accepted last (remembered per process)
+
+
+def _invoke(fn, request, style):
+    if style == "positional":
+        return fn(request)
+    if style == "kwargs":
+        return fn(**request)             # request fields passed as named arguments
+    return fn(request=request)
+
+
+def _call_with_styles(fn, request):
+    """Calls an MT5 request function (order_send / order_check). Some builds refuse the positional form with
+    (-2, 'Unnamed arguments not allowed'); that error means the call was refused before processing, so
+    trying another style can never double-send. The working style is remembered."""
+    global _style
+    with MT5_LOCK:
+        for style in (_style, *[s for s in _STYLES if s != _style]):
+            try:
+                result = _invoke(fn, request, style)
+            except Exception as e:
+                logging.warning("%s(%s) raised %s: %s", getattr(fn, "__name__", "mt5 call"), style,
+                                type(e).__name__, e)
+                continue
+            if result is not None:
+                if style != _style:
+                    logging.warning("MT5 request call style switched %s -> %s", _style, style)
+                    _style = style
+                return result
+            err = mt5.last_error()
+            if not (err and err[0] == -2 and "unnamed" in str(err[1]).lower()):
+                return None              # a genuine failure, not a call-style problem
+        return None
+
+
+def _order_send(request):
+    return _call_with_styles(mt5.order_send, request)
+
+
+def _check_text(request):
+    """order_check's explanation of a rejected request (diagnostics only, never raises)."""
+    try:
+        chk = _call_with_styles(mt5.order_check, request)
+        if chk is None:
+            with MT5_LOCK:
+                return f"order_check returned None ({mt5.last_error()})"
+        return f"order_check retcode={chk.retcode} comment={chk.comment!r}"
+    except Exception as e:
+        return f"order_check failed: {e}"
 
 
 # ---------------------------------------------------------------- open
@@ -91,14 +143,16 @@ def _open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypa
         retry_outer = False
         for filling in filling_modes(symbol, info):
             request["type_filling"] = filling
-            with MT5_LOCK:
-                result = mt5.order_send(request)
+            result = _order_send(request)
 
             if result is None:
                 with MT5_LOCK:
                     err = mt5.last_error()
                 last_reason = f"order_send returned None ({err})."
-                retry_outer = True
+                logging.warning("order_send returned None: err=%s request=%s types=%s mt5=%s",
+                                err, request, {k: type(v).__name__ for k, v in request.items()},
+                                getattr(mt5, "__version__", "?"))
+                retry_outer = not (err and err[0] == -2)      # bad arguments: retrying can't help
                 break
 
             if result.retcode == mt5.TRADE_RETCODE_DONE:
@@ -120,10 +174,14 @@ def _open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypa
                         "sl": adj_sl, "tp": adj_tp, "retcode": result.retcode,
                         "reason": "Filled."}
 
-            if result.retcode == RC_INVALID_FILL:
+            if result.retcode in RC_FILL_REJECTS:
+                # 10030 (unsupported filling) or 10013 (some brokers' way of saying the same): rejected
+                # server-side, nothing executed, so trying the next filling mode is safe.
+                logging.warning("order rejected: retcode=%s comment=%r filling=%s request=%s | %s",
+                                result.retcode, result.comment, filling, request, _check_text(request))
                 forget_filling(symbol)
-                last_reason = rc_text(result.retcode)
-                continue                      # try the next filling policy
+                last_reason = f"{rc_text(result.retcode)} — {result.comment} (filling={filling})"
+                continue
 
             last_reason = f"{rc_text(result.retcode)} — {result.comment}"
             if result.retcode in RC_RETRYABLE:
@@ -136,7 +194,7 @@ def _open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypa
             break
 
     return {"ok": False, "dry_run": dry, "ticket": None,
-            "reason": f"{last_reason} (gave up after {MAX_SEND_RETRIES} attempts)"}
+            "reason": f"{last_reason} (gave up after {attempt} attempt{'s' if attempt > 1 else ''})"}
 
 
 def open_position(symbol, direction, lots, sl, tp, dry_run=None, tag=None, bypass_position_cap=False):
@@ -176,7 +234,7 @@ def _modify_position_sltp(ticket, sl=None, tp=None):
         "magic": magic(),
     }
     with MT5_LOCK:
-        result = mt5.order_send(request)
+        result = _order_send(request)
         err = mt5.last_error() if result is None else None
     if result is None:
         return {"ok": False, "reason": f"order_send returned None ({err})."}
@@ -239,8 +297,7 @@ def _close_position(ticket, lots=None):
         }
         for filling in filling_modes(pos.symbol, info):
             request["type_filling"] = filling
-            with MT5_LOCK:
-                result = mt5.order_send(request)
+            result = _order_send(request)
             if result is None:
                 last_reason = "order_send returned None."
                 break

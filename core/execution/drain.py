@@ -1,6 +1,7 @@
 # core/execution/drain.py
 """Turns queued trade ideas into orders. Everything here is BLOCKING — call via asyncio.to_thread()."""
 
+import logging
 from config import ALERT_STATE
 from core.db import attach_trade_execution, set_signal_status
 from core.execution.common import EXEC_LOCK, fixed_lot
@@ -18,6 +19,11 @@ def execute_pending_intents():
         return []
     with EXEC_LOCK:
         return _drain_batch(batch)
+
+
+def _plain(text):
+    """Reason text goes inside a Markdown code span: underscores are safe there, backticks are not."""
+    return str(text).replace("`", "'")
 
 
 def _skip_intent(intent, dual, reason=""):
@@ -102,7 +108,7 @@ def _drain_batch(batch):
                 )
             else:
                 attach_trade_execution(intent["signal_id"], leg_no, None, leg_lots, "NONE", None)
-                leg_lines.append(f"❌ Leg {leg_no} ({label}) failed — {res['reason']}")
+                leg_lines.append(f"❌ Leg {leg_no} ({label}) failed — `{_plain(res['reason'])}`")
 
         if not leg1_ok:
             set_signal_status(intent["signal_id"], "SKIPPED")

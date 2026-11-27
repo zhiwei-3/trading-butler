@@ -14,6 +14,8 @@ FILL_COOLDOWN_S = 20                 # block new trade ideas this long after any
 EXEC_LOCK = threading.Lock()         # serialises check-and-open so two drains can never interleave
 
 RC_INVALID_FILL = getattr(mt5, "TRADE_RETCODE_INVALID_FILL", 10030)
+RC_INVALID_REQUEST = getattr(mt5, "TRADE_RETCODE_INVALID", 10013)
+RC_FILL_REJECTS = {RC_INVALID_FILL, RC_INVALID_REQUEST}     # brokers report an unsupported filling mode as either
 RC_RETRYABLE = {
     getattr(mt5, "TRADE_RETCODE_REQUOTE", 10004),
     getattr(mt5, "TRADE_RETCODE_PRICE_CHANGED", 10020),
