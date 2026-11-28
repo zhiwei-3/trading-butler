@@ -148,6 +148,21 @@ def _check_sequence(migrations):
 _check_sequence(MIGRATIONS)
 
 
+# ----------------------------------------------------------------
+
+def _v3_signal_strategy(conn):
+    """Which strategy produced each signal (per-strategy stats/cooldowns once several run on a schedule)."""
+    _add_column(conn, "signals", "strategy", "TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_strategy ON signals(strategy)")
+
+
+MIGRATIONS = (
+    (1, "baseline schema", _v1_baseline),
+    (2, "status/created_at indexes", _v2_status_indexes),
+    (3, "signal strategy column", _v3_signal_strategy),
+)
+
+
 # ---------------------------------------------------------------- runner
 
 def current_version(conn):

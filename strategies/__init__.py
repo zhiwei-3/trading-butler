@@ -15,13 +15,15 @@ working; no signals are generated and backtesting is refused.
 import importlib
 import logging
 import pkgutil
+from datetime import datetime, timezone
 
+from utils.schedule import parse_schedule, in_window
 from analysis import FEATURES
 from config import ALERT_STATE, TF_MINUTES
 from .base import Strategy, Param, Needs, Params, MarketData, BacktestData
 
 __all__ = [
-    "STRATEGIES", "STRATEGY_PRESETS", "get_strategy", "get_params", "sizing_summary", "get_runtime",
+    "STRATEGIES", "STRATEGY_PRESETS", "get_strategy", "active_strategies", "get_params", "sizing_summary", "gates_summary", "get_runtime",
     "reset_runtime", "resolve_param", "find_param", "plan_sweep", "params_overview",
     "Strategy", "Param", "Needs", "Params", "MarketData", "BacktestData",
 ]
@@ -30,6 +32,7 @@ STRATEGIES = {}
 _RUNTIME = {}          # strategy key -> mem dict (in-memory only)
 _WARNED = set()
 _NONE_NAMES = (None, "", "none")
+_GATE_LABELS = (("require_structure", "structure"), ("require_volume", "volume"))
 
 
 def _check(strat):
@@ -115,6 +118,23 @@ def get_strategy(name):
     return strat
 
 
+def active_strategies(now=None):
+    """Strategies allowed to trade right now, in schedule order (= priority).
+    Empty schedule -> just the single `active_strategy` (legacy behaviour)."""
+    entries = parse_schedule(ALERT_STATE.get("strategy_schedule", "off"))
+    if not entries:
+        strat = get_strategy(ALERT_STATE.get("active_strategy"))
+        return [strat] if strat else []
+    now = now or datetime.now(timezone.utc)
+    hour = now.hour + now.minute / 60.0
+    out = []
+    for key, start, end in entries:
+        strat = get_strategy(key)
+        if strat is not None and in_window(hour, start, end) and strat not in out:
+            out.append(strat)
+    return out
+
+
 def get_params(key):
     """Fresh Params snapshot of a strategy's current settings."""
     return Params(ALERT_STATE.get("strategy_params", {}).get(key, {}))
@@ -126,6 +146,11 @@ def sizing_summary(key=None):
     if p.get("dynamic_lots"):
         return f"{p['risk_pct']:g}% risk/trade, max {p['max_lot']:g} lots/leg"
     return f"{ALERT_STATE.get('fixed_lot_size', 0.01)} lots/leg (fixed)"
+
+
+def gates_summary(p):
+    """'structure ON · volume OFF' for the hard gates a strategy has; '—' if it has none."""
+    return " · ".join(f"{label} {'ON' if p[k] else 'OFF'}" for k, label in _GATE_LABELS if k in p) or "—"
 
 
 def get_runtime(key):

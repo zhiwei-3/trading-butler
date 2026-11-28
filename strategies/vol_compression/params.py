@@ -1,5 +1,5 @@
 from ..base import Param
-from .._lib import sizing_params
+from .._lib import sizing_params, volume_gate_params
 from utils.parsers import num, boolean, choice
 
 # Order matters: the default /optimize axes are the first two sweepable params -> min_bars, tp1_rr.
@@ -32,4 +32,4 @@ PARAMS = (
     Param("min_sl_atr", 0.8, num(0, 10, lo_open=True), ("min_sl",), "SL floor (ATR)"),
     Param("max_sl_atr", 3.0, num(0, 20, lo_open=True), ("max_sl",), "skip setups whose stop is wider than this (ATR)"),
     Param("dual", True, boolean, (), "2 legs: TP1 full close + TP2/BE runner"),
-) + sizing_params()
+) + volume_gate_params() + sizing_params()

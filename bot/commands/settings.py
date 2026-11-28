@@ -4,8 +4,12 @@ from telegram.ext import ContextTypes
 from config import (ALERT_STATE, TIMEFRAME_PRESETS, save_settings, apply_timeframe_mode,
                     find_setting, settable_groups)
 from strategies import (STRATEGY_PRESETS, STRATEGIES, reset_runtime, resolve_param,
-                        params_overview, Params)
+                        params_overview, Params, get_params, gates_summary)
 from bot.registry import command
+from utils.schedule import parse_schedule
+
+
+_GATES = {"structure": "require_structure", "volume": "require_volume"}
 
 
 # ---------------------------------------------------------------- core settings (generated from config.SCHEMA)
@@ -107,6 +111,14 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Invalid value for `{key}`: {e}.", parse_mode="Markdown")
         return
 
+    if spec.key == "strategy_schedule":
+        unknown = [k for k, _, _ in parse_schedule(val) if k not in STRATEGIES]
+        if unknown:
+            await update.message.reply_text(
+                f"❌ Unknown strategy `{', '.join(unknown)}`. Installed: `{'`, `'.join(STRATEGIES) or 'none'}`.",
+                parse_mode="Markdown")
+            return
+
     old_val = ALERT_STATE.get(spec.key)
     ALERT_STATE[spec.key] = val
     save_settings()
@@ -174,31 +186,31 @@ async def set_strategy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@command("filters", "Adjust Structure/Volume Filters", icon="🎛️", group="Strategy & Parameters", usage="/filters [structure|volume] [on|off]", order=4)
+@command("filters", "Per-Strategy Hard Gates (structure/volume)", icon="🎛️", group="Strategy & Parameters",
+         usage="/filters [strategy] [structure|volume] [on|off]", order=4)
 async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
+    args = [a.lower() for a in (context.args or [])]
+
     if not args:
-        reply = (
-            "🎛️ **STRATEGY FILTERS**\n\n"
-            f"• **Structure (BOS):** {'ON ✅' if ALERT_STATE['require_structure_break'] else 'OFF ❌'}\n"
-            f"• **Volume/ATR Filter:** {'ON ✅' if ALERT_STATE['require_volume_atr_filter'] else 'OFF ❌'}\n\n"
-            "**Usage:** `/filters structure on|off` or `/filters volume on|off`"
-        )
-        await update.message.reply_text(reply, parse_mode="Markdown")
+        lines = ["🎛️ **HARD GATES (per strategy)**\n"]
+        lines += [f"• `{key}` — {gates_summary(get_params(key))}" for key in STRATEGIES] or ["_No strategies installed._"]
+        lines.append(
+            "\n**Usage:** `/filters <strategy> structure|volume on|off`\n"
+            "Same as `/set <strategy>.require_structure|require_volume on|off`.\n"
+            "*The ATR/volume thresholds stay global (`atr_multiplier`, `volume_multiplier` in settings.json).*")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         return
 
-    if len(args) >= 2:
-        key, value = args[0].lower(), args[1].lower()
-        if key == "structure" and value in ("on", "off"):
-            ALERT_STATE["require_structure_break"] = (value == "on")
-            save_settings()
-            await update.message.reply_text(f"✅ Structure filter **{value.upper()}**", parse_mode="Markdown")
+    if len(args) == 3 and args[0] in STRATEGIES and args[1] in _GATES and args[2] in ("on", "off"):
+        skey, pkey = args[0], _GATES[args[1]]
+        if not any(prm.key == pkey for prm in STRATEGIES[skey].params):
+            await update.message.reply_text(f"❌ `{skey}` has no {args[1]} gate.", parse_mode="Markdown")
             return
-        elif key == "volume" and value in ("on", "off"):
-            ALERT_STATE["require_volume_atr_filter"] = (value == "on")
-            save_settings()
-            await update.message.reply_text(f"✅ Volume/ATR filter **{value.upper()}**", parse_mode="Markdown")
-            return
+        ALERT_STATE.setdefault("strategy_params", {}).setdefault(skey, {})[pkey] = (args[2] == "on")
+        save_settings()
+        await update.message.reply_text(f"✅ `{skey}` {args[1]} gate **{args[2].upper()}**", parse_mode="Markdown")
+        return
+
     await update.message.reply_text("⚠️ Invalid format. Send `/filters` alone to see usage.", parse_mode="Markdown")
 
 

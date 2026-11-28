@@ -8,7 +8,7 @@ from core.db.connection import get_db_connection, utc_now_str
 
 
 def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score,
-                     dual_entry=False, near_zone=None, reasoning=None):
+                     dual_entry=False, near_zone=None, reasoning=None, strategy=None):
     """Logs generated signal details to SQLite. Returns the new row id (or None)."""
     timestamp = datetime.now(timezone.utc).isoformat()
     zone_low = zone_high = zone_type = None
@@ -19,10 +19,10 @@ def log_signal_to_db(symbol, direction, entry_price, sl_price, tp1_price, tp2_pr
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO signals (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price,
-                                     score, status, dual_entry, zone_low, zone_high, zone_type, reasoning)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?)
+                                     score, status, dual_entry, zone_low, zone_high, zone_type, reasoning, strategy)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?)
             ''', (timestamp, symbol, direction, entry_price, sl_price, tp1_price, tp2_price, score,
-                  int(bool(dual_entry)), zone_low, zone_high, zone_type, reasoning))
+                  int(bool(dual_entry)), zone_low, zone_high, zone_type, reasoning, strategy))
             conn.commit()
             return cursor.lastrowid
     except Exception as e:

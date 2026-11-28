@@ -1,5 +1,5 @@
 from ..base import Param
-from .._lib import sizing_params
+from .._lib import sizing_params, volume_gate_params
 from utils.parsers import num, boolean, choice
 
 # Order matters: the default /optimize axes are the first two sweepable params -> entry_z, z_len.
@@ -26,4 +26,4 @@ PARAMS = (
           sweep=(0.8, 1.0, 1.2, 1.5)),
     Param("tp2_z", 1.0, num(0, 5), (), "dual only: TP2 sits this many std-devs beyond the mean"),
     Param("dual", False, boolean, (), "2 legs: TP1 (mean) full close + TP2/BE runner"),
-) + sizing_params()
+) + volume_gate_params() + sizing_params()

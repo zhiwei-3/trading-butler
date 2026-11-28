@@ -3,7 +3,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 
 from config import ALERT_STATE, BOT_START_TIME
-from strategies import get_strategy, get_params, sizing_summary
+from strategies import active_strategies, get_params, sizing_summary, gates_summary
 from core.db import get_sl_cooldown_remaining_s
 from core.mt5 import check_mt5_alive
 from core.execution import list_managed_positions
@@ -40,8 +40,9 @@ async def build_status_snapshot() -> str:
     cd_s = await asyncio.to_thread(get_sl_cooldown_remaining_s)
     cooldown_str = f"⏸️ {cd_s / 60:.0f}m left" if cd_s > 0 else "Clear"
 
-    strat = get_strategy(ALERT_STATE.get("active_strategy"))
-    strat_line = f"`{strat.key.upper()}` · `{strat.summary(get_params(strat.key))}`" if strat else "`NONE`"
+    active = active_strategies()
+    strat_line = " + ".join(f"`{s.key.upper()}`" for s in active) or "`NONE (outside schedule)`"
+    schedule = ALERT_STATE.get("strategy_schedule", "off")
 
     blocks = active_blocks()
     guards_line = "Clear" if not blocks else " · ".join(f"🔒 {n}: {md_safe(r)}" for n, r in blocks.items())
@@ -51,10 +52,11 @@ async def build_status_snapshot() -> str:
         f"• **MT5 Connection:** {'🟢 Connected' if mt5_ok else '🔴 Disconnected'}\n"
         f"• **Scanner:** {'🟢 Running' if ALERT_STATE['scanner_enabled'] else '🔴 Stopped'}\n"
         f"• **Auto-Trade:** {trade_mode} | **Open Positions:** `{open_managed}`\n"
-        f"• **Active Strategy:** {strat_line}\n"
-        f"• **Sizing:** `{sizing_summary(strat.key if strat else None)}`\n"
+        f"• **Active Now:** {strat_line}\n"
+        f"• **Schedule (UTC):** `{schedule}`\n"
+        f"• **Sizing:** `{sizing_summary(active[0].key if active else None)}`\n"
         f"• **Timeframe Mode:** `{ALERT_STATE['timeframe_mode']}`\n"
-        f"• **Structure Filter:** {'ON' if ALERT_STATE['require_structure_break'] else 'OFF'}\n"
+        f"• **Hard Gates:** {' · '.join(f'{s.key}: {gates_summary(get_params(s.key))}' for s in active) or '—'}\n"
         f"• **Volume/ATR Filter:** {'ON' if ALERT_STATE['require_volume_atr_filter'] else 'OFF'}\n"
         f"• **Guards:** {guards_line}\n"
         f"• **SL Cooldown:** {cooldown_str}\n"

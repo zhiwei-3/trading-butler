@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional
 
 from dotenv import load_dotenv
 
+from utils.schedule import schedule_text
 from utils.parsers import num, boolean, choice, choice_list
 from utils.logkit import audit
 
@@ -60,6 +61,8 @@ SCHEMA = (
     Setting("scanner_enabled", True, boolean),
     Setting("timeframe_mode", "scalp", choice(*TIMEFRAME_PRESETS)),
     Setting("active_strategy", "none"),
+    Setting("strategy_schedule", "off", schedule_text, ("schedule", "sessions"),
+            "Strategy Schedule (UTC)", "Scanner"),
     Setting("setup_forming_enabled", True, boolean),
     Setting("broker_utc_offset_hours", None),
     Setting("heartbeat_enabled", False, boolean),
@@ -68,8 +71,6 @@ SCHEMA = (
             "Max Spread", "Scanner", " pips"),
 
     # ---- shared analysis gates (computed by the core pipeline for every strategy; /filters toggles them)
-    Setting("require_structure_break", False, boolean),
-    Setting("require_volume_atr_filter", False, boolean),
     Setting("atr_multiplier", 1.0, num(0, 20, lo_open=True)),
     Setting("volume_multiplier", 1.2, num(0, 20, lo_open=True)),
 

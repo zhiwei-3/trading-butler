@@ -50,7 +50,7 @@ class SmcConfluence(Strategy):
 
     # ---- live
     def evaluate(self, a, p, mem):
-        found, mem["last"] = rules.scan(a, p, ALERT_STATE.get("require_structure_break", False), mem.get("last"))
+        found, mem["last"] = rules.scan(a, p, p["require_structure"], mem.get("last"))
         if not found:
             return []
 
@@ -79,7 +79,7 @@ class SmcConfluence(Strategy):
     # ---- backtest
     def decide(self, c):
         state = c["state"]
-        found, state["last"] = rules.scan(c["a"], c["p"], state["require_structure_break"], state.get("last"))
+        found, state["last"] = rules.scan(c["a"], c["p"], c["p"]["require_structure"], state.get("last"))
         if not found:
             return None
         return {"direction": found["direction"], "entry": c["close_price"], "score": found["score"],

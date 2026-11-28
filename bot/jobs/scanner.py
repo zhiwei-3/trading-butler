@@ -5,6 +5,7 @@ import logging
 from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, USER_ID
+from strategies import active_strategies
 from bot.registry import job
 from bot.messaging import send_text, send_alert
 from bot.jobs.circuit_breaker import evaluate_circuit_breaker
@@ -21,6 +22,8 @@ def _why(blocks):
 async def _scan_and_alert(context, chat_id, symbol):
     """Analysis → signal alerts + heads-up pings. Signal-scope guards suppress signals, never heads-ups."""
     try:
+        if not active_strategies():
+            return                      # outside every schedule window: nothing to analyse
         analysis = await asyncio.to_thread(analyze_market, symbol)
         if not analysis:
             return

@@ -8,7 +8,7 @@ import logging
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS
 from analysis import add_indicators, compute, View, default_config
-from strategies import get_strategy, get_params, get_runtime, MarketData
+from strategies import STRATEGIES, active_strategies, get_params, get_runtime, MarketData
 from core.db import log_signal_to_db, get_recent_trades_for_chart, set_signal_status
 from core.mt5 import fetch_candles, get_broker_utc_offset_seconds
 from core.execution import request_execution, trade_slot_blocker, calc_risk_lots
@@ -54,7 +54,7 @@ def _eval_setup_forming(a):
 
 
 def package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, base_msg, score=0, zone=None,
-                   reasons=None, risk=None, dual=False):
+                   reasons=None, risk=None, dual=False, strategy=None):
     """Logs the signal, queues live execution (if armed and the slot is free), and renders the alert.
     Receives the kwargs of a strategy's utils.common.signal_spec(...)."""
     symbol = a.get("symbol", "XAUUSD")
@@ -80,7 +80,7 @@ def package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, ba
 
     signal_id = log_signal_to_db(symbol, direction, close_price, sl_price, tp1_price, tp2_price, score,
                                  dual_entry=dual, near_zone=a.get("near_zone"),
-                                 reasoning="\n".join(reasons) if reasons else None)
+                                 reasoning="\n".join(reasons) if reasons else None, strategy=strategy)
 
     if signal_id is None and ALERT_STATE.get("auto_trade_enabled") and not blocker:
         blocker = "the signal could not be logged to the database, so no untracked trade will be opened."
@@ -95,7 +95,7 @@ def package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, ba
                                    score, dual_entry=dual, lots=lots_leg)
     trade_event("signal", signal=signal_id, symbol=symbol, dir=direction, entry=close_price,
                 sl=sl_price, tp1=tp1_price, tp2=tp2_price, score=score, dual=dual, lots=lots_leg,
-                queued=queued, skipped_because=blocker)
+                queued=queued, skipped_because=blocker, strategy=strategy)
 
     lot_disp = lots_leg if lots_leg else ALERT_STATE.get("fixed_lot_size", 0.01)
     exec_note = ""
@@ -123,7 +123,8 @@ def package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, ba
         )
 
     reasons_block = format_reasons(reasons)
-    full_msg = base_msg + "\n\n" + (reasons_block + "\n\n" if reasons_block else "") + pos_info + exec_note
+    strat_tag = f"🧩 **Strategy:** `{strategy}`\n\n" if strategy else ""
+    full_msg = base_msg + "\n\n" + strat_tag + (reasons_block + "\n\n" if reasons_block else "") + pos_info + exec_note
 
     try:
         trades_hist = get_recent_trades_for_chart(limit=30, symbol=symbol)
@@ -144,20 +145,21 @@ def package_signal(a, direction, close_price, sl_price, tp1_price, tp2_price, ba
 
 def analyze_market(symbol, features=None):
     """
-    features=None  -> compute only what the active strategy declares (+ the volume gate if enabled).  [scanner]
-    features=ALL   -> compute every public feature.                                                   [/gold, /diagnose]
+    features=None  -> compute only what the strategies active right now declare (+ the volume gate if enabled).  [scanner]
+    features=ALL   -> compute every public feature.                                                              [/gold, /diagnose]
     """
     entry_tf, trend_tf, macro_tf = ALERT_STATE["entry_tf"], ALERT_STATE["trend_tf"], ALERT_STATE["macro_tf"]
-    strat = get_strategy(ALERT_STATE.get("active_strategy"))
+    strats = active_strategies()          # whoever is inside their schedule window right now
 
     if features is None:
-        wanted = set(strat.needs.features) if strat else set()
-        if ALERT_STATE.get("require_volume_atr_filter"):
+        wanted = {f for s in strats for f in s.needs.features}
+        if any(get_params(s.key).get("require_volume") for s in strats):
             wanted.add("vol_filter_ok")
     else:
         wanted = set(features)
 
-    df_entry = fetch_candles(symbol, entry_tf, strat.needs.entry_bars if strat else 200)
+    entry_bars = max((s.needs.entry_bars for s in strats), default=200)
+    df_entry = fetch_candles(symbol, entry_tf, entry_bars)
     df_trend = fetch_candles(symbol, trend_tf, 200)
     df_macro = fetch_candles(symbol, macro_tf, 200)
     if df_entry is None or df_trend is None or df_macro is None:
@@ -184,45 +186,66 @@ def analyze_market(symbol, features=None):
         "macro_bullish": bool(df_macro['EMA_20'].iloc[-1] > df_macro['EMA_50'].iloc[-1]),
         **compute(wanted, view),
         "ctx": None,
+        "ctxs": {},                        # {strategy_key: ctx} - one per active strategy
     }
 
-    # Strategy connector: the strategy is pure, so WE fetch what it declared in `needs` and pass it in.
-    if strat is not None:
+    # Strategy connectors: strategies are pure, so WE fetch what they declared in `needs` and pass it in.
+    if strats:
         try:
-            extra = {name: fetch_candles(symbol, name, bars) for name, bars in strat.needs.extra}
+            extra_bars = {}                # one fetch per extra timeframe, deepest request wins
+            for s in strats:
+                for name, bars in s.needs.extra:
+                    extra_bars[name] = max(bars, extra_bars.get(name, 0))
+            extra = {name: fetch_candles(symbol, name, bars) for name, bars in extra_bars.items()}
             md = MarketData(symbol=symbol, entry=df_entry, trend=df_trend, macro=df_macro, extra=extra,
                             broker_offset_s=int(get_broker_utc_offset_seconds()))
-            a["ctx"] = strat.build_live_context(md, get_params(strat.key))
         except Exception:
-            logging.exception(f"Strategy '{strat.key}' build_live_context() failed — continuing without ctx.")
+            logging.exception("Could not assemble MarketData — continuing without strategy contexts.")
+        else:
+            for strat in strats:
+                try:
+                    a["ctxs"][strat.key] = strat.build_live_context(md, get_params(strat.key))
+                except Exception:
+                    logging.exception(f"Strategy '{strat.key}' build_live_context() failed — continuing without ctx.")
     return a
 
 
 def evaluate_signals(a, signals_allowed=True):
     """
-    Runs the active strategy's pure rules, then packages each resulting signal spec.
+    Runs every strategy that is inside its schedule window, in schedule order (= priority: the first signal
+    to claim the one-trade slot executes, later ones become alert-only).
     signals_allowed=False (a signal-scope guard blocked: SL cooldown, volume filter, ...) still lets
-    heads-up pings through, but the strategy's evaluate() is not called.
+    heads-up pings through, but evaluate() is not called.
     """
-    strat = get_strategy(ALERT_STATE.get("active_strategy"))
-    if strat is None:
-        return [], []          # nothing selected/installed -> no signals, no heads-up pings
+    active = active_strategies()
+    active_keys = {s.key for s in active}
+    for key in STRATEGIES:                 # sleeping strategies forget dedup/debounce so they start clean next window
+        if key not in active_keys:
+            get_runtime(key).clear()
 
-    p, mem = get_params(strat.key), get_runtime(strat.key)
+    signals, watches = [], []
+    watch_on = ALERT_STATE.get("setup_forming_enabled", True)
 
-    watches = []
-    if ALERT_STATE.get("setup_forming_enabled", True):
+    for strat in active:
+        view = {**a, "ctx": a.get("ctxs", {}).get(strat.key)}     # this strategy's own ctx under the usual key
+        p, mem = get_params(strat.key), get_runtime(strat.key)
+
+        if watch_on:
+            try:
+                watches += [f"{w}\n🧩 `{strat.key}`" for w in (strat.watch(view, p, mem) or [])]
+            except Exception:
+                logging.exception(f"Strategy '{strat.key}' watch() crashed — no heads-up this tick.")
+
+        if not signals_allowed:
+            continue
+        if p.get("require_volume") and not a.get("vol_filter_ok", False):
+            logging.debug(f"Strategy '{strat.key}' volume/ATR gate closed — no evaluate() this tick.")
+            continue                    # fail-closed: a missing feature blocks rather than passes
         try:
-            watches = strat.watch(a, p, mem) or []
+            specs = strat.evaluate(view, p, mem) or []
         except Exception:
-            logging.exception(f"Strategy '{strat.key}' watch() crashed — no heads-up this tick.")
+            logging.exception(f"Strategy '{strat.key}' evaluate() crashed — no signals this tick.")
+            continue
+        signals += [package_signal(view, strategy=strat.key, **spec) for spec in specs]
 
-    if not signals_allowed:
-        return [], watches
-
-    try:
-        specs = strat.evaluate(a, p, mem) or []
-    except Exception:
-        logging.exception(f"Strategy '{strat.key}' evaluate() crashed — no signals this tick.")
-        return [], watches
-    return [package_signal(a, **spec) for spec in specs], watches
+    return signals, watches

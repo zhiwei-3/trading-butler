@@ -68,6 +68,25 @@ def rsi_valid(p):
     return p["rsi_buy"] < p["rsi_sell"]
 
 
+def volume_gate_params(on=False):
+    """Hard gate, enforced generically by the evaluator and backtester: skip the strategy's signals unless
+    ATR and tick volume are above their recent averages (thresholds: the shared atr_/volume_multiplier)."""
+    return (
+        Param("require_volume", on, boolean, ("volume", "vol_gate"),
+              "hard gate: ATR and tick volume must be above their recent averages",
+              sweep=(False, True), legacy="require_volume_atr_filter"),
+    )
+
+
+def structure_gate_params(on=False):
+    """Hard gate honoured by the strategy's own rules (direction-dependent). Include only if the rules read it."""
+    return (
+        Param("require_structure", on, boolean, ("structure", "bos_gate"),
+              "hard gate: needs a fresh break of structure in the trade direction",
+              sweep=(False, True), legacy="require_structure_break"),
+    )
+
+
 # ---------------------------------------------------------------- targets
 def atr_targets(direction, a, p):
     """ATR/OB/S&R targets from an analysis dict (live `a` or backtest `c["a"]`). Missing features degrade gracefully."""

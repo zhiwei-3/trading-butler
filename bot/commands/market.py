@@ -15,7 +15,7 @@ from core.news_engine import fetch_economic_events
 from core.evaluator import analyze_market
 from core.guards.spread import pips_of_spread
 from charts import generate_chart_snapshot
-from strategies import get_strategy, get_params
+from strategies import active_strategies, get_params
 from ._common import admin_only, md_safe
 
 
@@ -305,8 +305,11 @@ async def diagnose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif ob.get("bearish_ob"):
         ob_status = f"Bearish OB @ ${ob.get('ob_level')}"
 
-    strat = get_strategy(ALERT_STATE.get("active_strategy"))
-    strat_lines = strat.diagnose(analysis, get_params(strat.key)) if strat else "🧩 *No active strategy*"
+    blocks = []
+    for strat in active_strategies():
+        view = {**analysis, "ctx": analysis.get("ctxs", {}).get(strat.key)}
+        blocks.append(strat.diagnose(view, get_params(strat.key)))
+    strat_lines = "\n\n".join(b for b in blocks if b) or "🧩 *No strategy active right now*"
 
     msg = (
         "🔍 **LIVE TRIGGER DIAGNOSTIC**\n\n"

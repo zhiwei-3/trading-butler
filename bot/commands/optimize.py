@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 from config import ALERT_STATE, TIMEFRAME_PRESETS, save_settings, apply_timeframe_mode
 from bot.registry import command, callback
 from bot.messaging import fit_lines
-from strategies import STRATEGIES, STRATEGY_PRESETS, get_params, plan_sweep, reset_runtime
+from strategies import STRATEGIES, STRATEGY_PRESETS, get_params, plan_sweep, reset_runtime, gates_summary
 from core.db import (
     get_sweep_run, get_latest_sweep_run, get_sweep_results,
     count_sweep_runs, get_sweep_history, get_sweep_history_ranked,
@@ -483,8 +483,6 @@ async def _optimize_run(update: Update, args, chat_id):
         axes=run_axes, min_sample=min_sample, elapsed_seconds=elapsed, rows=saved_rows,
     )
 
-    struct_gate = "ON ✅" if ALERT_STATE.get("require_structure_break") else "OFF ❌"
-    vol_gate = "ON ✅" if ALERT_STATE.get("require_volume_atr_filter") else "OFF ❌"
     run_tag = f" | 💾 `#{run_id}`" if run_id else " | ⚠️ *not saved (DB error)*"
     lines = [f"🧪 **OPTIMIZATION SWEEP — {label.upper()}** ({days}d | ⚡ `{elapsed}s`{run_tag})\n"]
 
@@ -493,7 +491,8 @@ async def _optimize_run(update: Update, args, chat_id):
     else:
         base_txt = "each strategy at its saved settings"
     lines.append(f"📌 **Base settings:** {base_txt} *(swept params override these)*")
-    lines.append(f"⚙️ **Hard Gates:** Structure: {struct_gate} | Vol/ATR: {vol_gate}")
+    gates_txt = gates_summary(get_params(keys[0])) if len(keys) == 1 else "per strategy"
+    lines.append(f"⚙️ **Hard Gates:** {gates_txt}")
     lines.append(f"📏 *Combos with < {min_sample} closed trades are shown but ranked last (unreliable sample size).*")
     lines.append(reliability_note + "\n")
 

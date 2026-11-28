@@ -1,5 +1,5 @@
 from ..base import Param
-from .._lib import sizing_params
+from .._lib import sizing_params, volume_gate_params
 from utils.parsers import num, boolean
 
 # Order matters: the default /optimize axes are the first two sweepable params -> adx_min, tp1_rr.
@@ -24,4 +24,4 @@ PARAMS = (
     Param("min_sl_atr", 0.8, num(0, 10, lo_open=True), ("min_sl",), "SL floor, protects against spread/wicks (ATR)", legacy="tb_min_sl_atr"),
     Param("max_sl_atr", 3.0, num(0, 20, lo_open=True), ("max_sl",), "skip setups whose stop is wider than this (ATR)", legacy="tb_max_sl_atr"),
     Param("dual", True, boolean, (), "2 legs: TP1 full close + TP2/BE runner", legacy="tb_dual_entry"),
-) + sizing_params(dynamic=True, legacy_dynamic=True)       # this strategy sizes by risk % (as before)
+) + volume_gate_params() + sizing_params(dynamic=True, legacy_dynamic=True)       # this strategy sizes by risk % (as before)

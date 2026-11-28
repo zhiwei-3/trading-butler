@@ -5,7 +5,7 @@ from telegram.ext import ContextTypes
 
 from config import ALERT_STATE, TIMEFRAME_PRESETS
 from bot.registry import command, callback
-from strategies import STRATEGIES, STRATEGY_PRESETS, find_param, get_params, Params
+from strategies import STRATEGIES, STRATEGY_PRESETS, find_param, get_params, Params, gates_summary
 from core.mt5 import get_gold_symbol
 from core.backtester import run_backtest
 from charts import generate_equity_chart
@@ -150,8 +150,6 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ) or "  • Not enough closed trades yet for a factor breakdown."
 
     param_lines = "\n".join(f"  • `{k}` = `{v}`" for k, v in list(result["params"].items())[:12])
-    struct_gate = "ON ✅" if ALERT_STATE.get("require_structure_break") else "OFF ❌"
-    vol_gate = "ON ✅" if ALERT_STATE.get("require_volume_atr_filter") else "OFF ❌"
     override_note = (
         f"\n🧪 **One-off overrides (live settings untouched):** `{', '.join(f'{k}={v}' for k, v in display.items())}`\n"
         if display else ""
@@ -161,7 +159,7 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🧪 **BACKTEST RESULTS — {result['mode'].upper()}** ({result['days']}d)\n"
         f"⚙️ **Strategy:** `{result['strategy'].replace('_', ' ').upper()}`{override_note}\n"
         f"**--- Parameters Used ---**\n{param_lines}\n"
-        f"• **Hard Gates:** Structure: {struct_gate} | Vol/ATR: {vol_gate}\n\n"
+        f"• **Hard Gates:** {gates_summary(Params(result['params']))}\n\n"
         f"**--- Performance ---**\n"
         f"• **Trades:** `{result['total_trades']}` | **Wins:** `{result['wins']}` | **Losses:** `{result['losses']}` | **Open:** `{result['open']}`\n"
         f"• **Win Rate:** `{result['win_rate']}%`\n"

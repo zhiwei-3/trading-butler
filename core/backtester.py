@@ -158,15 +158,13 @@ def run_backtest(symbol, days=30, timeframe_mode=None, spread_pips=2.0, progress
     p = Params({**get_params(strat.key), **(param_overrides or {})})     # one-off overrides never touch live settings
 
     state = {
-        "require_structure_break": ALERT_STATE["require_structure_break"],
-        "require_volume_atr_filter": ALERT_STATE["require_volume_atr_filter"],
         "fractal_window": ALERT_STATE["fractal_window"],
         "prev_ema_bearish": False,
         "prev_ema_bullish": False,
     }
-    state.update(strat.init_state(p))          # the strategy's own dedup/memory keys
+    state.update(strat.init_state(p))
 
-    gate_vol = bool(state["require_volume_atr_filter"])
+    gate_vol = bool(p.get("require_volume", False))
     feature_names = tuple(set(needs.features) | ({"vol_filter_ok"} if gate_vol else set()))
     cfg = default_config()
     macro_store = {}                           # macro-scope features are recomputed only when a macro bar closes
